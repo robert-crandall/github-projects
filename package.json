@@ -1,0 +1,34 @@
+{
+  "name": "github-projects",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "desktop": "tauri dev",
+    "desktop:build": "tauri build --bundles app",
+    "install-app": "npm run desktop:build && ditto \"src-tauri/target/release/bundle/macos/GitHub Projects.app\" \"/Applications/GitHub Projects.app\"",
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test src/domain/*.test.ts src/*.test.ts",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@js-temporal/polyfill": "^0.5.1",
+    "@tauri-apps/api": "^2.11.1",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@tauri-apps/cli": "^2.11.4",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "~5.9.2",
+    "vite": "^7.1.3"
+  }
+}

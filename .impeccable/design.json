@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-08T18:19:25.327Z",
+  "title": "Design System: GitHub Projects",
+  "extensions": {
+    "colorMeta": {
+      "substrate": { "role": "neutral", "displayName": "Dusk substrate" },
+      "base": { "role": "neutral", "displayName": "Dusk base" },
+      "panel": { "role": "neutral", "displayName": "Dusk panel" },
+      "hover": { "role": "neutral", "displayName": "Surface hover" },
+      "pressed": { "role": "neutral", "displayName": "Surface active" },
+      "selected": { "role": "neutral", "displayName": "Surface selected" },
+      "border": { "role": "neutral", "displayName": "Neutral veil border" },
+      "input-border": { "role": "neutral", "displayName": "Control border" },
+      "text": { "role": "neutral", "displayName": "Warm primary text" },
+      "subtext": { "role": "neutral", "displayName": "Warm supporting text" },
+      "muted": { "role": "neutral", "displayName": "Decorative muted text" },
+      "primary": { "role": "primary", "displayName": "Fern primary control and signal" },
+      "on-primary": { "role": "primary", "displayName": "Primary on-fill" },
+      "primary-tint": { "role": "primary", "displayName": "Primary tint" },
+      "primary-on-tint": { "role": "primary", "displayName": "Primary on-tint" },
+      "secondary-text": { "role": "secondary", "displayName": "Review and team text" },
+      "danger": { "displayName": "Danger text" },
+      "danger-border": { "displayName": "Danger tint border" },
+      "warn": { "displayName": "Warning text" },
+      "warn-border": { "displayName": "Warning tint border" }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Page heading", "purpose": "Default page heading; responsive and detail overrides remain component-local." },
+      "title": { "displayName": "Section title", "purpose": "Recurring section headings; the focused commitment has a larger local treatment." },
+      "body": { "displayName": "Body paragraph", "purpose": "Native text at the root size with paragraph line-height, not a universal control line-height." },
+      "row-title": { "displayName": "Work row title", "purpose": "Compact queue title with medium weight." },
+      "label": { "displayName": "Supporting label", "purpose": "Field help and short supporting labels." },
+      "metadata": { "displayName": "Row metadata", "purpose": "Source and reason text below a work title." }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      { "name": "wide-min", "value": "1500px" },
+      { "name": "compact-desktop-max", "value": "1100px" },
+      { "name": "single-column-max", "value": "760px" },
+      { "name": "narrow-max", "value": "460px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The immediate primary action. Inset hover stroke and zero-offset focus keep the control in place.",
+      "html": "<button class=\"ds-primary\" type=\"button\">Start action</button>",
+      "css": ".ds-primary { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: 650; line-height: 1.35; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px; padding: 11px 18px; border: 1px solid var(--primary); border-radius: 6px; background: var(--primary); color: var(--on-primary); cursor: pointer; } .ds-primary:hover { background: var(--primary); color: var(--on-primary); box-shadow: inset 0 0 0 1px var(--on-primary); } .ds-primary:active { background: var(--primary-tint); color: var(--primary-on-tint); } .ds-primary:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } .ds-primary:disabled { cursor: not-allowed; color: var(--subtext); background: var(--substrate); border-color: var(--border); box-shadow: none; }"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A neutral surfaced alternative with a persistent control boundary.",
+      "html": "<button class=\"ds-secondary\" type=\"button\">Restore action</button>",
+      "css": ".ds-secondary { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.35; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 7px 12px; border: 1px solid var(--input-border); border-radius: 6px; background: var(--panel); color: var(--text); cursor: pointer; } .ds-secondary:hover { background: var(--hover); } .ds-secondary:active { background: var(--pressed); } .ds-secondary:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } .ds-secondary:disabled { cursor: not-allowed; color: var(--subtext); background: var(--substrate); border-color: var(--border); }"
+    },
+    {
+      "name": "Quiet button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "Visible secondary decisions without a filled surface at rest.",
+      "html": "<button class=\"ds-quiet\" type=\"button\">Cancel</button>",
+      "css": ".ds-quiet { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.35; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 7px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--subtext); cursor: pointer; } .ds-quiet:hover { background: var(--hover); color: var(--text); } .ds-quiet:active { background: var(--pressed); } .ds-quiet:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } .ds-quiet:disabled { cursor: not-allowed; color: var(--subtext); background: var(--substrate); border-color: var(--border); }"
+    },
+    {
+      "name": "Icon button",
+      "kind": "button",
+      "refersTo": "button-icon",
+      "description": "Compact close control with a descriptive accessible name.",
+      "html": "<button class=\"ds-icon\" type=\"button\" aria-label=\"Close demo scenarios\"><svg class=\"ds-icon-svg\" xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/></svg></button>",
+      "css": ".ds-icon { display: inline-flex; align-items: center; justify-content: center; width: 34px; min-width: 34px; min-height: 34px; padding: 6px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--subtext); cursor: pointer; } .ds-icon-svg { flex-shrink: 0; } .ds-icon:hover { background: var(--hover); } .ds-icon:active { background: var(--pressed); } .ds-icon:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } .ds-icon:disabled { cursor: not-allowed; color: var(--subtext); background: var(--substrate); border-color: var(--border); }"
+    },
+    {
+      "name": "Labeled text field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Native field with a visible label, reserved border, and a primary border shift on focus.",
+      "html": "<label class=\"ds-field\">Next concrete step<input class=\"ds-input\" value=\"Review the requested change\" /></label>",
+      "css": ".ds-field { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: 500; color: var(--text); } .ds-input { flex-basis: 100%; width: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; font-weight: 400; line-height: 1.5; background: var(--substrate); color: var(--text); border: 1px solid var(--input-border); border-radius: 6px; padding: 10px 12px; } .ds-input::placeholder { color: var(--subtext); } .ds-input:focus, .ds-input:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; border-color: var(--primary); }"
+    },
+    {
+      "name": "Selected navigation",
+      "kind": "nav",
+      "refersTo": "navigation-selected",
+      "description": "Neutral selection, a small primary marker, and an explicit current-page label.",
+      "html": "<nav class=\"ds-nav\" aria-label=\"Main navigation\"><button class=\"ds-nav-item ds-selected\" type=\"button\" aria-current=\"page\">Now<span class=\"ds-marker\" aria-hidden=\"true\"></span></button><button class=\"ds-nav-item\" type=\"button\">Waiting</button></nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 5px; background: var(--substrate); } .ds-nav-item { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; line-height: 1.35; display: inline-flex; align-items: center; justify-content: flex-start; width: 100%; min-height: 36px; padding: 10px 12px; gap: 12px; color: var(--subtext); background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; } .ds-nav-item:hover { background: var(--hover); } .ds-nav-item:active { background: var(--pressed); } .ds-nav-item.ds-selected { background: var(--selected); color: var(--text); } .ds-nav-item:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } .ds-marker { width: 5px; height: 5px; margin-left: auto; border-radius: 50%; background: var(--primary); } @media (max-width: 760px) { .ds-nav { flex-direction: row; overflow-x: auto; } .ds-nav-item { width: auto; gap: 6px; font-size: 12px; min-height: 39px; padding: 8px 10px; flex-shrink: 0; } .ds-marker { display: none; } }"
+    },
+    {
+      "name": "Supporting panel",
+      "kind": "card",
+      "refersTo": "panel",
+      "description": "The existing demo-panel treatment: neutral ground, a hairline boundary, and secondary explanatory text.",
+      "html": "<section class=\"ds-panel\" aria-label=\"Demo scenarios\"><h2 class=\"ds-panel-title\">Demo scenarios</h2><p class=\"ds-panel-copy\">Time moves forward only. No live sync, AI, or OS notifications.</p></section>",
+      "css": ".ds-panel { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; color: var(--text); background: var(--substrate); border: 1px solid var(--border); border-radius: 8px; padding: 22px; margin-bottom: 30px; } .ds-panel-title { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.4; letter-spacing: -.015em; text-wrap: balance; } .ds-panel-copy { margin: 7px 0 15px; font-size: 12px; line-height: 1.55; color: var(--subtext); } @media (max-width: 460px) { .ds-panel { padding: 18px; } }"
+    },
+    {
+      "name": "Work row",
+      "kind": "custom",
+      "refersTo": "work-row",
+      "description": "Compact work title and source/reason text, with a separate quiet Start control.",
+      "html": "<div class=\"ds-work-row\"><button class=\"ds-row-body\" type=\"button\"><span class=\"ds-row-title\">Review the requested change</span><span class=\"ds-row-meta\">Direct review request</span></button><button class=\"ds-row-action\" type=\"button\" aria-label=\"Start Review the requested change\">Start</button></div>",
+      "css": ".ds-work-row { display: flex; align-items: center; gap: 13px; min-width: 0; min-height: 68px; border-bottom: 1px solid var(--border); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 14px; } .ds-row-body, .ds-row-action { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.35; display: inline-flex; min-height: 36px; border: 1px solid transparent; border-radius: 6px; background: transparent; cursor: pointer; } .ds-row-body { text-align: left; display: flex; flex: 1; align-items: flex-start; flex-direction: column; gap: 6px; min-width: 0; padding: 10px 4px; color: var(--text); } .ds-row-title { font-size: 14px; font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; } .ds-row-meta { color: var(--subtext); font-size: 11px; line-height: 1.6; } .ds-row-action { padding: 7px 8px; align-items: center; justify-content: center; font-size: 12px; white-space: nowrap; flex-shrink: 0; color: var(--subtext); } .ds-row-body:hover, .ds-row-action:hover { background: var(--hover); } .ds-row-action:hover { color: var(--text); } .ds-row-body:active, .ds-row-action:active { background: var(--pressed); } .ds-row-body:focus-visible, .ds-row-action:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } @media (max-width: 460px) { .ds-work-row { gap: 9px; padding: 3px 0; } .ds-row-body { gap: 5px; } .ds-row-title { font-size: 13px; } .ds-row-action { padding-inline: 5px; font-size: 11px; } }"
+    },
+    {
+      "name": "Supporting disclosure",
+      "kind": "custom",
+      "refersTo": "disclosure",
+      "description": "Native details reveal supporting evidence on request; focus stays visible without a moving hover treatment.",
+      "html": "<details class=\"ds-disclosure\"><summary class=\"ds-summary\">Original captures &amp; sources</summary><div class=\"ds-disclosure-body\"><p class=\"ds-disclosure-copy\">Original text retained locally</p></div></details>",
+      "css": ".ds-disclosure { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--text); border-top: 1px solid var(--border); margin-top: 26px; } .ds-summary { padding: 18px 0; font-size: 14px; line-height: 1.6; cursor: pointer; } .ds-summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 0; } .ds-disclosure-body { padding: 3px 0 15px; } .ds-disclosure-copy { margin: 12px 0 0; font-size: 12px; line-height: 1.55; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "One primary thing. Calm surface.",
+    "overview": "I document the implemented application's semantic projections, not a new visual identity. [Ultra Dusk](docs/theme.md), the supplied [Design System](docs/Design%20System.md), and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) remain the visual and interaction authorities. This document and its sidecar defer to them. The frontmatter records reusable implementation values; it does not replace, reinterpret, or extend the supplied Dusk palette.\n\nI preserve the pinned world: lavender-cast neutral surfaces, warm text, native system sans, and fern on the primary control. Hierarchy comes from placement, space, type, and concise labels. Supporting information remains available without requiring attention at the same time.",
+    "keyCharacteristics": [
+      "One primary thing on a calm neutral surface.",
+      "Native typography with scannable, short supporting text.",
+      "Restrained semantic accents and precomputed foreground pairings.",
+      "Visible, zero-offset focus and instant, non-moving control states.",
+      "Optional drill-in detail with clear paths back."
+    ],
+    "rules": [
+      { "name": "The Neutral Area Rule", "body": "Large surfaces stay neutral; small semantic accents identify actions and state. Color supplements labels, icons, and structure.", "section": "colors" },
+      { "name": "The Paired Foreground Rule", "body": "Use the supplied on-fill and on-tint pairings. Do not calculate new blends or add local fallback colors.", "section": "colors" },
+      { "name": "The In-Place State Rule", "body": "Control states are instant: no hover translation, scaling, padding change, or newly introduced layout border.", "section": "components" }
+    ],
+    "dos": [
+      "**Do** defer to the supplied Dusk theme and interaction documents before extending this application projection.",
+      "**Do** keep large surfaces neutral and use semantic foreground pairings.",
+      "**Do** build hierarchy with native typography, spacing, labels, and restrained emphasis.",
+      "**Do** keep focus visible at zero offset and preserve control geometry across states.",
+      "**Do** keep supporting detail optional and provide a clear path back.",
+      "**Do** keep success brief and explicit, and failures diagnostic."
+    ],
+    "donts": [
+      "**Don't** replace the pinned world with a new brand, webfont, or monospace interface.",
+      "**Don't** turn the focus workspace into a dense multipanel project dashboard.",
+      "**Don't** use full-window accent fills or color as the only state signal.",
+      "**Don't** add decorative motion, hover lift, or scaling.",
+      "**Don't** turn incidental measurements, unused tokens, or implementation defects into design rules.",
+      "**Don't** invent tonal ramps, service status, or external execution that the prototype does not supply."
+    ]
+  }
+}
