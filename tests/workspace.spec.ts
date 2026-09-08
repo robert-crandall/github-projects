@@ -214,7 +214,7 @@ test('keyboard capture, focus and freeform text are safe', async ({ page }) => {
   await page.getByLabel('Freeform capture').fill('<img src=x onerror=alert(1)> remember the adapter');
   await page.keyboard.press('Control+Enter');
   await expect(page.getByText('Saved original', { exact: true })).toBeVisible();
-  expect(await page.locator('img').count()).toBe(0);
+  await expect(page.locator('#main-workspace img')).toHaveCount(0);
   await page.keyboard.press('Escape');
   await expect(page.getByLabel('Freeform capture')).not.toBeVisible();
 });

@@ -3,15 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "bun@1.3.14",
   "scripts": {
     "tauri": "tauri",
     "desktop": "tauri dev",
     "desktop:build": "tauri build --bundles app",
-    "install-app": "npm run desktop:build && ditto \"src-tauri/target/release/bundle/macos/GitHub Projects.app\" \"/Applications/GitHub Projects.app\"",
+    "install-app": "bun run desktop:build && ditto \"src-tauri/target/release/bundle/macos/GitHub Projects.app\" \"/Applications/GitHub Projects.app\"",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "test": "node --test src/domain/*.test.ts src/*.test.ts",
+    "test": "bun test",
     "test:browser": "playwright test"
   },
   "dependencies": {

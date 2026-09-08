@@ -9,12 +9,12 @@ I use the existing GitHub CLI and Copilot sign-ins rather than an OAuth app regi
 Prerequisites:
 
 - macOS with Xcode Command Line Tools and a current Rust toolchain.
-- Node.js and npm.
+- Bun 1.3.14 or later.
 - GitHub CLI (`gh`) and Copilot CLI installed and signed in.
 
 ```bash
-npm install
-npm run desktop
+bun install --frozen-lockfile
+bun run desktop
 ```
 
 Open **Connections** to inspect executable paths and refresh GitHub. If Finder cannot locate a CLI, enter its absolute executable path there. Do not enter tokens or shell commands.
@@ -24,7 +24,7 @@ The app starts with an empty real workspace, not demo fixtures. Capture and manu
 ## Build a local app
 
 ```bash
-npm run desktop:build
+bun run desktop:build
 ```
 
 The `.app` bundle is produced under `src-tauri/target/release/bundle/macos/`. Launch that bundle to enable and exercise macOS notifications; the unbundled development binary reports native reminders as unavailable.
@@ -32,7 +32,7 @@ The `.app` bundle is produced under `src-tauri/target/release/bundle/macos/`. La
 To build and install the app in `/Applications/GitHub Projects.app`, quit GitHub Projects first, then run:
 
 ```bash
-npm run install-app
+bun run install-app
 ```
 
 This also updates an existing installation without changing the workspace stored in the macOS app-data directory.
@@ -72,7 +72,7 @@ GitHub search limits and failed enrichment are surfaced. Absence from a search i
 ## Keep using the browser prototype
 
 ```bash
-npm run dev
+bun run dev
 ```
 
 Open the Vite URL, normally `http://127.0.0.1:5173`. This mode retains the synthetic fixtures, simulated clock, and demo scenarios. It does not use live integrations.
@@ -88,11 +88,13 @@ Keep the original browser data until the imported work is satisfactory. A comple
 ## Development
 
 ```bash
-npm test
-npm run build
-npm run test:browser
+bun test
+bun run build
+bun run test:browser
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+Bun manages dependencies through `bun.lock` and runs the JavaScript tooling. `bun test` runs the unit tests in `src`; browser tests use the separate Playwright command.
 
 Playwright covers the retained browser demo and the desktop renderer against a mock of the typed IPC contract. Rust tests cover native boundaries; a mock renderer test alone does not prove real GitHub, Copilot, or macOS notification delivery.
 
