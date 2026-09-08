@@ -45,7 +45,7 @@ Signing and notarization are intentionally out of scope. Keep the installed GitH
 
 - **Capture first:** original text reaches durable storage before Copilot receives it. Failed interpretation leaves the original and an editable task.
 - **Now / Next / Later:** active work stays in place. Due routines remain visible; quick reviews get preference without a quota.
-- **GitHub:** read-only discovery using the successful digest's direct requests, specific team requests, authored PRs, mentions, prior reviews, and assigned issues. Local decisions and notes survive refresh.
+- **GitHub:** read-only discovery using the successful digest's direct requests, specific team requests, authored PRs, mentions, prior reviews, and assigned issues. All searches exclude archived repositories. Local decisions and notes survive refresh.
 - **Copilot:** the Rust backend hosts the SDK. Typed proposals structure captures and help order up to 40 actionable items; the model does not own storage, clocks, or completion.
 - **Routines:** ordered daily steps in an explicit timezone, with daylight-saving-aware calendar recurrence. Missed days become history around one outstanding occurrence, not catch-up flag increases.
 - **Persistence:** SQLite in the macOS app-data directory. Writes use revision checks; failure never silently replaces existing data.

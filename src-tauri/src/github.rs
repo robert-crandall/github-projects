@@ -96,6 +96,7 @@ fn search_args(bucket: Bucket, now: DateTime<Utc>) -> Vec<String> {
         ));
     }
     args.extend([
+        "archived:false".into(),
         "--state=open".into(),
         "--limit".into(),
         LIMIT.to_string(),
@@ -366,6 +367,20 @@ mod tests {
                 .contains(&format!("team-review-requested:{TEAM}"))
         );
         assert!(direct.contains(&"50".to_string()));
+    }
+    #[test]
+    fn every_search_excludes_archived_repositories() {
+        for bucket in [
+            Bucket::Direct,
+            Bucket::Team,
+            Bucket::Authored,
+            Bucket::Mention,
+            Bucket::Reviewed,
+            Bucket::Assigned,
+        ] {
+            let args = search_args(bucket, Utc::now());
+            assert!(args.contains(&"archived:false".to_owned()), "{bucket:?}");
+        }
     }
     #[test]
     fn real_diff_data_and_weak_signals_remain_distinct() {
