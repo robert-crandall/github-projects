@@ -4,6 +4,7 @@ import { nextDailyDue, systemTimeZone, timestamp, validateTime, validateTimeZone
 import { isActionable } from './ranking.ts';
 import type { AppState, Capture, Source, Step, WorkItem } from './types.ts';
 import { eligibleActive } from './undo.ts';
+import { canonicalGitHubReference, githubReferences, wakeItem } from './sleep.ts';
 
 export function createDesktopState(clock = new Date().toISOString()): AppState {
   const now = new Date(timestamp(clock)).toISOString();
@@ -143,10 +144,21 @@ export function mergeGitHubSnapshot(state: AppState, snapshot: GitHubSnapshot): 
   boundedText(snapshot.login, 'GitHub login', 100);
   snapshot.warnings.forEach(warning => boundedText(warning, 'GitHub warning'));
   const fetchedAt = new Date(timestamp(snapshot.fetchedAt)).toISOString();
+  if (snapshot.pings !== undefined && (!Array.isArray(snapshot.pings) || snapshot.pings.length > 2000)) {
+    throw new Error('Invalid GitHub pings.');
+  }
+  const pings = (snapshot.pings ?? []).map(ping => {
+    if (!object(ping) || !['mention', 'review-request'].includes(ping.kind)
+      || typeof ping.reference !== 'string' || !canonicalGitHubReference(ping.reference)
+      || typeof ping.at !== 'string' || timestamp(ping.at) > timestamp(fetchedAt)) {
+      throw new Error('GitHub pings must contain a safe source and a past event time.');
+    }
+    return { ...ping, reference: canonicalGitHubReference(ping.reference)! };
+  });
   if (!isAppState({ ...createDesktopState(fetchedAt), items: snapshot.items })) throw new Error('Invalid GitHub work items.');
   for (const item of snapshot.items) {
-    if (!item.id || item.routine || item.kind === 'routine' || item.status !== 'available'
-      || !item.sources.length || item.sources.some(source => source.kind !== 'github' || !safeGitHubReference(source.reference))
+    if (!item.id || item.routine || item.sleep || item.wake || item.kind === 'routine' || item.status !== 'available'
+      || !item.sources.length || item.sources.some(source => source.kind !== 'github' || !canonicalGitHubReference(source.reference))
       || (item.kind === 'review' && !item.review?.identity)
       || (item.review?.identity && !canonicalReviewUrl(item.review.identity))) {
       throw new Error('GitHub items must contain safe source evidence, not local decisions.');
@@ -159,11 +171,15 @@ export function mergeGitHubSnapshot(state: AppState, snapshot: GitHubSnapshot): 
   }
   const seen = new Set<string>();
   for (const fresh of incoming) {
-    let existing = state.items.find(item => item.id === fresh.id);
-    if (existing && (existing.kind !== fresh.kind || existing.review?.identity !== fresh.review?.identity)) {
+    const references = githubReferences(fresh);
+    // A different discovery bucket must not bypass a local sleep or wake decision.
+    let existing = state.items.find(item => (item.sleep || item.wake)
+      && githubReferences(item).some(reference => references.includes(reference)))
+      ?? state.items.find(item => item.id === fresh.id);
+    if (existing?.id === fresh.id && (existing.kind !== fresh.kind || existing.review?.identity !== fresh.review?.identity)) {
       throw new Error('A GitHub item ID changed its underlying action.');
     }
-    const duplicates = fresh.kind === 'review' && fresh.review?.identity
+    const duplicates = fresh.kind === 'review' && (!existing || existing.kind === 'review') && fresh.review?.identity
       ? state.items.filter(item => item.kind === 'review' && item.review?.identity === fresh.review!.identity) : [];
     for (const duplicate of duplicates) {
       if (!existing) existing = duplicate;
@@ -176,7 +192,9 @@ export function mergeGitHubSnapshot(state: AppState, snapshot: GitHubSnapshot): 
     } else {
       const alreadySeen = seen.has(existing.id);
       existing.sources = mergeSources(alreadySeen ? existing.sources : existing.sources.filter(source => source.kind !== 'github'), fresh.sources);
-      existing.review = alreadySeen ? reviewRequest(existing.review, fresh.review) : structuredClone(fresh.review);
+      if (existing.kind === fresh.kind) {
+        existing.review = alreadySeen ? reviewRequest(existing.review, fresh.review) : structuredClone(fresh.review);
+      }
       if (fresh.evidence !== undefined) existing.evidence = fresh.evidence;
       else delete existing.evidence;
       existing.signalCurrent = true;
@@ -187,22 +205,23 @@ export function mergeGitHubSnapshot(state: AppState, snapshot: GitHubSnapshot): 
     if (!snapshot.warnings.length && item.sources.some(source => source.kind === 'github') && !seen.has(item.id)) {
       item.signalCurrent = false;
     }
+    if (item.status !== 'deferred' || !item.sleep) continue;
+    const references = githubReferences(item);
+    const ping = item.sleep.wakeOnPing
+      ? pings.filter(ping => references.includes(ping.reference) && timestamp(ping.at) > timestamp(item.sleep!.since))
+        .sort((a, b) => timestamp(a.at) - timestamp(b.at))[0]
+      : undefined;
+    if (item.availableAt && timestamp(item.availableAt) <= timestamp(fetchedAt)
+      && (!ping || timestamp(item.availableAt) <= timestamp(ping.at))) {
+      wakeItem(item, item.availableAt, 'time');
+    } else if (ping) {
+      wakeItem(item, ping.at, ping.kind);
+    }
   }
   state.sync = { status: 'ok', lastSuccessAt: fetchedAt, login: snapshot.login, warnings: [...snapshot.warnings] };
   delete state.aiRanking;
   eligibleActive(state);
   return state;
-}
-
-function safeGitHubReference(value: string | undefined): boolean {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'github.com' && !url.username && !url.password && !url.port
-      && /^\/[a-z\d-]+\/[a-z\d_.-]+\/(?:pull|issues)\/[1-9]\d*\/?$/i.test(url.pathname);
-  } catch {
-    return false;
-  }
 }
 
 function getCapture(state: AppState, id: string): Capture {

@@ -7,6 +7,7 @@ import { isActionable, reconcileAiRanking } from './ranking.ts';
 import { applyCaptureProposal, applyRankingProposal, boundedText, interpretationFailure, mergeGitHubSnapshot, proposedSteps } from './live.ts';
 import type { AppState, Capture, Command, Occurrence, Scenario, WorkItem } from './types.ts';
 import { eligibleActive, recordDecision, retainUndoForItems, undoDecision } from './undo.ts';
+import { githubReferences, wakeItem } from './sleep.ts';
 
 function requiredText(text: string, label: string): string {
   if (!text.trim()) throw new Error(`${label} cannot be empty.`);
@@ -307,13 +308,26 @@ function applyCommandInternal(state: AppState, command: Command): AppState {
       }
       clearActive(next, item.id);
       break;
+    case 'sleep':
     case 'defer':
       requireOpen(item);
-      item.reason = requiredText(command.reason, 'Deferral reason');
+      if (command.type === 'sleep') {
+        if (typeof command.wakeOnPing !== 'boolean') throw new Error('Choose whether a new GitHub ping should wake this action.');
+        if (command.wakeOnPing && (next.runtime !== 'desktop' || !githubReferences(item).length)) {
+          throw new Error('Wake on ping requires a linked GitHub issue or PR in the desktop app.');
+        }
+        item.sleep = { since: next.clock, wakeOnPing: command.wakeOnPing };
+        if (command.reason?.trim()) item.reason = command.reason.trim();
+        else delete item.reason;
+      } else {
+        item.reason = requiredText(command.reason, 'Deferral reason');
+        delete item.sleep;
+      }
       if (command.until && timestamp(command.until) <= timestamp(next.clock)) {
-        throw new Error('Choose a future time for deferral.');
+        throw new Error('Choose a future wake-up time.');
       }
       item.status = 'deferred';
+      delete item.wake;
       if (command.until) item.availableAt = new Date(timestamp(command.until)).toISOString();
       else delete item.availableAt;
       clearActive(next, item.id);
@@ -323,6 +337,7 @@ function applyCommandInternal(state: AppState, command: Command): AppState {
       item.status = 'waiting';
       item.reason = requiredText(command.reason, 'Waiting reason');
       delete item.availableAt;
+      delete item.sleep;
       clearActive(next, item.id);
       break;
     case 'restore': {
@@ -330,9 +345,7 @@ function applyCommandInternal(state: AppState, command: Command): AppState {
       if (item.status === 'available' && !item.availableAt && !occurrence?.snoozedUntil) {
         throw new Error('This action is already available.');
       }
-      item.status = 'available';
-      delete item.reason;
-      delete item.availableAt;
+      wakeItem(item, next.clock, 'manual');
       delete item.completedAt;
       if (occurrence) delete occurrence.snoozedUntil;
       if (next.runtime === 'desktop' && item.routine) {
@@ -344,6 +357,7 @@ function applyCommandInternal(state: AppState, command: Command): AppState {
     case 'remove':
       if (item.status === 'removed') throw new Error('This action is already removed.');
       item.status = 'removed';
+      delete item.sleep;
       clearActive(next, item.id);
       break;
     case 'edit':
@@ -438,7 +452,7 @@ function applyCommandInternal(state: AppState, command: Command): AppState {
 export function applyCommand(state: AppState, command: Command): AppState {
   const next = applyCommandInternal(state, command);
   if (state.runtime === 'desktop') {
-    if (['capture', 'edit', 'complete', 'defer', 'wait', 'restore', 'remove', 'step', 'skip', 'undo'].includes(command.type)) {
+    if (['capture', 'edit', 'complete', 'defer', 'sleep', 'wait', 'restore', 'remove', 'step', 'skip', 'undo'].includes(command.type)) {
       delete next.aiRanking;
     }
     reconcileAiRanking(next);

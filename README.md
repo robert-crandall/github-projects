@@ -45,7 +45,7 @@ Signing and notarization are intentionally out of scope. Keep the installed GitH
 
 - **Capture first:** original text reaches durable storage before Copilot receives it. Failed interpretation leaves the original and an editable task.
 - **Now / Next / Later:** active work stays in place. Due routines remain visible; quick reviews get preference without a quota.
-- **GitHub:** read-only discovery using the successful digest's direct requests, specific team requests, authored PRs, mentions, prior reviews, and assigned issues. All searches exclude archived repositories. Local decisions and notes survive refresh.
+- **GitHub:** read-only discovery using the successful digest's direct requests, specific team requests, authored PRs, PR and issue @mentions, prior reviews, and assigned issues. All searches exclude archived repositories. Local decisions and notes survive refresh.
 - **Copilot:** the Rust backend hosts the SDK. Typed proposals structure captures and help order up to 40 actionable items; the model does not own storage, clocks, or completion.
 - **Routines:** ordered daily steps in an explicit timezone, with daylight-saving-aware calendar recurrence. Missed days become history around one outstanding occurrence, not catch-up flag increases.
 - **Persistence:** SQLite in the macOS app-data directory. Writes use revision checks; failure never silently replaces existing data.
@@ -68,6 +68,18 @@ Copilot receives captured text or bounded task evidence needed for a suggestion,
 Suggestions use the existing Copilot allowance. Candidate changes are debounced; note edits and idle clock ticks do not make another request. If Copilot fails, the UI says so and keeps default ordering available.
 
 GitHub search limits and failed enrichment are surfaced. Absence from a search is not proof that a captured commitment is complete.
+
+Issue @mentions appear as "may owe a reply" work on the next GitHub refresh, even without an assignment and including issues you authored. Like PR mentions, discovery covers open threads updated in the last three days, with up to 50 results per search. Assigned issues take precedence when the same issue matches both searches. Refresh runs every five minutes; **Connections > Refresh GitHub** runs it immediately.
+
+### Sleep work
+
+Choose **Sleep** on the recommended action or in its details to move it out of Now and Next into Later. For linked GitHub issues and PRs, **Wake on a new @mention or review request** is on by default. An optional **Wake at** time uses your local timezone; the first trigger brings the work back without replacing your active action.
+
+Local tasks and routines can sleep until a time, or indefinitely. Leave the time blank and turn off ping wake-up to keep work in Later until you choose **Wake**. Notes and progress stay saved; Sleep and manual Wake are undoable.
+
+Ping checks run on GitHub refresh while the app is running, including for sleeping work outside the normal discovery windows. New direct mentions and review requests to your account can wake it; old mentions, team requests, ordinary comments, and CI updates cannot. Repeating Sleep starts a new cutoff. A failed or incomplete GitHub check is shown explicitly; a scheduled time can still wake work while GitHub is unavailable.
+
+Mention detection covers new issue/PR comments, submitted review bodies, and inline review comments. Mentions added by editing older text are not detected. Quoted text and code are ignored. Monitoring checks up to 20 GitHub references and three pages per feed per refresh; larger sets rotate every five minutes, with explicit warnings when a refresh cannot cover everything.
 
 ## Keep using the browser prototype
 

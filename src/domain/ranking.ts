@@ -3,7 +3,7 @@ import type { AppState, WorkItem } from './types.ts';
 
 export function isActionable(item: WorkItem, state: AppState): boolean {
   if (item.status !== 'available') return false;
-  if (item.signalCurrent === false && state.activeId !== item.id && !item.sources.some(source => source.kind === 'capture')) return false;
+  if (item.signalCurrent === false && !item.wake && state.activeId !== item.id && !item.sources.some(source => source.kind === 'capture')) return false;
   if (item.availableAt && timestamp(item.availableAt) > timestamp(state.clock)) return false;
   if (item.kind === 'routine') {
     const occurrence = outstanding(item);
@@ -66,6 +66,12 @@ export function recommendationReason(item: WorkItem, state: AppState): string {
   }
   if (state.activeId === item.id) return 'Your active action; keeping your place.';
   if (item.kind === 'routine') return `Your ${item.routine!.time} ${item.routine!.timeZone ?? 'UTC'} routine is due.`;
+  if (item.wake) return {
+    mention: 'Awake: someone mentioned you on GitHub.',
+    'review-request': 'Awake: your review was requested.',
+    time: 'Awake: your chosen time has arrived.',
+    manual: 'You brought this action back.',
+  }[item.wake.reason];
   if (item.signalCurrent === false) return 'Your saved commitment; its previous GitHub signal is no longer current.';
   if (isPossibleRereview(item)) return 'May need another review; recent activity is not a review request.';
   const aiReason = state.aiRanking?.reasons.find(reason => reason.id === item.id)?.reason;
