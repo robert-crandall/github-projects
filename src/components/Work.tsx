@@ -4,6 +4,7 @@ import type { AppState, Command, WorkItem } from '../domain/types.ts';
 import { outstanding } from '../domain/clock.ts';
 import { isActionable, isPossibleRereview, recommendationReason } from '../domain/ranking.ts';
 import { desktop, desktopCommand, errorText } from '../desktop.ts';
+import { githubReferences } from '../domain/sleep.ts';
 
 export type Commit = (command: Command, message?: string) => Promise<boolean>;
 export const stamp = (value: string, timeZone = desktop ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC') => new Intl.DateTimeFormat('en-US', {
@@ -41,6 +42,12 @@ export function signal(item: WorkItem) {
 
 export function secondaryReason(item: WorkItem, state: AppState) {
   if (item.status === 'waiting') return `Waiting: ${item.reason}`;
+  if (item.status === 'deferred' && item.sleep) {
+    const time = item.availableAt ? stamp(item.availableAt) : undefined;
+    return item.sleep.wakeOnPing
+      ? `Sleeping until a new @mention or review request${time ? `, or ${time} - whichever comes first` : ''}`
+      : time ? `Sleeping until ${time}` : 'Sleeping until you wake it';
+  }
   if (item.status === 'deferred') return `${item.reason || 'Deferred'}${item.availableAt ? ` - until ${stamp(item.availableAt)}` : ''}`;
   if (item.status === 'completed') return `Completed locally${item.completedAt ? ` ${stamp(item.completedAt)}` : ''}`;
   if (item.status === 'removed') return 'Removed locally - recoverable';
@@ -65,7 +72,7 @@ export function WorkRow({ item, state, open, commit, number }: {
     {actionable && state.activeId !== item.id && <button className="row-action quiet" onClick={() => commit({ type: 'start', id: item.id }, state.activeId ? 'Switched. Your place is saved.' : 'Started. Your place is saved.')} aria-label={`${state.activeId ? 'Switch to' : 'Start'} ${item.title}`}>
       {state.activeId ? 'Switch' : 'Start'}<ArrowRight size={15} />
     </button>}
-    {restorable && <button className="row-action quiet" onClick={() => commit({ type: 'restore', id: item.id }, 'Restored.')} aria-label={`Restore ${item.title}`}><RotateCcw size={15} />Restore</button>}
+    {restorable && <button className="row-action quiet" onClick={() => commit({ type: 'restore', id: item.id }, item.sleep ? 'Awake. Your place is saved.' : 'Restored.')} aria-label={`${item.sleep ? 'Wake' : 'Restore'} ${item.title}`}><RotateCcw size={15} />{item.sleep ? 'Wake' : 'Restore'}</button>}
     {!actionable && !restorable && <button className="icon-button" aria-label={`Details for ${item.title}`} onClick={() => open(item.id)}><ChevronRight size={17} /></button>}
     {number !== undefined && <span className="sr-only">Rank {number}</span>}
   </li>;
@@ -75,28 +82,37 @@ export function DecisionControls({ item, commit, compact = false }: { item: Work
   const [mode, setMode] = useState<'defer' | 'wait' | null>(null);
   const [reason, setReason] = useState('');
   const [until, setUntil] = useState('');
+  const canWakeOnPing = desktop && githubReferences(item).length > 0;
+  const [wakeOnPing, setWakeOnPing] = useState(canWakeOnPing);
   const available = item.status === 'available';
   return <div className="decisions">
     <div className="button-row">
       {available && <>
-        <button className="quiet" onClick={() => { setMode(mode === 'defer' ? null : 'defer'); setReason(''); }}><Clock3 size={15} />Defer</button>
+        <button className="quiet" aria-expanded={mode === 'defer'} onClick={() => { setMode(mode === 'defer' ? null : 'defer'); setReason(''); setUntil(''); setWakeOnPing(canWakeOnPing); }}><Clock3 size={15} />{desktop ? 'Sleep' : 'Defer'}</button>
         <button className="quiet" onClick={() => { setMode(mode === 'wait' ? null : 'wait'); setReason(''); }}><Pause size={15} />Waiting on someone</button>
       </>}
-      {!available && <button className="secondary" onClick={() => commit({ type: 'restore', id: item.id }, 'Restored.')}><RotateCcw size={15} />Restore action</button>}
+      {!available && <button className="secondary" onClick={() => commit({ type: 'restore', id: item.id }, item.sleep ? 'Awake. Your place is saved.' : 'Restored.')}><RotateCcw size={15} />{item.sleep ? 'Wake now' : 'Restore action'}</button>}
       {!compact && item.status !== 'removed' && <button className="quiet" onClick={() => commit({ type: 'remove', id: item.id }, 'Removed locally. You can undo this.')}><Trash2 size={15} />Remove</button>}
     </div>
     {mode && <form className="decision-form" onSubmit={async (event) => {
       event.preventDefault();
+      const wakeAt = until ? desktop ? new Date(until).toISOString() : `${until}:00.000Z` : undefined;
       const command: Command = mode === 'defer'
-        ? { type: 'defer', id: item.id, reason: reason.trim(), until: until ? desktop ? new Date(until).toISOString() : `${until}:00.000Z` : undefined }
+        ? desktop ? { type: 'sleep', id: item.id, reason: reason.trim(), until: wakeAt, wakeOnPing: canWakeOnPing && wakeOnPing }
+          : { type: 'defer', id: item.id, reason: reason.trim(), until: wakeAt }
         : { type: 'wait', id: item.id, reason: reason.trim() };
-      if (await commit(command, mode === 'defer' ? 'Deferred. Your place is saved.' : 'Moved to Waiting.')) setMode(null);
+      if (await commit(command, mode === 'defer' ? desktop ? 'Sleeping in Later. Your place is saved.' : 'Deferred. Your place is saved.' : 'Moved to Waiting.')) setMode(null);
     }}>
+      {mode === 'defer' && desktop && <>
+        {canWakeOnPing && <label className="sleep-ping"><input type="checkbox" checked={wakeOnPing} onChange={event => setWakeOnPing(event.target.checked)} /><span>Wake on a new @mention or review request<span className="field-help">Directly to you. Checked on GitHub refresh; ordinary activity stays quiet.</span></span></label>}
+        <label className="optional-time">Wake at <span className="subtle">(optional, local time)</span><input autoFocus type="datetime-local" value={until} onChange={event => setUntil(event.target.value)} /><span className="field-help">{canWakeOnPing && wakeOnPing ? 'The first ping or this time brings it back.' : 'Leave blank to keep it in Later until you wake it.'}</span></label>
+      </>}
       <label>{mode === 'wait' ? 'Who or what are you waiting on?' : 'Why set this aside?'}
-        <input autoFocus value={reason} onChange={(event) => setReason(event.target.value)} placeholder={mode === 'wait' ? 'Waiting for a response from...' : 'Not ready to pick this up yet'} required />
+        {mode === 'defer' && desktop && <span className="subtle">(optional)</span>}
+        <input autoFocus={mode === 'wait' || !desktop} value={reason} onChange={(event) => setReason(event.target.value)} placeholder={mode === 'wait' ? 'Waiting for a response from...' : 'Not ready to pick this up yet'} required={mode === 'wait' || !desktop} />
       </label>
-      {mode === 'defer' && <label className="optional-time">Revisit after <span className="subtle">({desktop ? 'optional, local time' : 'optional, demo UTC'})</span><input type="datetime-local" value={until} onChange={(event) => setUntil(event.target.value)} /><span className="field-help">{desktop ? 'Returns automatically at this time; leave blank for someday.' : 'Stays in Later until you restore it.'}</span></label>}
-      <div className="button-row"><button className="secondary" type="submit">{mode === 'wait' ? 'Mark waiting' : 'Move to Later'}</button><button type="button" className="quiet" onClick={() => setMode(null)}>Cancel</button></div>
+      {mode === 'defer' && !desktop && <label className="optional-time">Revisit after <span className="subtle">(optional, demo UTC)</span><input type="datetime-local" value={until} onChange={(event) => setUntil(event.target.value)} /><span className="field-help">Stays in Later until you restore it.</span></label>}
+      <div className="button-row"><button className="secondary" type="submit">{mode === 'wait' ? 'Mark waiting' : desktop ? 'Put to sleep' : 'Move to Later'}</button><button type="button" className="quiet" onClick={() => setMode(null)}>Cancel</button></div>
     </form>}
   </div>;
 }
@@ -152,7 +168,8 @@ export function FocusWork({ item, state, commit, open }: { item: WorkItem; state
     {!active && <p className="focus-evidence">{item.evidence || item.nextStep}</p>}
     {active && <Progress item={item} state={state} commit={commit} />}
     <div className="focus-actions"><MainAction item={item} state={state} commit={commit} /><GitHubLink url={item.sources.find(source => source.reference?.startsWith('https://github.com/'))?.reference} /><button className="quiet" onClick={() => open(item.id)}>Details &amp; sources<ChevronRight size={16} /></button></div>
-    {active && <><p className="local-disclaimer">Local progress only. No review, message, or flag change is sent.</p><DecisionControls item={item} commit={commit} compact /></>}
+    {active && <p className="local-disclaimer">Local progress only. No review, message, or flag change is sent.</p>}
+    {(active || desktop) && <DecisionControls item={item} commit={commit} compact />}
   </section>;
 }
 
@@ -190,7 +207,7 @@ export function WorkDetail({ item, state, commit, back }: { item: WorkItem; stat
   return <div className="detail-view">
     <button className="quiet back-button" onClick={back}><ArrowLeft size={16} />Back to workspace</button>
     <div className="page-heading"><h1>{item.title}</h1></div>
-    <div className="source-line"><ItemIcon item={item} /><span>{signal(item)}</span><span className="subtle">{item.status}</span></div>
+    <div className="source-line"><ItemIcon item={item} /><span>{signal(item)}</span><span className="subtle">{item.sleep ? 'sleeping' : item.status}</span></div>
     {item.review?.team && <p className="team-name">{item.review.team}</p>}
     <p className="detail-reason">{secondaryReason(item, state)}</p>
     {item.reason && <p className="notice-inline">{item.reason}</p>}

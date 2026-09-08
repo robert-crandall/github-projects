@@ -5,7 +5,7 @@ import type { AppState } from './domain/types.ts';
 export function prepareWorkspaceImport(current: AppState, backup: AppState): AppState {
   const hasLocalWork = current.draft || current.activeId || current.captures.length || current.projects.length || current.undo.length
     || current.items.some(item => item.status !== 'available' || item.notes || item.steps.length || item.startedAt
-      || item.completedAt || item.projectId || item.availableAt || item.reason || item.routine
+      || item.completedAt || item.projectId || item.availableAt || item.reason || item.routine || item.sleep || item.wake
       || !item.sources.length || item.sources.some(source => source.kind !== 'github'));
   if (hasLocalWork) throw new Error('Import requires a workspace without local captures, edits, or progress. Existing work was not changed.');
   if (backup.items.some(item => item.sources.some(source => source.reference?.startsWith('demo://')))) {

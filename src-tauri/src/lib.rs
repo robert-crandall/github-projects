@@ -1,5 +1,6 @@
 mod copilot;
 mod github;
+mod github_pings;
 mod notifications;
 mod storage;
 mod tools;
@@ -194,9 +195,13 @@ async fn github_sync(backend: State<'_, Backend>) -> Result<github::GitHubSnapsh
         .try_lock()
         .map_err(|_| "A GitHub refresh is already running.")?;
     let path = resolve_tool("gh", &backend.database.settings()?.gh_path)?;
+    let database = backend.database.clone();
+    let workspace = tauri::async_runtime::spawn_blocking(move || database.load())
+        .await
+        .map_err(|_| "Sleep monitoring could not read the stored workspace.")??;
     tokio::select! {
         _ = backend.shutdown.cancelled() => Err("GitHub refresh cancelled because the app is quitting.".into()),
-        result = timeout(Duration::from_secs(180), github::sync(&path)) => result.map_err(|_| "GitHub refresh exceeded three minutes. The previous snapshot is unchanged.".to_string())?,
+        result = timeout(Duration::from_secs(180), github::sync(&path, workspace.state.as_ref())) => result.map_err(|_| "GitHub refresh exceeded three minutes. The previous snapshot is unchanged.".to_string())?,
     }
 }
 

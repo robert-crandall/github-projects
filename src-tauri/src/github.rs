@@ -19,6 +19,13 @@ enum Bucket {
     Mention,
     Reviewed,
     Assigned,
+    IssueMention,
+}
+
+impl Bucket {
+    fn is_issue(self) -> bool {
+        matches!(self, Self::Assigned | Self::IssueMention)
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -70,21 +77,22 @@ pub struct GitHubSnapshot {
     login: String,
     items: Vec<Value>,
     warnings: Vec<String>,
+    pings: Vec<crate::github_pings::Ping>,
 }
 
 fn search_args(bucket: Bucket, now: DateTime<Utc>) -> Vec<String> {
-    let issue = bucket == Bucket::Assigned;
+    let issue = bucket.is_issue();
     let mut args = vec!["search".into(), if issue { "issues" } else { "prs" }.into()];
     match bucket {
         Bucket::Direct => args.push("user-review-requested:@me".into()),
         Bucket::Team => args.push(format!("team-review-requested:{TEAM}")),
         Bucket::Authored => args.push("--author=@me".into()),
-        Bucket::Mention => args.push("--mentions=@me".into()),
+        Bucket::Mention | Bucket::IssueMention => args.push("--mentions=@me".into()),
         Bucket::Reviewed => args.push("--reviewed-by=@me".into()),
         Bucket::Assigned => args.push("--assignee=@me".into()),
     }
     let days = match bucket {
-        Bucket::Mention => Some(3),
+        Bucket::Mention | Bucket::IssueMention => Some(3),
         Bucket::Reviewed => Some(2),
         Bucket::Assigned => Some(30),
         _ => None,
@@ -190,11 +198,7 @@ fn url(item: &SearchItem, bucket: Bucket) -> Result<String, String> {
     Ok(format!(
         "https://github.com/{}/{}/{}",
         item.repository.name_with_owner,
-        if bucket == Bucket::Assigned {
-            "issues"
-        } else {
-            "pull"
-        },
+        if bucket.is_issue() { "issues" } else { "pull" },
         item.number
     ))
 }
@@ -221,7 +225,7 @@ fn work_item(
             if action == "merge" { ("merge", "task", "Authored PR · ready to merge".into(), "Open GitHub and decide whether to merge.".into(), evidence) }
             else { ("fix", "fix", "Authored PR · needs your fix".into(), "Address the reported blocker, then check GitHub again.".into(), evidence) }
         }
-        Bucket::Mention if !mine && item.updated_at >= now - Duration::days(3) => ("reply", "mention", "Mentioned · may owe a reply".into(), "Check whether this mention needs your reply.".into(), "A recent mention is a signal, not proof that you owe a response.".into()),
+        Bucket::Mention | Bucket::IssueMention if (bucket == Bucket::IssueMention || !mine) && item.updated_at >= now - Duration::days(3) => ("reply", "mention", "Mentioned · may owe a reply".into(), "Check whether this mention needs your reply.".into(), "A recent mention is a signal, not proof that you owe a response.".into()),
         Bucket::Reviewed if !mine && item.updated_at >= now - Duration::days(2) => ("review", "review", "Reviewed PR · may need re-review".into(), "Check recent activity to decide whether another review is needed.".into(), "You previously reviewed this PR. Recent activity alone does not prove a new review obligation.".into()),
         Bucket::Assigned if item.updated_at >= now - Duration::days(30) => ("task", "task", "Assigned issue".into(), "Open the assigned issue and identify your next action.".into(), "This open issue is assigned to you.".into()),
         _ => return None,
@@ -258,9 +262,29 @@ fn work_item(
     Some(work)
 }
 
-pub async fn sync(path: &Path) -> Result<GitHubSnapshot, String> {
+pub async fn sync(path: &Path, workspace: Option<&Value>) -> Result<GitHubSnapshot, String> {
     let now = Utc::now();
     let login = github_login(path).await?;
+    let (discovery, monitoring) = tokio::join!(
+        discover(path, &login, now),
+        crate::github_pings::poll(path, workspace, &login, now)
+    );
+    let (items, mut warnings) = discovery?;
+    warnings.extend(monitoring.warnings);
+    Ok(GitHubSnapshot {
+        fetched_at: Utc::now().to_rfc3339(),
+        login,
+        items,
+        warnings,
+        pings: monitoring.pings,
+    })
+}
+
+async fn discover(
+    path: &Path,
+    login: &str,
+    now: DateTime<Utc>,
+) -> Result<(Vec<Value>, Vec<String>), String> {
     let buckets = [
         Bucket::Direct,
         Bucket::Team,
@@ -268,6 +292,7 @@ pub async fn sync(path: &Path) -> Result<GitHubSnapshot, String> {
         Bucket::Mention,
         Bucket::Reviewed,
         Bucket::Assigned,
+        Bucket::IssueMention,
     ];
     let results: Vec<(Bucket, Vec<SearchItem>)> = stream::iter(buckets)
         .map(|bucket| async move {
@@ -325,12 +350,7 @@ pub async fn sync(path: &Path) -> Result<GitHubSnapshot, String> {
             }
         }
     }
-    Ok(GitHubSnapshot {
-        fetched_at: Utc::now().to_rfc3339(),
-        login,
-        items,
-        warnings,
-    })
+    Ok((items, warnings))
 }
 
 #[cfg(test)]
@@ -377,11 +397,88 @@ mod tests {
             Bucket::Mention,
             Bucket::Reviewed,
             Bucket::Assigned,
+            Bucket::IssueMention,
         ] {
             let args = search_args(bucket, Utc::now());
             assert!(args.contains(&"archived:false".to_owned()), "{bucket:?}");
         }
     }
+    #[test]
+    fn issue_mentions_search_issues_with_the_existing_mention_window() {
+        let now = DateTime::parse_from_rfc3339("2026-09-08T18:00:00Z")
+            .unwrap()
+            .to_utc();
+        let args = search_args(Bucket::IssueMention, now);
+        assert_eq!(&args[..2], ["search", "issues"]);
+        assert!(args.contains(&"--mentions=@me".into()));
+        assert!(args.contains(&"--updated=>=2026-09-05".into()));
+        assert!(args.contains(&"--state=open".into()));
+        assert!(args.contains(&"archived:false".into()));
+        assert!(args.contains(&LIMIT.to_string()));
+        assert_eq!(
+            args.last().unwrap(),
+            "number,title,repository,author,createdAt,updatedAt"
+        );
+        assert!(!args.iter().any(|arg| arg.starts_with("--assignee")));
+        assert_eq!(search_args(Bucket::Mention, now)[1], "prs");
+        assert_eq!(search_args(Bucket::Assigned, now)[1], "issues");
+    }
+
+    #[test]
+    fn issue_mentions_create_reply_work_even_on_self_authored_issues() {
+        let now = DateTime::parse_from_rfc3339("2026-09-08T18:00:00Z")
+            .unwrap()
+            .to_utc();
+        let mut item: SearchItem = serde_json::from_value(json!({
+            "number": 42,
+            "title": "Please clarify this issue",
+            "repository": {"nameWithOwner": "acme/repo"},
+            "author": {"login": "other"},
+            "createdAt": now - Duration::days(30),
+            "updatedAt": now
+        }))
+        .unwrap();
+        let work = work_item(&item, Bucket::IssueMention, None, "me", now).unwrap();
+        assert_eq!(
+            work["id"],
+            "github:https://github.com/acme/repo/issues/42:reply"
+        );
+        assert_eq!(work["kind"], "mention");
+        assert_eq!(work["status"], "available");
+        assert_eq!(work["title"], item.title);
+        assert_eq!(
+            work["sources"][0]["reference"],
+            "https://github.com/acme/repo/issues/42"
+        );
+        assert_eq!(
+            work["sources"][0]["id"],
+            "github:https://github.com/acme/repo/issues/42:IssueMention"
+        );
+        assert_eq!(
+            work["nextStep"],
+            "Check whether this mention needs your reply."
+        );
+        assert!(work["evidence"].as_str().unwrap().contains("not proof"));
+        assert!(work.get("review").is_none());
+        assert!(work.get("routine").is_none());
+        assert_ne!(
+            work["id"],
+            work_item(&item, Bucket::Mention, None, "me", now).unwrap()["id"]
+        );
+        assert_eq!(
+            url(&item, Bucket::Assigned).unwrap(),
+            url(&item, Bucket::IssueMention).unwrap()
+        );
+
+        item.author = Some(Author { login: "ME".into() });
+        assert!(work_item(&item, Bucket::IssueMention, None, "me", now).is_some());
+        assert!(work_item(&item, Bucket::Mention, None, "me", now).is_none());
+        item.updated_at = now - Duration::days(3);
+        assert!(work_item(&item, Bucket::IssueMention, None, "me", now).is_some());
+        item.updated_at -= Duration::seconds(1);
+        assert!(work_item(&item, Bucket::IssueMention, None, "me", now).is_none());
+    }
+
     #[test]
     fn real_diff_data_and_weak_signals_remain_distinct() {
         let now = Utc::now();
@@ -424,7 +521,7 @@ mod tests {
     #[ignore = "Reads GitHub search and PR metadata using the existing gh sign-in."]
     async fn live_github_sync_smoke() {
         let path = crate::tools::resolve_tool("gh", "").unwrap();
-        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(180), sync(&path))
+        let snapshot = tokio::time::timeout(std::time::Duration::from_secs(180), sync(&path, None))
             .await
             .unwrap()
             .unwrap();

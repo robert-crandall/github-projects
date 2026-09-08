@@ -142,6 +142,9 @@ main:focus { outline: none; }
 .decisions .quiet { font-size: 12px; }
 .decision-form { border-top: 1px solid var(--border); padding-top: 18px; display: grid; gap: 14px; margin-top: 14px; }
 .optional-time input { max-width: 270px; }
+.sleep-ping { flex-wrap: nowrap; align-items: flex-start; }
+.sleep-ping input { margin-top: 2px; }
+.sleep-ping > span { min-width: 0; }
 .routine-reminder { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 19px 0; margin-top: 16px; border-bottom: 1px solid var(--warn-border); }
 .routine-reminder p { font-size: 12px; color: var(--subtext); margin-top: 4px; }
 .routine-reminder .button-row { margin-left: auto; font-size: 12px; }

@@ -213,6 +213,33 @@ test('GitHub refresh preserves user edits, project, notes, progress, active stat
   assert.equal(get(state, 'github-review').evidence, 'New evidence');
 });
 
+test('issue mentions become actionable work and keep local decisions across refresh and reload', () => {
+  const url = 'https://github.com/octo/repo/issues/42';
+  const id = `github:${url}:reply`;
+  const mention = github(id, {
+    title: 'Please clarify this issue', kind: 'mention', review: undefined,
+    nextStep: 'Check whether this mention needs your reply.',
+    sources: [{ id: `github:${url}:IssueMention`, kind: 'github', label: 'Mentioned - may owe a reply', reference: url }],
+    evidence: 'A recent mention is a signal, not proof that you owe a response.',
+  });
+  let state = sync(createDesktopState(CLOCK), [mention]);
+  assert.equal(isAppState(state), true);
+  assert.deepEqual(rankedItems(state).map(item => item.id), [id]);
+  assert.equal(get(state, id).sources[0].reference, url);
+  assert.match(recommendationReason(get(state, id), state), /May need a reply/);
+  state = run(state, { type: 'notes', id, text: 'Ask about the deadline.' },
+    { type: 'defer', id, reason: 'After lunch' });
+  state = sync(JSON.parse(JSON.stringify(state)), [mention]);
+  assert.equal(state.items.length, 1);
+  assert.equal(get(state, id).notes, 'Ask about the deadline.');
+  assert.equal(get(state, id).status, 'deferred');
+  assert.deepEqual(rankedItems(state), []);
+  state = run(state, { type: 'restore', id }, { type: 'start', id }, { type: 'complete', id });
+  state = sync(state, [mention]);
+  assert.equal(get(state, id).status, 'completed');
+  assert.deepEqual(rankedItems(state), []);
+});
+
 test('sync deduplicates manual reviews by identity, maps capture IDs, and keeps deferred decisions undoable', () => {
   let state = interpret(save(createDesktopState(CLOCK), 'manual', `Please review ${URL}`), 'manual', reviewProposal());
   const id = state.captures[0].itemId;

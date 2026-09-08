@@ -34,14 +34,17 @@ async function desktopBridge(page: Page) {
           case 'github_sync': {
             if (!sessionStorage.getItem('sync-success')) throw new Error('GitHub is offline for this test.');
             const now = new Date().toISOString().replace('Z', '123456+00:00');
-            const url = 'https://github.com/example/work/pull/42';
+            const issue = sessionStorage.getItem('sync-issue') === 'yes';
+            const url = `https://github.com/example/work/${issue ? 'issues' : 'pull'}/42`;
             return {
-              fetchedAt: now, login: 'example-user', warnings: [], items: [{
-                id: `github:${url}:review`, title: 'Review the native snapshot', kind: 'review', status: 'available',
+              fetchedAt: now, login: 'example-user', warnings: [],
+              pings: JSON.parse(sessionStorage.getItem('github-pings') || '[]'),
+              items: sessionStorage.getItem('sync-empty') ? [] : [{
+                id: `github:${url}:${issue ? 'reply' : 'review'}`, title: 'Review the native snapshot', kind: issue ? 'mention' : 'review', status: 'available',
                 createdAt: now, updatedAt: now,
                 sources: [{ id: 'direct', kind: 'github', label: 'Direct review request', reference: url }],
                 notes: '', steps: [], nextStep: 'Review the requested pull request.',
-                review: { identity: url, request: 'direct', lines: 15, files: 2 },
+                ...(issue ? {} : { review: { identity: url, request: 'direct', lines: 15, files: 2 } }),
               }],
             };
           }
@@ -166,4 +169,84 @@ test('connections distinguish denied notifications and show local lifecycle', as
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('connections-narrow.png'), fullPage: true });
+});
+
+for (const kind of ['mention', 'review-request'] as const) {
+  test(`sleeping work stays quiet through refresh and reload, then wakes on a new ${kind}`, async ({ page }, testInfo) => {
+    await expect(page.getByText('Saved on this Mac')).toBeVisible();
+    await page.clock.install({ time: new Date(Date.now() + 60_000) });
+    await page.evaluate(issue => {
+      sessionStorage.removeItem('desktop-workspace');
+      sessionStorage.setItem('sync-success', 'yes');
+      if (issue) sessionStorage.setItem('sync-issue', 'yes');
+    }, kind === 'mention');
+    await page.reload();
+    await expect(page.locator('.focus-work')).toContainText('Review the native snapshot');
+    await page.getByRole('button', { name: 'Sleep', exact: true }).click();
+    await expect(page.getByRole('checkbox', { name: /Wake on a new @mention/ })).toBeChecked();
+    if (kind === 'mention') {
+      await page.screenshot({ path: testInfo.outputPath('sleep-desktop.png'), fullPage: true });
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath('sleep-narrow.png'), fullPage: true });
+      await page.setViewportSize({ width: 1440, height: 900 });
+    }
+    await page.getByRole('button', { name: 'Put to sleep', exact: true }).click();
+    await expect(page.getByText('Sleeping in Later. Your place is saved.')).toBeVisible();
+    await expect(page.locator('.focus-work')).toHaveCount(0);
+    await page.locator('.later-section > summary').click();
+    await expect(page.locator('.later-section')).toContainText('Sleeping until a new @mention or review request');
+    await page.getByRole('button', { name: 'Refresh GitHub', exact: true }).click();
+    await expect(page.getByText('Saved on this Mac')).toBeVisible();
+    await page.reload();
+    await expect(page.locator('.focus-work')).toHaveCount(0);
+    await expect(page.getByText('Saved on this Mac')).toBeVisible();
+    await page.clock.runFor(2_000);
+    await page.evaluate(pingKind => {
+      const url = `https://github.com/example/work/${pingKind === 'mention' ? 'issues' : 'pull'}/42`;
+      sessionStorage.setItem('github-pings', JSON.stringify([{ reference: url, kind: pingKind, at: new Date().toISOString() }]));
+      sessionStorage.setItem('sync-empty', 'yes');
+    }, kind);
+    await page.getByRole('button', { name: 'Refresh GitHub', exact: true }).click();
+    await expect(page.locator('.focus-work')).toContainText(kind === 'mention'
+      ? 'Awake: someone mentioned you on GitHub.' : 'Awake: your review was requested.');
+    await expect(page.getByText('Saved on this Mac')).toBeVisible();
+    await page.reload();
+    await expect(page.locator('.focus-work')).toContainText('Review the native snapshot');
+  });
+}
+
+test('local work sleeps until its chosen local time while GitHub is offline', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-09-08T18:00:00Z') });
+  const state = applyCommand(createDesktopState('2026-09-08T18:00:00Z'), { type: 'capture', id: 'local', text: 'Write the plan' });
+  await page.addInitScript(saved => sessionStorage.setItem('desktop-workspace', JSON.stringify({ revision: 1, state: saved })), state);
+  await page.reload();
+  await expect(page.locator('.focus-work')).toContainText('Write the plan');
+  await page.getByRole('button', { name: 'Sleep', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: /Wake on a new @mention/ })).toHaveCount(0);
+  await page.getByLabel('Wake at', { exact: false }).fill('2026-09-08T11:02');
+  await page.getByRole('button', { name: 'Put to sleep', exact: true }).click();
+  await expect(page.locator('.focus-work')).toHaveCount(0);
+  await expect(page.getByText('Saved on this Mac')).toBeVisible();
+  await page.clock.runFor(120_000);
+  await expect(page.locator('.focus-work')).toContainText('Awake: your chosen time has arrived.');
+  await expect(page.locator('.focus-work')).toContainText('Write the plan');
+});
+
+test('sleep can be cancelled, manually woken, and undone without mandatory notes', async ({ page }) => {
+  await page.evaluate(() => sessionStorage.setItem('sync-success', 'yes'));
+  await page.getByRole('button', { name: 'Refresh GitHub', exact: true }).click();
+  await expect(page.locator('.focus-work')).toContainText('Review the native snapshot');
+  await page.getByRole('button', { name: 'Sleep', exact: true }).click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Put to sleep', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Sleep', exact: true }).click();
+  await page.getByRole('button', { name: 'Put to sleep', exact: true }).click();
+  await expect(page.locator('.focus-work')).toHaveCount(0);
+  await page.locator('.later-section > summary').click();
+  await page.getByRole('button', { name: 'Wake Review the native snapshot', exact: true }).click();
+  await expect(page.locator('.focus-work')).toContainText('You brought this action back.');
+  await page.getByRole('button', { name: 'Undo last change', exact: true }).click();
+  await expect(page.locator('.focus-work')).toHaveCount(0);
+  await expect(page.locator('.later-section')).toContainText('Sleeping until a new @mention');
 });

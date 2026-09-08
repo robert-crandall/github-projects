@@ -29,6 +29,13 @@ export interface GitHubSnapshot {
   login: string;
   items: WorkItem[];
   warnings: string[];
+  pings?: GitHubPing[];
+}
+
+export interface GitHubPing {
+  reference: string;
+  kind: 'mention' | 'review-request';
+  at: string;
 }
 
 export interface CaptureProposal {

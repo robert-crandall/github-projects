@@ -294,6 +294,7 @@ pub fn validate_workspace(state: &Value) -> Result<(), String> {
             || !iso(&item["updatedAt"])
             || !item["sources"].is_array()
             || !valid_steps(&item["steps"])
+            || !valid_sleep_and_wake(item)
         {
             return Err(invalid());
         }
@@ -354,7 +355,33 @@ pub fn validate_workspace(state: &Value) -> Result<(), String> {
             return Err(invalid());
         }
     }
+    // Older undo records remain compatible; validate the new metadata wherever present.
+    for entry in state["undo"].as_array().ok_or_else(invalid)? {
+        for key in ["itemsBefore", "itemsAfter"] {
+            if let Some(snapshots) = entry.get(key).and_then(Value::as_array) {
+                if snapshots.len() > 10000
+                    || snapshots.iter().any(|item| !valid_sleep_and_wake(item))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+    }
     Ok(())
+}
+
+pub(crate) fn valid_sleep_and_wake(item: &Value) -> bool {
+    item.get("sleep").is_none_or(|sleep| {
+        sleep.is_object()
+            && item["status"] == "deferred"
+            && iso(&sleep["since"])
+            && sleep["wakeOnPing"].is_boolean()
+    }) && item.get("wake").is_none_or(|wake| {
+        wake.is_object()
+            && iso(&wake["at"])
+            && ["mention", "review-request", "time", "manual"]
+                .contains(&wake["reason"].as_str().unwrap_or(""))
+    })
 }
 
 fn valid_steps(value: &Value) -> bool {
@@ -474,6 +501,92 @@ mod tests {
         assert!(db.save(state, 1).is_err());
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn sleeping_state() -> Value {
+        let mut state = test_state();
+        state["items"] = serde_json::json!([{
+            "id":"issue", "title":"Sleeping issue", "kind":"task", "status":"deferred",
+            "createdAt":"2026-09-08T17:00:00Z", "updatedAt":"2026-09-08T17:00:00Z",
+            "sources":[], "notes":"", "steps":[], "nextStep":"Reply",
+            "availableAt":"2026-09-09T17:00:00Z",
+            "sleep":{"since":"2026-09-08T17:00:00Z","wakeOnPing":true},
+            "wake":{"at":"2026-09-07T17:00:00Z","reason":"manual"}
+        }]);
+        state
+    }
+
+    #[test]
+    fn sleep_wake_and_undo_metadata_survive_native_storage_roundtrip() {
+        let dir = directory();
+        let path = dir.join("workspace.sqlite3");
+        let db = Database::open(&path).unwrap();
+        let mut state = sleeping_state();
+        let sleeping = state["items"][0].clone();
+        let mut awake = sleeping.clone();
+        awake.as_object_mut().unwrap().remove("sleep");
+        awake["status"] = serde_json::json!("available");
+        awake["wake"] = serde_json::json!({"at":"2026-09-08T18:00:00Z","reason":"mention"});
+        state["items"][0] = awake.clone();
+        state["undo"] = serde_json::json!([{
+            "id":"decision","label":"Wake","itemsBefore":[sleeping],"itemsAfter":[awake]
+        }]);
+        db.save(state.clone(), 0).unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.load().unwrap().state.unwrap(), state);
+        let mut invalid = state.clone();
+        invalid["undo"][0]["itemsBefore"][0]["sleep"]["wakeOnPing"] = serde_json::json!("true");
+        assert!(db.save(invalid, 1).is_err());
+        assert_eq!(db.load().unwrap().state.unwrap(), state);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reject_malformed_sleep_and_wake_without_rejecting_legacy_workspaces() {
+        let state = sleeping_state();
+        assert!(validate_workspace(&state).is_ok());
+        for sleep in [
+            Value::Null,
+            serde_json::json!(true),
+            serde_json::json!({}),
+            serde_json::json!({"since":"yesterday","wakeOnPing":true}),
+            serde_json::json!({"since":"2026-09-08T17:00:00Z","wakeOnPing":"true"}),
+            serde_json::json!({"since":25,"wakeOnPing":true}),
+        ] {
+            let mut invalid = state.clone();
+            invalid["items"][0]["sleep"] = sleep;
+            assert!(validate_workspace(&invalid).is_err());
+        }
+        for status in ["available", "waiting", "completed", "removed"] {
+            let mut invalid = state.clone();
+            invalid["items"][0]["status"] = serde_json::json!(status);
+            assert!(validate_workspace(&invalid).is_err());
+        }
+        for wake in [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!({"at":"yesterday","reason":"manual"}),
+            serde_json::json!({"at":"2026-09-08T17:00:00Z","reason":"comment"}),
+            serde_json::json!({"at":"2026-09-08T17:00:00Z","reason":true}),
+        ] {
+            let mut invalid = state.clone();
+            invalid["items"][0]["wake"] = wake;
+            assert!(validate_workspace(&invalid).is_err());
+        }
+        for reason in ["mention", "review-request", "time", "manual"] {
+            let mut valid = state.clone();
+            valid["items"][0]["wake"]["reason"] = serde_json::json!(reason);
+            assert!(validate_workspace(&valid).is_ok());
+        }
+        let mut legacy = state;
+        let item = legacy["items"][0].as_object_mut().unwrap();
+        item.remove("sleep");
+        item.remove("wake");
+        assert!(validate_workspace(&legacy).is_ok());
+        assert!(validate_workspace(&test_state()).is_ok());
     }
 
     #[test]

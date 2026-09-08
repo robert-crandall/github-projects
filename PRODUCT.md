@@ -96,6 +96,8 @@ I can inspect all work without expanding everything at once. Counts, labels, and
 - Notes and checklist progress save automatically. Returning after an interruption shows the active action and its saved context.
 - Completing an action gives immediate, brief confirmation and offers the next recommendation.
 - Local mistakes are undoable, including completion, deferral, and removal.
+- **Sleep** moves work to Later without losing notes or progress. I can choose a local wake-up time, a new direct GitHub @mention or review request, or both; the first trigger wins. Without either trigger, it stays asleep until I wake it manually.
+- Sleeping work does not return just because its issue or PR changed. A new discovery category for the same source must not bypass Sleep. Waking work never replaces another active action, and it remains available even when it falls outside a search window.
 
 ### 4. Follow a scheduled routine
 
@@ -140,7 +142,8 @@ I want to preserve the useful distinctions in [the successful digest](docs/succe
 
 For the eventual live integration:
 
-- Gather direct review requests, the specific Terraform Provider Core Maintainers team requests, authored PRs, mentions, reviewed PRs, and assigned issues.
+- Gather direct review requests, the specific Terraform Provider Core Maintainers team requests, authored PRs, PR and issue @mentions, reviewed PRs, and assigned issues.
+- Include issue @mentions without requiring assignment, including issues I authored. Use the existing three-day activity window for mentions. An assigned issue takes precedence over a weaker mention of the same issue.
 - Keep direct requests separate from `integrations/terraform-provider-core-maintainers` team requests. Never broaden direct requests to every team I belong to.
 - Enrich authored PRs with review, CI, and conflict information before describing their state.
 - Preserve the distinction between definite obligations and weaker "may owe a reply" or "may need re-review" signals.
@@ -148,6 +151,7 @@ For the eventual live integration:
 - Preserve the underlying action as well as the PR identity: completing a review is different from merging the PR.
 - Absence from a query is not proof of completion. Search windows, limits, access failures, and changing review requests must not silently erase a captured commitment.
 - Retain the last successful data with a freshness/error indicator when sync fails. Do not display "nothing waiting" when the app does not know.
+- Monitor sleeping GitHub references independently of normal discovery windows. Use new direct mentions or review-request events after Sleep, not generic update timestamps. Old pings, self-authored pings, team requests, and ordinary activity do not wake work. Surface failed or incomplete monitoring.
 - Keep GitHub access read-only. No merge, review submission, comments, labels, closes, unsubscribe, or pushes from this version.
 
 The old prompt's bucket ordering is a discovery baseline, not the final Now ranking. My quick-review preference and scheduled commitments change what the app should recommend.

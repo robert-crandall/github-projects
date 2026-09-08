@@ -1,5 +1,6 @@
 import { Temporal } from '@js-temporal/polyfill';
 import type { AppState, Occurrence, Routine, WorkItem } from './types.ts';
+import { wakeItem } from './sleep.ts';
 
 export function timestamp(value: string): number {
   const match = /^(\d{4}-\d{2}-\d{2})(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?)?$/.exec(value);
@@ -103,9 +104,7 @@ export function reconcileClock(state: AppState, to: string): AppState {
     if (next.runtime === 'desktop' && item.status === 'deferred' && item.availableAt
       && timestamp(item.availableAt) <= target) {
       resumedAt = item.availableAt;
-      item.status = 'available';
-      delete item.availableAt;
-      delete item.reason;
+      wakeItem(item, resumedAt, 'time');
     }
     const routine = item.routine;
     if (!routine) continue;

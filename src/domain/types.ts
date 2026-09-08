@@ -57,6 +57,8 @@ export interface WorkItem {
   };
   evidence?: string;
   signalCurrent?: boolean;
+  sleep?: { since: string; wakeOnPing: boolean };
+  wake?: { at: string; reason: 'mention' | 'review-request' | 'time' | 'manual' };
   routine?: Routine;
 }
 
@@ -117,6 +119,7 @@ export type Command =
   | { type: 'pause' }
   | { type: 'complete'; id: string }
   | { type: 'defer'; id: string; reason: string; until?: string }
+  | { type: 'sleep'; id: string; reason?: string; until?: string; wakeOnPing: boolean }
   | { type: 'wait'; id: string; reason: string }
   | { type: 'restore'; id: string }
   | { type: 'remove'; id: string }

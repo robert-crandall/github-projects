@@ -30,6 +30,9 @@ const review = (value: unknown) => object(value) && ['direct', 'team', 'manual']
   && optional(value.identity, text) && optional(value.team, text)
   && optional(value.lines, (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0)
   && optional(value.files, (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0);
+const sleep = (value: unknown) => object(value) && date(value.since) && typeof value.wakeOnPing === 'boolean';
+const wake = (value: unknown) => object(value) && date(value.at)
+  && ['mention', 'review-request', 'time', 'manual'].includes(String(value.reason));
 const item = (value: unknown) => object(value) && text(value.id) && text(value.title)
   && ['review', 'fix', 'mention', 'task', 'routine'].includes(String(value.kind))
   && ['available', 'deferred', 'waiting', 'completed', 'removed'].includes(String(value.status))
@@ -39,6 +42,8 @@ const item = (value: unknown) => object(value) && text(value.id) && text(value.t
   && optional(value.availableAt, date) && optional(value.completedAt, date)
   && optional(value.startedAt, date) && optional(value.review, review)
   && optional(value.signalCurrent, v => typeof v === 'boolean')
+  && optional(value.sleep, sleep) && (value.sleep === undefined || value.status === 'deferred')
+  && optional(value.wake, wake)
   && optional(value.routine, routine) && (value.kind !== 'routine' || routine(value.routine));
 const capture = (value: unknown) => object(value) && text(value.id) && text(value.original)
   && date(value.createdAt) && text(value.itemId)
