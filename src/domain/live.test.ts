@@ -10,9 +10,9 @@ const event = (id = 'request', kind: Activity['kind'] = 'review-request'): Activ
 });
 const thread = (events = [event()]): Thread => ({
   id: '123', repo: 'octo/project', number: 1, kind: 'pr', source: 'github', title: 'Requested review',
-  reason: 'review_requested', state: 'open', notification: 'unread', subscribed: true, events,
+  reason: 'review_requested', state: 'open', notification: 'unread', subscribed: true, subscription: 'subscribed', events,
 });
-const refresh = (state: AppState, events = [event()]) => mergeRefresh(state, { threads: [thread(events)], fetchedAt: now, status: 'complete', diagnostics: [] });
+const refresh = (state: AppState, events = [event()]) => mergeRefresh(state, { threads: [thread(events)], startedAt: now, fetchedAt: now, status: 'complete', diagnostics: [] });
 const loaded = () => refresh(emptyWorkspace(now, 'UTC'));
 
 test('desktop initialization is empty, real-clock driven and rejects demo commands and snapshots', () => {
@@ -67,9 +67,10 @@ test('history is preserved and only current confirmed team membership creates re
 test('missing and repeatedly fetched threads never erase work or regenerate handled candidates', () => {
   const state = transition(loaded(), { type: 'done', key: 't:123' });
   expect(getRows(refresh(refresh(state)))).toEqual([]);
-  const missing = mergeRefresh(state, { threads: [], fetchedAt: now, status: 'partial', diagnostics: ['Timeline unavailable'] });
+  const missing = mergeRefresh(state, { threads: [], startedAt: now, fetchedAt: now, status: 'partial', diagnostics: ['Timeline unavailable'] });
   expect(missing.actions).toEqual(state.actions);
-  expect(missing.threads).toEqual(state.threads);
+  expect(missing.threads[0]!.events[0]!.requestState).toBe('uncertain');
+  expect(missing.threads[0]!.events[0]!.id).toBe(state.threads[0]!.events[0]!.id);
   expect(missing.refresh.status).toBe('partial');
   expect(missing.refresh.message).toContain('unavailable');
 });
@@ -173,4 +174,49 @@ test('local reminder snooze retains occurrence identity across relaunch', () => 
   state = restoreDesktop(state, '2026-09-11T17:20:00Z');
   expect(reminderSchedules(state)[0]!.occurrenceId).toBe(schedule.occurrenceId);
   expect(reminderSchedules(state)[0]!.snoozedUntil).toBe('2026-09-11T17:40:00Z');
+});
+
+test('timeline rollover and failed enrichment retain raw history without claiming an omitted request is current', () => {
+  for (const coverage of ['partial', 'unavailable', 'complete'] as const) {
+    let state = loaded();
+    const fetched = { ...thread([event('ordinary', 'comment')]),
+      coverage: { timeline: coverage, newestPage: coverage !== 'unavailable', fetchedPages: coverage === 'unavailable' ? 0 : 1, observedAt: now } };
+    state = mergeRefresh(state, { threads: [fetched], startedAt: now, fetchedAt: now, status: coverage === 'complete' ? 'complete' : 'partial', diagnostics: [] });
+    expect(getRow(state, 't:123')?.kind).toBe('update');
+    expect(getRow(state, 't:123')?.reason).toContain('Incomplete');
+    expect(state.threads[0]!.events.find(event => event.id === 'request')).toMatchObject({
+      id: 'request', kind: 'review-request', rawKind: 'review-request', requestState: 'uncertain',
+    });
+  }
+  let retained = transition(loaded(), { type: 'start', key: 't:123' });
+  retained = transition(retained, { type: 'edit', key: `a:${retained.activeId}`, notes: 'Chosen work survives' });
+  const actions = structuredClone(retained.actions);
+  retained = refresh(retained, [event('ordinary', 'comment')]);
+  expect(retained.actions).toEqual(actions);
+  expect(retained.activeId).toBe(actions[0]!.id);
+  expect(getRow(retained, `a:${actions[0]!.id}`)?.kind).toBe('review');
+});
+
+test('a fresh authoritative resubscription supersedes unsubscribe but an older in-flight response cannot', () => {
+  let state = beginOperation(loaded(), { id: 'unsub', threadId: '123', action: 'unsubscribe', eventIds: ['request'] });
+  state = finishOperation(state, 'unsub', { confirmedAt: '2026-09-11T17:01:00Z' });
+  const delayed = { threads: [thread([event(), event('ordinary', 'comment')])],
+    startedAt: now, fetchedAt: '2026-09-11T17:02:00Z', status: 'complete' as const, diagnostics: [] };
+  state = mergeRefresh(state, delayed);
+  expect(state.threads[0]!.subscription).toBe('unsubscribed');
+  expect(getRows(state)).toEqual([]);
+  expect(state.handled).not.toContain('ordinary');
+  state = mergeRefresh(state, { ...delayed, startedAt: '2026-09-11T17:03:00Z', fetchedAt: '2026-09-11T17:04:00Z' });
+  expect(state.threads[0]!.subscription).toBe('subscribed');
+  expect(getRows(state)[0]!.events.map(event => event.id)).toContain('ordinary');
+  expect(state.handled).not.toContain('ordinary');
+  state = mergeRefresh(state, { ...delayed, threads: [{ ...thread(), subscription: 'unsubscribed' }] });
+  expect(state.threads[0]!.subscription).toBe('subscribed');
+});
+
+test('restore rejects evidence references belonging to another thread', () => {
+  const state = transition(loaded(), { type: 'start', key: 't:123' });
+  state.threads.push({ ...thread(), id: '456', events: [{ ...event('foreign'), threadId: '456' }] });
+  state.actions[0]!.eventIds = ['foreign'];
+  expect(() => restoreDesktop(state, now)).toThrow('inconsistent references');
 });

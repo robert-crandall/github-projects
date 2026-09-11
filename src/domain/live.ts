@@ -22,10 +22,13 @@ export function restoreDesktop(value: unknown, now: string): AppState {
   }
   const actions = new Set(state.actions.map(action => action.id));
   const threads = new Set(state.threads.map(thread => thread.id));
-  const events = new Set(state.threads.flatMap(thread => thread.events.map(event => event.id)));
   if (actions.size !== state.actions.length || threads.size !== state.threads.length
     || (state.activeId !== null && !actions.has(state.activeId))
-    || state.actions.some(action => action.threadId && (!threads.has(action.threadId) || action.eventIds.some(id => !events.has(id))))
+    || state.actions.some(action => {
+      const thread = state.threads.find(thread => thread.id === action.threadId);
+      return action.threadId ? !thread || action.eventIds.some(id => !thread.events.some(event => event.id === id))
+        : action.eventIds.length > 0;
+    })
     || state.operations.some(operation => !threads.has(operation.threadId))
     || (state.selectedKey !== null && !getRow(state, state.selectedKey))) {
     throw new Error('Saved work has inconsistent references. Export it before explicit recovery.');
@@ -42,11 +45,19 @@ export function restoreDesktop(value: unknown, now: string): AppState {
   return transition(state, { type: 'clock', now });
 }
 
-export type RefreshBatch = { threads: Thread[]; fetchedAt: string; status: 'complete' | 'partial'; diagnostics: string[] };
+export type RefreshBatch = { threads: Thread[]; startedAt: string; fetchedAt: string; status: 'complete' | 'partial'; diagnostics: string[] };
 
 /** Apply to the current workspace, not the snapshot used to initiate the request. */
 export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
   const next = structuredClone(state);
+  const startedAt = instant(batch.startedAt);
+  if (Date.parse(startedAt) > Date.parse(instant(batch.fetchedAt))) throw new Error('Refresh timestamps are inconsistent. Saved work is unchanged.');
+  const fetchedThreadIds = new Set(batch.threads.map(thread => thread.id));
+  for (const thread of next.threads) {
+    if (!fetchedThreadIds.has(thread.id)) {
+      thread.events = thread.events.map(event => event.requestState === 'current' ? { ...event, requestState: 'uncertain' } : event);
+    }
+  }
   for (const incoming of batch.threads) {
     const fetched = threadSchema.parse(incoming);
     if (fetched.source !== 'github' || fetched.events.some(event => !event.requestState || event.threadId !== fetched.id)) {
@@ -68,6 +79,10 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       throw new Error('GitHub returned a changed thread identity. Saved work is unchanged.');
     }
     const merged = new Map(previous?.events.map(event => [event.id, event]));
+    const fetchedEventIds = new Set(fetched.events.map(event => event.id));
+    for (const [id, event] of merged) {
+      if (!fetchedEventIds.has(id) && event.requestState === 'current') merged.set(id, { ...event, requestState: 'uncertain' });
+    }
     for (const event of fetched.events) {
       const old = merged.get(event.id);
       if (old && (old.kind !== event.kind || old.rawKind !== event.rawKind || old.at !== event.at)) {
@@ -77,12 +92,15 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
     }
     fetched.events = [...merged.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
     const confirmed = next.operations.filter(operation => operation.threadId === fetched.id && operation.status === 'confirmed');
-    const unsubscribed = confirmed.some(operation => operation.action === 'unsubscribe');
-    if (unsubscribed) {
-      fetched.subscribed = false;
-      fetched.subscription = 'unsubscribed';
-      const suppressed = fetched.events.filter(event => !isRequest(event) && event.kind !== 'mention').map(event => event.id);
-      next.handled = [...new Set([...next.handled, ...suppressed])];
+    const authoritativeSubscription = fetched.subscription === 'subscribed' || fetched.subscription === 'unsubscribed';
+    if (authoritativeSubscription
+      && (!previous?.subscriptionObservedAt || Date.parse(startedAt) > Date.parse(previous.subscriptionObservedAt))) {
+      fetched.subscribed = fetched.subscription === 'subscribed';
+      fetched.subscriptionObservedAt = startedAt;
+    } else if (previous) {
+      fetched.subscribed = previous.subscribed;
+      fetched.subscription = previous.subscription;
+      fetched.subscriptionObservedAt = previous.subscriptionObservedAt;
     }
     if (confirmed.some(operation => operation.action === 'done')
       && !fetched.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
@@ -132,6 +150,7 @@ export function finishOperation(state: AppState, id: string, result: { confirmed
   if (operation.action === 'unsubscribe') {
     thread.subscribed = false;
     thread.subscription = 'unsubscribed';
+    thread.subscriptionObservedAt = operation.finishedAt;
   }
   else if (!thread.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
     thread.notification = 'done';

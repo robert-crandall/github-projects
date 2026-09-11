@@ -30,7 +30,8 @@ function action(state: AppState, title: string, origin: WorkAction['origin'] = s
 
 function pending(state: AppState, thread: Thread): Activity[] {
   if (thread.notification === 'done') return [];
-  return thread.events.filter(event => visibleEvent(event) && !state.handled.includes(event.id));
+  return thread.events.filter(event => visibleEvent(event) && !state.handled.includes(event.id)
+    && (state.runtime !== 'desktop' || thread.subscription !== 'unsubscribed' || isRequest(event) || event.kind === 'mention'));
 }
 
 function actionEvents(state: AppState, item: WorkAction): Activity[] {
