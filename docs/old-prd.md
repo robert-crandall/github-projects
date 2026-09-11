@@ -1,5 +1,7 @@
 # Product Requirements Document: GH Projects (Working Title)
 
+> Historical reference only. The greenfield requirements in [`PRODUCT.md`](../PRODUCT.md) supersede this document. Do not restore its project-first dashboard, routing rules, or notification-triggered snoozing.
+
 **Target User:** Solo developer with ADHD, managing personal projects with heavy GitHub involvement  
 **Platform:** macOS desktop app
 
