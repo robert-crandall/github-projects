@@ -30,7 +30,10 @@ if (import.meta.main) {
   try {
     await serve(process.stdin, line => new Promise<void>((resolve, reject) => {
       process.stdout.write(line, error => error ? reject(error) : resolve());
-    }), createHandler(), { onDiagnostic: code => { process.stderr.write(`service:${code}\n`); } });
+    }), createHandler(), {
+      onDiagnostic: code => { process.stderr.write(`service:${code}\n`); },
+      closeInput: () => { process.stdin.destroy(); },
+    });
   } catch (error) {
     process.stderr.write(`service:${sanitized(error).code}\n`);
     process.exitCode = 1;

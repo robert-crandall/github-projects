@@ -48,6 +48,7 @@ Malformed input has `id: null`. The host should treat protocol failures as servi
 | --- | --- |
 | Request and response frame | 1 MiB each, excluding request LF |
 | In-flight requests | 4; additional operations receive `busy` |
+| Output backlog | 64 frames / 4 MiB; a stalled write fails after 2 seconds |
 | Request IDs | Unique per process; 1-180 ASCII identity characters; 4,096 requests per process |
 | Overall deadline | 120 seconds; cancellation propagates into gh/SDK cleanup |
 | gh process | 20 seconds, 4 MiB combined stdout/stderr |
@@ -55,6 +56,8 @@ Malformed input has `id: null`. The host should treat protocol failures as servi
 | Copilot payload/answer | 60,000 bytes each; at most one format correction within the same deadline |
 
 Send `cancel` with `{ "requestId": "refresh-1" }` and a new envelope ID. Its result reports whether the target was active; the target receives its own cancelled result. Closing stdin, SIGINT, or SIGTERM cancels active work and closes owned resources. EOF is shutdown, not a flush-and-wait instruction. Native should allow bounded cleanup before forcibly terminating an unresponsive process.
+
+Input cancellation and EOF cleanup do not wait for stdout progress. A broken output pipe is terminal: cancel all active operations rather than attempting another response. Native should continuously drain stdout/stderr and launch the sidecar in an owned process group. Neither the gh runner nor the SDK starts a detached process; group-level shutdown can escalate from SIGTERM to SIGKILL for the entire owned descendant tree.
 
 The host must expose only these operation names through its native command, not a generic shell/HTTP interface. It must not accept renderer-supplied commands, paths, environment, model settings, tool names, or endpoint URLs. Disable external page access to the native bridge.
 
@@ -127,7 +130,7 @@ SDK 1.0.13 has no schema-constrained response option. The service requests the e
 
 Model suggestions cannot start, finish, defer, acknowledge, unsubscribe, change handled state, or override request identities. A review suggestion requires cited current unhandled request evidence. Uncertain coverage requires explicit uncertainty. Captured daily routine time/timezone must match the supplied capture. All results are `previewOnly: true`; human application remains the caller's responsibility.
 
-Sessions and temporary private state are deleted during cleanup. Cleanup failures emit fixed stderr diagnostics. The service is a single-user process with capability restrictions, **not an operating-system sandbox**. Forced termination or power loss can leave a temporary SDK directory; those files are not durable app storage.
+Sessions and temporary private state are deleted during cleanup. After session disconnect/delete, the service uses the public SDK `forceStop()` directly. SDK 1.0.13's graceful `stop()` drops its child handle before confirmed exit, making later kill escalation ineffective; that path is not used. A synthetic SIGTERM-resistant runtime test verifies actual process termination through the public SDK API. Cleanup failures emit fixed stderr diagnostics. The service is a single-user process with capability restrictions, **not an operating-system sandbox**. Forced termination or power loss can leave a temporary SDK directory; those files are not durable app storage.
 
 ## Validation
 

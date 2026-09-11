@@ -84,7 +84,7 @@ describe('real SDK adapter restrictions', () => {
     expect(fake.prompt).not.toContain('synthetic-token');
     expect(fake.prompt).not.toContain(process.cwd());
     expect(JSON.parse(fake.prompt!).input).toEqual(input);
-    expect(fake.calls).toEqual(['start', 'create', 'send', 'disconnect', 'delete:synthetic-session', 'stop']);
+    expect(fake.calls).toEqual(['start', 'create', 'send', 'disconnect', 'delete:synthetic-session', 'force-stop']);
     expect(existsSync(fake.options!.env!.HOME!)).toBe(false);
   });
   test('permission handler rejects every request rather than leaving a pending tool call', async () => {
@@ -101,7 +101,7 @@ describe('real SDK adapter restrictions', () => {
   test('connection check authenticates without creating a session or fetching notifications', async () => {
     const { sdk, fake } = service();
     expect(await sdk.connection(signal())).toEqual({ available: true });
-    expect(fake.calls).toEqual(['start', 'stop']);
+    expect(fake.calls).toEqual(['start', 'force-stop']);
   });
   test('missing CLI/auth and SDK failure surface explicitly without fabricated output', async () => {
     const missing = service(undefined, { cli: async () => { throw new ServiceError('missing_cli'); } });
@@ -231,7 +231,7 @@ describe('bounded previews and grounding', () => {
     await expect(sdk.connection(signal())).rejects.toMatchObject({ dto: { code: 'busy' } });
     controller.abort(new ServiceError('cancelled'));
     await expect(pending).rejects.toMatchObject({ dto: { code: 'cancelled' } });
-    expect(fake.calls).toContain('stop');
+    expect(fake.calls).toContain('force-stop');
     expect(existsSync(fake.options!.env!.HOME!)).toBe(false);
   });
 });

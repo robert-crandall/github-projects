@@ -25,8 +25,8 @@ test('split frames, validated output, strict input, and protocol-only stdout', a
     input.write('not json\n');
     await tick();
   }, async () => success);
-  expect(replies[0]).toEqual({ v: 1, id: 'a', ok: true, result: success });
-  expect(replies.slice(1).map(reply => reply.error)).toMatchObject([{ code: 'invalid_input' }, { code: 'protocol' }]);
+  expect(replies.find(reply => reply.id === 'a')).toEqual({ v: 1, id: 'a', ok: true, result: success });
+  expect(replies.filter(reply => reply.ok === false).map(reply => reply.error)).toMatchObject([{ code: 'invalid_input' }, { code: 'protocol' }]);
 });
 test('oversized frames discard through newline then recover', async () => {
   const replies = await harness(async input => {
@@ -84,4 +84,56 @@ test('closing stdin cancels active work and incomplete lines are errors', async 
   }));
   expect(cancelled).toBe(true);
   expect(replies.some(value => (value.error as { code: string })?.code === 'protocol')).toBe(true);
+});
+test('blocked stdout cannot delay cancellation frames or EOF cleanup', async () => {
+  const input = new PassThrough();
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let aborted = 0;
+  const task = serve(input, () => blocked, async (_request, signal) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => { aborted++; reject(signal.reason); }, { once: true });
+  }));
+  for (let i = 0; i < 5; i++) input.write(request(`job-${i}`));
+  input.write(request('cancel', 'cancel', { requestId: 'job-0' }));
+  await tick();
+  expect(aborted).toBe(1);
+  input.end();
+  await tick();
+  expect(aborted).toBe(4);
+  release();
+  await task;
+});
+test('EPIPE is terminal: cancel peers immediately without another write or unhandled rejection', async () => {
+  const input = new PassThrough();
+  let aborted = false;
+  let writes = 0;
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => { unhandled.push(error); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const task = serve(input, async () => { writes++; throw new Error('synthetic EPIPE'); }, async (request, signal) => {
+      if (request.id === 'ready') return success;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true });
+      });
+    }, { closeInput: () => { input.destroy(); } });
+    const outcome = task.then(() => undefined, error => error);
+    input.write(request('peer') + request('ready'));
+    expect(await outcome).toMatchObject({ dto: { code: 'protocol' } });
+    await tick();
+    expect(aborted).toBe(true);
+    expect(writes).toBe(1);
+    expect(input.destroyed).toBe(true);
+    expect(unhandled).toEqual([]);
+  } finally { process.off('unhandledRejection', onUnhandled); input.destroy(); }
+});
+test('response buffering and write stalls are bounded even while stdin remains open', async () => {
+  const input = new PassThrough();
+  const task = serve(input, async () => new Promise(() => {}), async () => success, {
+    outputTimeoutMs: 20, closeInput: () => { input.destroy(); },
+  });
+  const outcome = task.then(() => undefined, error => error);
+  input.write('invalid\n'.repeat(100));
+  expect(await outcome).toMatchObject({ dto: { code: 'limit' } });
+  expect(input.destroyed).toBe(true);
 });

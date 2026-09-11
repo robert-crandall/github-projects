@@ -58,7 +58,6 @@ export interface SdkClient {
   getAuthStatus(): Promise<{ isAuthenticated: boolean; host?: string }>;
   createSession(config: SessionConfig): Promise<Session>;
   deleteSession(id: string): Promise<void>;
-  stop(): Promise<Error[]>;
   forceStop(): Promise<void>;
 }
 export type SdkDependencies = {
@@ -148,15 +147,11 @@ export class CopilotService {
       clearTimeout(timer);
       if (client) {
         try {
-          const errors = await bounded(client.stop(), 2_000);
-          if (errors.length) {
-            this.deps.diagnostic('cleanup');
-            await bounded(client.forceStop(), 2_000);
-          }
+          // Sessions already disconnect/delete above. SDK 1.0.13 stop() loses its child
+          // handle before exit; forceStop() sends SIGKILL while it still owns that handle.
+          await bounded(client.forceStop(), 2_000);
         } catch {
-          this.deps.diagnostic('cleanup');
-          try { await bounded(client.forceStop(), 2_000); }
-          catch { this.deps.diagnostic('force-stop'); }
+          this.deps.diagnostic('force-stop');
         }
       }
       if (root) {
