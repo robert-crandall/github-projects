@@ -1,0 +1,470 @@
+mod activity;
+mod error;
+mod launch;
+mod model;
+mod reminders;
+mod smoke;
+mod storage;
+
+use error::{NativeError, Result};
+use launch::{GitHubIdentity, LaunchResult};
+use model::{Snapshot, WorkspaceRead};
+use reminders::{Notifications, Permission, ReminderStatus, SystemNotifications};
+use serde::Serialize;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc::{self, SyncSender},
+    Arc, Mutex,
+};
+use storage::{Backup, RawExport, StorageStatus, Store};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Emitter, Manager, State,
+};
+
+type SharedStore = Arc<Mutex<Result<Store>>>;
+
+struct NativeState {
+    store: SharedStore,
+    wake: SyncSender<()>,
+    stopped: Arc<AtomicBool>,
+    ticks: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Clock {
+    now: String,
+    time_zone: Option<String>,
+    error: Option<NativeError>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeTick {
+    clock: Clock,
+    reminders: Option<ReminderStatus>,
+    error: Option<NativeError>,
+}
+
+fn clock() -> Clock {
+    let now = chrono::Utc::now().to_rfc3339();
+    match iana_time_zone::get_timezone() {
+        Ok(time_zone) => Clock { now, time_zone: Some(time_zone), error: None },
+        Err(_) => Clock {
+            now, time_zone: None,
+            error: Some(NativeError::new("timezone-unavailable", "The local timezone could not be detected. Choose an explicit timezone before scheduling a daily routine.")),
+        },
+    }
+}
+
+async fn background<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|_| {
+            NativeError::new(
+                "native-worker-failed",
+                "A native worker stopped unexpectedly. The operation was not confirmed.",
+            )
+        })?
+}
+
+async fn with_store<T: Send + 'static>(
+    state: State<'_, NativeState>,
+    operation: impl FnOnce(&mut Store) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let store = state.store.clone();
+    background(move || {
+        let mut guard = store.lock().map_err(|_| {
+            NativeError::new(
+                "native-worker-failed",
+                "The storage worker stopped unexpectedly. Restart before saving.",
+            )
+        })?;
+        operation(guard.as_mut().map_err(|error| error.clone())?)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn workspace_read(state: State<'_, NativeState>) -> Result<WorkspaceRead> {
+    with_store(state, |store| store.read()).await
+}
+
+#[tauri::command]
+async fn workspace_save(
+    state: State<'_, NativeState>,
+    expected_revision: String,
+    snapshot: Snapshot,
+) -> Result<WorkspaceRead> {
+    let wake = state.wake.clone();
+    let saved = with_store(state, move |store| store.save(&expected_revision, snapshot)).await?;
+    wake_scheduler(&wake);
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn workspace_storage_status(state: State<'_, NativeState>) -> Result<StorageStatus> {
+    with_store(state, |store| Ok(store.status())).await
+}
+
+#[tauri::command]
+async fn workspace_create_backup(
+    state: State<'_, NativeState>,
+    expected_revision: String,
+) -> Result<Backup> {
+    with_store(state, move |store| store.create_backup(&expected_revision)).await
+}
+
+#[tauri::command]
+async fn workspace_list_backups(state: State<'_, NativeState>) -> Result<Vec<Backup>> {
+    with_store(state, |store| store.list_backups()).await
+}
+
+#[tauri::command]
+async fn workspace_read_backup(
+    state: State<'_, NativeState>,
+    backup_id: String,
+) -> Result<WorkspaceRead> {
+    with_store(state, move |store| store.read_backup(&backup_id)).await
+}
+
+#[tauri::command]
+async fn workspace_export_json(
+    state: State<'_, NativeState>,
+    expected_revision: String,
+) -> Result<String> {
+    with_store(state, move |store| store.export_json(&expected_revision)).await
+}
+
+#[tauri::command]
+async fn workspace_export_raw(state: State<'_, NativeState>) -> Result<RawExport> {
+    with_store(state, |store| store.export_raw()).await
+}
+
+#[tauri::command]
+async fn workspace_recover(
+    state: State<'_, NativeState>,
+    backup_id: String,
+    expected_recovery_token: String,
+) -> Result<WorkspaceRead> {
+    let wake = state.wake.clone();
+    let saved = with_store(state, move |store| {
+        store.recover(&backup_id, &expected_recovery_token)
+    })
+    .await?;
+    wake_scheduler(&wake);
+    Ok(saved)
+}
+
+#[tauri::command]
+async fn launch_github(identity: GitHubIdentity) -> Result<LaunchResult> {
+    background(move || launch::dispatch(identity, false)).await
+}
+
+#[tauri::command]
+async fn launch_copilot(identity: GitHubIdentity) -> Result<LaunchResult> {
+    background(move || launch::dispatch(identity, true)).await
+}
+
+#[tauri::command]
+fn clock_now() -> Clock {
+    clock()
+}
+
+#[tauri::command]
+async fn reminders_status(state: State<'_, NativeState>) -> Result<ReminderStatus> {
+    with_store(state, |store| {
+        store.reminder_status(SystemNotifications.permission()?)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn reminders_request_permission(state: State<'_, NativeState>) -> Result<Permission> {
+    let permission = background(|| SystemNotifications.request_permission()).await?;
+    wake_scheduler(&state.wake);
+    Ok(permission)
+}
+
+#[tauri::command]
+async fn reminders_retry(
+    state: State<'_, NativeState>,
+    delivery_key: String,
+    expected_revision: String,
+) -> Result<()> {
+    let wake = state.wake.clone();
+    with_store(state, move |store| {
+        store.retry_reminder(&delivery_key, &expected_revision)
+    })
+    .await?;
+    wake_scheduler(&wake);
+    Ok(())
+}
+
+fn wake_scheduler(wake: &SyncSender<()>) {
+    match wake.try_send(()) {
+        Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
+        Err(mpsc::TrySendError::Disconnected(())) => {
+            eprintln!("scheduler-stopped: Local reminder reconciliation is unavailable.")
+        }
+    }
+}
+
+fn show_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if window
+            .show()
+            .and_then(|_| window.unminimize())
+            .and_then(|_| window.set_focus())
+            .is_err()
+        {
+            eprintln!("window-show-failed: Could not show the existing workspace window.");
+        }
+    }
+    wake_scheduler(&app.state::<NativeState>().wake);
+}
+
+fn navigation_allowed(url: &url::Url) -> bool {
+    let local = url.scheme() == "tauri" && url.host_str() == Some("localhost");
+    let development = cfg!(debug_assertions)
+        && url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.port() == Some(1420);
+    local || development
+}
+
+fn install_lifecycle(
+    app: &mut tauri::App,
+    store: Result<Store>,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (wake, receiver) = mpsc::sync_channel(1);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let shared = Arc::new(Mutex::new(store));
+    let ticks = Arc::new(AtomicUsize::new(0));
+    app.manage(NativeState {
+        store: shared.clone(),
+        wake,
+        stopped: stopped.clone(),
+        ticks: ticks.clone(),
+    });
+    tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
+        .on_navigation(navigation_allowed)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .build()?;
+    let show = MenuItem::with_id(app, "show", "Show GitHub Projects", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit GitHub Projects", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    TrayIconBuilder::new()
+        .icon(
+            app.default_window_icon()
+                .ok_or("Application icon is missing")?
+                .clone(),
+        )
+        .tooltip("GitHub Projects")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => show_window(app),
+            "quit" => {
+                app.state::<NativeState>()
+                    .stopped
+                    .store(true, Ordering::SeqCst);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .build(app)?;
+    let handle = app.handle().clone();
+    std::thread::Builder::new()
+        .name("workspace-clock".into())
+        .spawn(move || {
+            let mut activity = None;
+            loop {
+                if stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                ticks.fetch_add(1, Ordering::SeqCst);
+                let result = match shared.lock() {
+                    Ok(guard) => match guard.as_ref() {
+                        Ok(store) => {
+                            match store.read().map(|saved| {
+                                saved
+                                    .snapshot
+                                    .is_some_and(|snapshot| !snapshot.reminders.is_empty())
+                            }) {
+                                Ok(pending) => {
+                                    if pending && activity.is_none() {
+                                        activity = Some(activity::BackgroundActivity::begin());
+                                    } else if !pending {
+                                        activity = None;
+                                    }
+                                    store.reconcile_reminders(
+                                        chrono::Utc::now(),
+                                        &SystemNotifications,
+                                    )
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) => Err(error.clone()),
+                    },
+                    Err(_) => Err(NativeError::new(
+                        "native-worker-failed",
+                        "The reminder worker cannot access storage. Restart the app.",
+                    )),
+                };
+                let (reminders, error) = match result {
+                    Ok(status) => (Some(status), None),
+                    Err(error) => (None, Some(error)),
+                };
+                if handle
+                    .emit(
+                        "workspace://tick",
+                        NativeTick {
+                            clock: clock(),
+                            reminders,
+                            error,
+                        },
+                    )
+                    .is_err()
+                {
+                    eprintln!(
+                        "event-dispatch-failed: Local clock status could not reach the window."
+                    );
+                }
+                match receiver.recv_timeout(std::time::Duration::from_secs(15)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        })?;
+    Ok(())
+}
+
+fn smoke_check() -> Result<()> {
+    let directory = std::env::temp_dir().join(format!(
+        "github-projects-native-smoke-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let mut store = Store::new(directory.clone())?;
+    let saved = store.read()?;
+    if saved.snapshot.is_some() {
+        return Err(NativeError::corrupt());
+    }
+    let result = store.save(
+        &saved.revision,
+        Snapshot {
+            format_version: 1,
+            workspace: serde_json::json!({"version":1,"nativeSmokeCheck":true}),
+            reminders: vec![],
+        },
+    )?;
+    let permission = SystemNotifications.permission()?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "ok": true, "snapshotInitiallyEmpty": true,
+            "saveReadRoundtrip": store.read()?.revision == result.revision,
+            "permission": permission, "clock": clock(),
+            "networkRequests": 0, "permissionRequested": false,
+        })
+    );
+    drop(store);
+    // Only this invocation's fixed-prefix UUID directory is removed.
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+pub fn run() {
+    if std::env::args().any(|arg| arg == "--native-smoke-check") {
+        if let Err(error) = smoke_check() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    let smoke_directory = std::env::args()
+        .any(|arg| arg == "--native-ui-smoke-check")
+        .then(|| {
+            std::env::temp_dir().join(format!("github-projects-ui-smoke-{}", uuid::Uuid::new_v4()))
+        });
+    let setup_directory = smoke_directory.clone();
+    let exit_code = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            workspace_read,
+            workspace_save,
+            workspace_storage_status,
+            workspace_create_backup,
+            workspace_list_backups,
+            workspace_read_backup,
+            workspace_export_json,
+            workspace_export_raw,
+            workspace_recover,
+            launch_github,
+            launch_copilot,
+            clock_now,
+            reminders_status,
+            reminders_request_permission,
+            reminders_retry,
+        ])
+        .setup(move |app| {
+            let directory = match &setup_directory {
+                Some(directory) => Ok(directory.clone()),
+                None => app.path().app_data_dir(),
+            };
+            let store = directory
+                .map_err(|_| {
+                    NativeError::new(
+                        "storage-unavailable",
+                        "The isolated workspace data directory could not be located.",
+                    )
+                })
+                .and_then(Store::new);
+            install_lifecycle(app, store)?;
+            if setup_directory.is_some() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let result = smoke::run(handle.clone());
+                    if let Err(error) = &result {
+                        eprintln!("{error}");
+                    }
+                    handle.exit(if result.is_ok() { 0 } else { 1 });
+                });
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                if window.hide().is_err() {
+                    eprintln!("window-hide-failed: Could not hide the workspace window.");
+                }
+            }
+            tauri::WindowEvent::Focused(true) => {
+                wake_scheduler(&window.state::<NativeState>().wake)
+            }
+            _ => {}
+        })
+        .build(tauri::generate_context!())
+        .expect("The native workspace could not be initialized")
+        .run_return(|app, event| match event {
+            tauri::RunEvent::Reopen { .. } => show_window(app),
+            tauri::RunEvent::Exit => {
+                let state = app.state::<NativeState>();
+                state.stopped.store(true, Ordering::SeqCst);
+                wake_scheduler(&state.wake);
+            }
+            _ => {}
+        });
+    if let Some(directory) = smoke_directory {
+        if std::fs::remove_dir_all(directory).is_err() {
+            eprintln!("smoke-cleanup-failed: The temporary smoke workspace could not be removed.");
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(exit_code);
+}

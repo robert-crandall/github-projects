@@ -1,0 +1,192 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { z } from 'zod';
+
+const instant = z.iso.datetime({ offset: true });
+const revision = z.uuid();
+const identifier = z.string().min(1).max(256).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
+const timeZone = z.string().min(1).max(128).refine(value => {
+  try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return true; }
+  catch { return false; }
+});
+export const nativeErrorSchema = z.object({
+  code: z.string(), message: z.string(), retryable: z.boolean(),
+});
+export const reminderScheduleSchema = z.object({
+  id: identifier,
+  occurrenceId: identifier,
+  dueAt: instant,
+  timeZone,
+  snoozedUntil: instant.nullish(),
+  daily: z.object({
+    time: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+    timeZone,
+  }).strict().nullish(),
+}).strict().refine(value => !value.daily || value.daily.timeZone === value.timeZone);
+
+export const snapshotSchema = z.object({
+  formatVersion: z.literal(1),
+  // Integration validates its domain schema before sending and after receiving this envelope.
+  workspace: z.object({ version: z.number().int().positive() }).catchall(z.json()),
+  reminders: z.array(reminderScheduleSchema).max(1000),
+}).strict().refine(value => new Set(value.reminders.map(schedule => schedule.id)).size === value.reminders.length);
+export const workspaceReadSchema = z.object({
+  revision,
+  snapshot: snapshotSchema.nullable(),
+  savedAt: instant.nullable(),
+}).strict();
+const permissionSchema = z.object({
+  state: z.enum(['not-determined', 'denied', 'granted', 'provisional', 'unsupported', 'unavailable']),
+  alertsEnabled: z.boolean(),
+}).strict();
+const deliverySchema = z.object({
+  deliveryKey: z.string(),
+  scheduleId: identifier,
+  occurrenceId: identifier,
+  eligibleAt: instant,
+  status: z.enum(['blocked', 'requested', 'failed', 'uncertain', 'retry']),
+  attemptedAt: instant.nullable(),
+  errorCode: z.string().nullable(),
+}).strict();
+export const reminderStatusSchema = z.object({
+  revision,
+  permission: permissionSchema,
+  deliveries: z.array(deliverySchema),
+  limitations: z.string(),
+}).strict();
+export const clockSchema = z.object({
+  now: instant,
+  timeZone: timeZone.nullable(),
+  error: nativeErrorSchema.nullable(),
+}).strict();
+export const nativeTickSchema = z.object({
+  clock: clockSchema,
+  reminders: reminderStatusSchema.nullable(),
+  error: nativeErrorSchema.nullable(),
+}).strict();
+export const githubIdentitySchema = z.object({
+  source: z.literal('github'),
+  owner: z.string().min(1).max(39).regex(/^[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/)
+    .refine(value => !value.includes('--') && !['sample', 'fixture', 'synthetic'].includes(value.toLowerCase())),
+  repo: z.string().min(1).max(100).regex(/^[a-zA-Z0-9._-]+$/).refine(value => !['.', '..'].includes(value)),
+  kind: z.enum(['pr', 'issue']),
+  number: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+const launchResultSchema = z.object({ status: z.literal('dispatch-requested'), url: z.string() }).strict();
+const backupSchema = z.object({ id: z.string(), createdAt: instant }).strict();
+const backupId = z.union([z.literal('latest'), z.uuid()]);
+
+export type NativeSnapshot = z.infer<typeof snapshotSchema>;
+export type NativeWorkspace = z.infer<typeof workspaceReadSchema>;
+export type ReminderSchedule = z.infer<typeof reminderScheduleSchema>;
+export type ReminderStatus = z.infer<typeof reminderStatusSchema>;
+export type NativeClock = z.infer<typeof clockSchema>;
+export type NativeTick = z.infer<typeof nativeTickSchema>;
+export type GitHubIdentity = z.infer<typeof githubIdentitySchema>;
+export type NativeFailure = z.infer<typeof nativeErrorSchema>;
+export type NativeCommand =
+  | 'workspace_read' | 'workspace_save' | 'workspace_storage_status'
+  | 'workspace_create_backup' | 'workspace_list_backups' | 'workspace_read_backup'
+  | 'workspace_export_json' | 'workspace_export_raw' | 'workspace_recover'
+  | 'launch_github' | 'launch_copilot' | 'clock_now'
+  | 'reminders_status' | 'reminders_request_permission' | 'reminders_retry';
+export type NativeTransport = (command: NativeCommand, args?: Record<string, unknown>) => Promise<unknown>;
+
+export class NativePlatformError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  constructor(failure: NativeFailure) {
+    super(failure.message);
+    this.name = 'NativePlatformError';
+    this.code = failure.code;
+    this.retryable = failure.retryable;
+  }
+}
+
+function parse<T>(schema: z.ZodType<T>, value: unknown, code = 'invalid-input'): T {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    throw new NativePlatformError({
+      code, retryable: false,
+      message: code === 'invalid-input'
+        ? 'The native request has an invalid or unsupported format.'
+        : 'The native response has an unsupported format. No successful operation was confirmed.',
+    });
+  }
+  return result.data;
+}
+
+const desktopTransport: NativeTransport = (command, args) => {
+  if (!isTauri()) {
+    return Promise.reject(new NativePlatformError({
+      code: 'desktop-required', retryable: false,
+      message: 'This operation requires the native desktop app. The browser demo cannot perform it.',
+    }));
+  }
+  return invoke(command, args);
+};
+
+export function createNativePlatform(transport: NativeTransport = desktopTransport) {
+  async function call<T>(command: NativeCommand, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
+    let response: unknown;
+    try { response = await transport(command, args); }
+    catch (error) {
+      if (error instanceof NativePlatformError) throw error;
+      const native = nativeErrorSchema.safeParse(error);
+      throw new NativePlatformError(native.success ? native.data : {
+        code: 'native-unavailable', retryable: true,
+        message: 'The native operation failed without a recognized response. Your changes have not been confirmed.',
+      });
+    }
+    return parse(schema, response, 'invalid-response');
+  }
+  return {
+    workspaceRead: () => call('workspace_read', workspaceReadSchema),
+    workspaceSave: (expectedRevision: string, snapshot: NativeSnapshot) => {
+      const valid = parse(snapshotSchema, snapshot);
+      if (new TextEncoder().encode(JSON.stringify(valid)).length > 8 * 1024 * 1024) {
+        throw new NativePlatformError({ code: 'snapshot-too-large', message: 'The workspace exceeds the 8 MiB native storage limit.', retryable: false });
+      }
+      return call('workspace_save', workspaceReadSchema, { expectedRevision: parse(revision, expectedRevision), snapshot: valid });
+    },
+    storageStatus: () => call('workspace_storage_status', z.object({
+      recoveryToken: revision, revision: revision.nullable(), error: nativeErrorSchema.nullable(),
+    }).strict()),
+    createBackup: (expectedRevision: string) => call('workspace_create_backup', backupSchema, { expectedRevision: parse(revision, expectedRevision) }),
+    listBackups: () => call('workspace_list_backups', z.array(backupSchema)),
+    readBackup: (id: string) => call('workspace_read_backup', workspaceReadSchema, { backupId: parse(backupId, id) }),
+    exportJson: (expectedRevision: string) => call('workspace_export_json', z.string(), { expectedRevision: parse(revision, expectedRevision) }),
+    exportRaw: () => call('workspace_export_raw', z.object({ id: revision, directory: z.string() }).strict()),
+    recoverBackup: (id: string, expectedRecoveryToken: string) => call('workspace_recover', workspaceReadSchema, {
+      backupId: parse(backupId, id), expectedRecoveryToken: parse(revision, expectedRecoveryToken),
+    }),
+    launchGitHub: (identity: GitHubIdentity) => call('launch_github', launchResultSchema, { identity: parse(githubIdentitySchema, identity) }),
+    launchCopilot: (identity: GitHubIdentity) => call('launch_copilot', launchResultSchema, { identity: parse(githubIdentitySchema, identity) }),
+    clockNow: () => call('clock_now', clockSchema),
+    reminderStatus: () => call('reminders_status', reminderStatusSchema),
+    requestReminderPermission: () => call('reminders_request_permission', permissionSchema),
+    retryReminder: (deliveryKey: string, expectedRevision: string) => call('reminders_retry', z.null(), {
+      deliveryKey: parse(z.string().regex(/^[a-f0-9]{64}$/), deliveryKey), expectedRevision: parse(revision, expectedRevision),
+    }),
+  };
+}
+
+export const nativePlatform = createNativePlatform();
+export const isDesktop = isTauri;
+
+/** Events reconcile local clocks only. They never authorize GitHub calls or reorder work. */
+export async function listenNativeTicks(
+  onTick: (tick: NativeTick) => void,
+  onError: (error: NativePlatformError) => void,
+): Promise<UnlistenFn> {
+  if (!isDesktop()) {
+    throw new NativePlatformError({ code: 'desktop-required', message: 'Native clock events require the desktop app.', retryable: false });
+  }
+  return listen<unknown>('workspace://tick', event => {
+    const parsed = nativeTickSchema.safeParse(event.payload);
+    if (parsed.success) onTick(parsed.data);
+    else onError(new NativePlatformError({
+      code: 'invalid-response', message: 'A native clock event had an unsupported format. Re-read native status.', retryable: true,
+    }));
+  });
+}
