@@ -157,7 +157,7 @@ export function getRows(state: AppState, view: View = state.view): Row[] {
     (positions.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.key) ?? Number.MAX_SAFE_INTEGER));
 }
 
-function rank(row: Row): number {
+export function priorityRank(row: Row): number {
   if (row.kind === 'routine' || row.reason.startsWith('Local reminder due')) return 0;
   if (row.kind === 'review' && row.events.some(event => event.kind === 'review-request')) {
     return row.thread?.lines !== undefined && row.thread.lines <= 100 ? 1 : 2;
@@ -261,7 +261,7 @@ export function initialState(timeZone = 'UTC'): AppState {
     },
   ];
   state.handled = [`${PREVIOUS}:request-1`, `${CLOSED}:closed-1`];
-  state.order = unsortedRows(state, 'attention').sort((a, b) => rank(a) - rank(b)).map(row => row.key);
+  state.order = unsortedRows(state, 'attention').sort((a, b) => priorityRank(a) - priorityRank(b)).map(row => row.key);
   return state;
 }
 
@@ -812,7 +812,7 @@ export function transition(state: AppState, command: Command): AppState {
       refresh(next);
       break;
     case 'reconsider': {
-      const ranked = getRows(next, 'attention').sort((a, b) => rank(a) - rank(b)).map(row => row.key);
+      const ranked = getRows(next, 'attention').sort((a, b) => priorityRank(a) - priorityRank(b)).map(row => row.key);
       next.order = [...ranked, ...next.order.filter(key => !ranked.includes(key))];
       next.newKeys = [];
       break;

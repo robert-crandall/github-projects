@@ -1,5 +1,5 @@
 import { stateSchema, threadSchema, type AppState, type ExternalOperation, type Thread } from '../types.ts';
-import { capturedReference, getRow, getRows, isRequest, transition } from './engine.ts';
+import { capturedReference, getRow, getRows, isRequest, priorityRank, transition } from './engine.ts';
 import { instant } from './clock.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
@@ -198,7 +198,27 @@ export function applySuggestedOrder(state: AppState, fingerprint: string, ordere
     || orderedKeys.some(key => !candidates.includes(key))) {
     throw new Error('Copilot did not return every candidate exactly once. No order was applied.');
   }
+
   return { ...state, order: [...orderedKeys, ...state.order.filter(key => !candidates.includes(key))], newKeys: [] };
+}
+
+export function applyScopedSuggestedOrder(state: AppState, fingerprint: string, selectedKeys: string[], orderedKeys: string[]): AppState {
+  if (orderFingerprint(state) !== fingerprint) throw new Error('Work or evidence changed. Request a fresh preview before applying.');
+  const rows = getRows(state, 'attention');
+  if (!selectedKeys.length || new Set(selectedKeys).size !== selectedKeys.length
+    || selectedKeys.some(key => !rows.some(row => row.key === key))
+    || new Set(orderedKeys).size !== orderedKeys.length || orderedKeys.length !== selectedKeys.length
+    || orderedKeys.some(key => !selectedKeys.includes(key))) {
+    throw new Error('Copilot must return each selected candidate exactly once. No order was applied.');
+  }
+  const ranks = [...new Set(rows.map(priorityRank))].sort((a, b) => a - b);
+  const fullOrder = ranks.flatMap(rank => {
+    const tier = rows.filter(row => priorityRank(row) === rank);
+    const suggestions = orderedKeys.filter(key => tier.some(row => row.key === key));
+    let index = 0;
+    return tier.map(row => selectedKeys.includes(row.key) ? suggestions[index++]! : row.key);
+  });
+  return applySuggestedOrder(state, fingerprint, fullOrder);
 }
 
 export function captureFingerprint(state: AppState, key: string): string {

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { Activity, AppState, Thread } from '../types.ts';
 import { getRow, getRows, transition } from './engine.ts';
-import { applyCaptureProposal, applySuggestedOrder, beginOperation, captureFingerprint, emptyWorkspace, finishOperation, mergeRefresh, orderFingerprint, reminderSchedules, restoreDesktop } from './live.ts';
+import { applyCaptureProposal, applyScopedSuggestedOrder, applySuggestedOrder, beginOperation, captureFingerprint, emptyWorkspace, finishOperation, mergeRefresh, orderFingerprint, reminderSchedules, restoreDesktop } from './live.ts';
 
 const now = '2026-09-11T17:00:00Z';
 const event = (id = 'request', kind: Activity['kind'] = 'review-request'): Activity => ({
@@ -219,4 +219,42 @@ test('restore rejects evidence references belonging to another thread', () => {
   state.threads.push({ ...thread(), id: '456', events: [{ ...event('foreign'), threadId: '456' }] });
   state.actions[0]!.eventIds = ['foreign'];
   expect(() => restoreDesktop(state, now)).toThrow('inconsistent references');
+});
+
+test('bounded suggestions compose a full permutation, preserve omitted slots within tiers and prioritize excluded due work', () => {
+  let state = emptyWorkspace(now, 'UTC');
+  const threads = Array.from({ length: 35 }, (_, index) => {
+    const id = String(index + 100);
+    return { ...thread(), id, number: index + 1, events: [{ ...event(`e:${id}`, index % 2 ? 'comment' : 'review-request'), threadId: id }] };
+  });
+  state = mergeRefresh(state, { threads, startedAt: now, fetchedAt: now, status: 'complete', diagnostics: [] });
+  state = transition(state, { type: 'draft', text: 'Local routine never sent as notification evidence' });
+  state = transition(state, { type: 'capture' });
+  const routineKey = state.selectedKey!;
+  state = transition(state, { type: 'routine', key: routineKey, time: '17:00', timeZone: 'UTC', steps: ['Act'] });
+  state = transition(state, { type: 'draft', text: 'Local capture omitted from notification triage' });
+  state = transition(state, { type: 'capture' });
+  const captureKey = state.selectedKey!;
+  state = transition(state, { type: 'start', key: captureKey });
+  const before = getRows(state).map(row => row.key);
+  const selected = before.filter(key => key.startsWith('t:')).slice(0, 10);
+  const ordered = [...selected].reverse();
+  const next = applyScopedSuggestedOrder(state, orderFingerprint(state), selected, ordered);
+  const after = getRows(next).map(row => row.key);
+  expect(new Set(after)).toEqual(new Set(before));
+  expect(after[0]).toBe(routineKey);
+  expect(next.activeId).toBe(state.activeId);
+  expect(next.selectedKey).toBe(captureKey);
+  expect(next.actions).toEqual(state.actions);
+  const reviewKeys = threads.filter((_, index) => index % 2 === 0).map(thread => `t:${thread.id}`);
+  const infoKeys = threads.filter((_, index) => index % 2 === 1).map(thread => `t:${thread.id}`);
+  expect(Math.max(...reviewKeys.map(key => after.indexOf(key)))).toBeLessThan(Math.min(...infoKeys.map(key => after.indexOf(key))));
+  for (const tier of [reviewKeys, infoKeys]) {
+    const omitted = tier.filter(key => !selected.includes(key));
+    expect(after.filter(key => omitted.includes(key))).toEqual(before.filter(key => omitted.includes(key)));
+    expect(after.filter(key => tier.includes(key) && selected.includes(key))).toEqual(ordered.filter(key => tier.includes(key)));
+  }
+  for (const malformed of [selected.slice(1), [...selected, 'invented'], selected.map(() => selected[0]!)]) {
+    expect(() => applyScopedSuggestedOrder(state, orderFingerprint(state), selected, malformed)).toThrow('exactly once');
+  }
 });
