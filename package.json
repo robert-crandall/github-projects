@@ -6,10 +6,17 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "dev:desktop": "vite --config vite.desktop.config.ts --host 127.0.0.1",
+    "build:desktop": "tsc --noEmit && vite build --config vite.desktop.config.ts",
+    "tauri": "tauri",
+    "native:dev": "tauri dev",
+    "native:build": "tauri build --bundles app",
+    "test:native": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test": "bun test src",
     "test:browser": "playwright test"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
     "@js-temporal/polyfill": "^0.5.1",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
@@ -17,6 +24,7 @@
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1",
     "@playwright/test": "^1.55.0",
     "@types/bun": "^1.2.21",
     "@types/react": "^19.1.13",
