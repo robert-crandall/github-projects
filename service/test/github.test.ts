@@ -175,10 +175,7 @@ describe('bounded GitHub refresh', () => {
   test('source access failure is explicit; it never means local work is done', async () => {
     const api = new FakeApi();
     api.overrides.set('GET /repos/integrations/provider/pulls/12', new ServiceError('access'));
-    const result = await new GitHubService(api).refresh(signal());
-    expect(result.status).toBe('partial');
-    expect(result.threads).toEqual([]);
-    expect(result.diagnostics[0]).toMatchObject({ scope: 'thread', threadId: '1', code: 'access' });
+    await expect(new GitHubService(api).refresh(signal())).rejects.toMatchObject({ dto: { code: 'access' } });
   });
   test('malicious source and Link URLs never get followed', async () => {
     for (const url of [
@@ -194,11 +191,100 @@ describe('bounded GitHub refresh', () => {
     api.overrides.set('GET /notifications?all=true&per_page=50&page=1', response([], {
       link: '<https://attacker.invalid/notifications?page=2>; rel="next"',
     }));
-    const result = await new GitHubService(api).refresh(signal());
-    expect(result.status).toBe('partial');
+    await expect(new GitHubService(api).refresh(signal())).rejects.toMatchObject({ dto: { code: 'invalid_output' } });
     expect(api.calls.every(value => !value.path.includes('attacker'))).toBe(true);
   });
 });
+function pause(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, milliseconds);
+    const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason); };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+function timedApi(latency: (path: string, call: number) => number) {
+  const api = new FakeApi();
+  const original = api.request.bind(api);
+  const counts = new Map<string, number>();
+  const activity = { active: 0, maximum: 0 };
+  api.request = async (method, path, signal, body) => {
+    const count = (counts.get(path) ?? 0) + 1;
+    counts.set(path, count);
+    const milliseconds = latency(path, count);
+    if (!milliseconds) return original(method, path, signal, body);
+    activity.active++;
+    activity.maximum = Math.max(activity.maximum, activity.active);
+    try { await pause(milliseconds, signal); return await original(method, path, signal, body); }
+    finally { activity.active--; }
+  };
+  return { api, activity, counts };
+}
+describe('refresh concurrency and collection budget', () => {
+  const source = '/repos/integrations/provider/pulls/12';
+  test('enriches at most three threads concurrently but returns notification order', async () => {
+    const { api, activity } = timedApi((path, call) => path === source ? call === 1 ? 40 : 5 : 0);
+    api.overrides.set('GET /notifications?all=true&per_page=50&page=1',
+      response(Array.from({ length: 6 }, (_, index) => notification(String(index + 1)))));
+    const result = await new GitHubService(api).refresh(signal());
+    expect(activity.maximum).toBe(3);
+    expect(activity.active).toBe(0);
+    expect(result.threads.map(thread => thread.id)).toEqual(['1', '2', '3', '4', '5', '6']);
+  });
+  test('soft budget keeps completed threads and reports in-flight and unstarted gaps', async () => {
+    const { api, activity, counts } = timedApi((path, call) => path === source ? call === 1 ? 5 : 1000 : 0);
+    api.overrides.set('GET /notifications?all=true&per_page=50&page=1',
+      response(Array.from({ length: 6 }, (_, index) => notification(String(index + 1)))));
+    const started = performance.now();
+    const result = await new GitHubService(api, { refreshBudgetMs: 60 }).refresh(signal());
+    expect(performance.now() - started).toBeLessThan(300);
+    expect(result.status).toBe('partial');
+    expect(result.threads.map(thread => thread.id)).toEqual(['1']);
+    expect(result.coverage).toMatchObject({ notifications: 'complete', received: 6, returned: 1, missingMeansDone: false });
+    expect(result.diagnostics.some(value => value.code === 'deadline' && value.threadId === '5')).toBe(true);
+    expect(result.diagnostics.some(value => value.code === 'deadline' && value.threadId === '2')).toBe(true);
+    expect(result.diagnostics.every(value => !value.message.includes('write'))).toBe(true);
+    expect(counts.get(source)).toBe(4);
+    expect(activity.active).toBe(0);
+  });
+  test('budget interruption preserves usable source data and acquired timeline evidence', async () => {
+    for (const stage of ['timeline', 'subscription']) {
+      const { api, activity } = timedApi(path => path.includes(stage) ? 1000 : 0);
+      const result = await new GitHubService(api, { refreshBudgetMs: 30 }).refresh(signal());
+      expect(result.status).toBe('partial');
+      expect(result.threads.length).toBe(2);
+      expect(result.threads[0]!.state).toBe('open');
+      expect(result.threads[0]!.subscription).toBe('unknown');
+      expect(result.threads[0]!.coverage.timeline).toBe(stage === 'timeline' ? 'unavailable' : 'complete');
+      expect(result.threads[0]!.evidence.length).toBe(stage === 'timeline' ? 0 : 1);
+      expect(result.diagnostics.some(value => value.code === 'deadline' && value.scope === stage)).toBe(true);
+      expect(activity.active).toBe(0);
+    }
+  });
+  test('budget with no usable thread is a read-only error, never successful empty', async () => {
+    const { api, activity } = timedApi(path => path === source ? 1000 : 0);
+    const outcome = await new GitHubService(api, { refreshBudgetMs: 30 }).refresh(signal()).catch(error => error);
+    expect(outcome).toMatchObject({ dto: { code: 'deadline' } });
+    expect(outcome.dto.message).toContain('read-only');
+    expect(outcome.dto.message).not.toContain('write');
+    expect(activity.active).toBe(0);
+  });
+  test('explicit cancellation stays an error, awaits all workers, and releases single-refresh guard', async () => {
+    let slow = true;
+    const { api, activity } = timedApi(path => slow && path === source ? 1000 : 0);
+    const service = new GitHubService(api, { refreshBudgetMs: 200 });
+    const controller = new AbortController();
+    const pending = service.refresh(controller.signal).catch(error => error);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await expect(service.refresh(signal())).rejects.toMatchObject({ dto: { code: 'busy' } });
+    controller.abort(new ServiceError('cancelled'));
+    expect(await pending).toMatchObject({ dto: { code: 'cancelled' } });
+    expect(activity.active).toBe(0);
+    slow = false;
+    expect((await service.refresh(signal())).threads.length).toBe(2);
+  });
+});
+
 describe('explicit GitHub writes (mocked only)', () => {
   const input = { operationId: 'op-1', threadId: '1', reference, displayedEvidenceIds: ['evidence-1'] };
   test('DONE is DELETE, never PATCH read; unsubscribe confirms ignored true', async () => {

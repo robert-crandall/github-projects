@@ -3,6 +3,7 @@ mod error;
 mod launch;
 mod model;
 mod reminders;
+mod service;
 mod smoke;
 mod storage;
 
@@ -11,6 +12,7 @@ use launch::{GitHubIdentity, LaunchResult};
 use model::{Snapshot, WorkspaceRead};
 use reminders::{Notifications, Permission, ReminderStatus, SystemNotifications};
 use serde::Serialize;
+use service::ServiceHost;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     mpsc::{self, SyncSender},
@@ -205,6 +207,15 @@ async fn reminders_retry(
     Ok(())
 }
 
+#[tauri::command]
+async fn service_request(
+    state: State<'_, Arc<ServiceHost>>,
+    request: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let host = state.inner().clone();
+    background(move || host.request(request)).await
+}
+
 fn wake_scheduler(wake: &SyncSender<()>) {
     match wake.try_send(()) {
         Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
@@ -240,6 +251,7 @@ fn navigation_allowed(url: &url::Url) -> bool {
 fn install_lifecycle(
     app: &mut tauri::App,
     store: Result<Store>,
+    runtime_directory: std::path::PathBuf,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (wake, receiver) = mpsc::sync_channel(1);
     let stopped = Arc::new(AtomicBool::new(false));
@@ -251,6 +263,9 @@ fn install_lifecycle(
         stopped: stopped.clone(),
         ticks: ticks.clone(),
     });
+    app.manage(Arc::new(ServiceHost::new(
+        runtime_directory.join("service-runtime"),
+    )?));
     tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
         .on_navigation(navigation_allowed)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
@@ -269,6 +284,7 @@ fn install_lifecycle(
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app),
             "quit" => {
+                app.state::<Arc<ServiceHost>>().shutdown();
                 app.state::<NativeState>()
                     .stopped
                     .store(true, Ordering::SeqCst);
@@ -379,6 +395,71 @@ fn smoke_check() -> Result<()> {
 }
 
 pub fn run() {
+    let arguments: Vec<String> = std::env::args().collect();
+    let read_only_smoke = arguments
+        .iter()
+        .any(|arg| arg == "--integration-read-smoke-check");
+    if read_only_smoke
+        || arguments
+            .iter()
+            .any(|arg| arg == "--integration-service-smoke-check")
+    {
+        let directory = std::env::temp_dir().join(format!(
+            "github-projects-service-smoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let result = (|| -> Result<()> {
+            let host = ServiceHost::new(directory.clone())?;
+            if !read_only_smoke {
+                let preview = host.request(serde_json::json!({
+                    "v":1,"id":"native-sdk-smoke","op":"copilot.interpretCapture",
+                    "input":{"captureId":"synthetic-native-capture","text":"Prepare a synthetic checklist for a local example task.","timeZone":"UTC"}
+                }))?;
+                if preview["ok"] != true
+                    || preview["result"]["previewOnly"] != true
+                    || preview["result"]["captureId"] != "synthetic-native-capture"
+                {
+                    return Err(NativeError::new(
+                        "smoke-failed",
+                        "The packaged SDK did not return a confirmed structured preview.",
+                    ));
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({"packagedSdkPreview":true,"ok":true})
+                );
+            }
+            let refresh = host.request(serde_json::json!({"v":1,"id":"native-read-smoke","op":"github.refresh","input":{}}))?;
+            if refresh["ok"] != true {
+                return Err(NativeError::new(
+                    refresh["error"]["code"].as_str().unwrap_or("smoke-failed"),
+                    refresh["error"]["message"]
+                        .as_str()
+                        .unwrap_or("The packaged read-only GitHub refresh failed."),
+                ));
+            }
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok":true,"readOnlyRefresh":true,
+                    "threads":refresh["result"]["threads"].as_array().map(Vec::len),
+                    "coverage":refresh["result"]["status"],"githubWrites":0,"permissionRequested":false
+                })
+            );
+            host.shutdown();
+            Ok(())
+        })();
+        if directory.exists() && std::fs::remove_dir_all(&directory).is_err() {
+            eprintln!(
+                "smoke-cleanup-failed: The temporary service workspace could not be removed."
+            );
+        }
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args().any(|arg| arg == "--native-smoke-check") {
         if let Err(error) = smoke_check() {
             eprintln!("{error}");
@@ -386,10 +467,19 @@ pub fn run() {
         }
         return;
     }
-    let smoke_directory = std::env::args()
-        .any(|arg| arg == "--native-ui-smoke-check")
-        .then(|| {
-            std::env::temp_dir().join(format!("github-projects-ui-smoke-{}", uuid::Uuid::new_v4()))
+    let relaunch = arguments
+        .iter()
+        .any(|arg| arg == "--native-ui-smoke-relaunch");
+    let smoke_session = arguments
+        .windows(2)
+        .find(|args| args[0] == "--integration-smoke-session")
+        .map(|args| uuid::Uuid::parse_str(&args[1]).expect("Smoke session must be a UUID"));
+    let smoke_directory =
+        (arguments.iter().any(|arg| arg == "--native-ui-smoke-check") || relaunch).then(|| {
+            std::env::temp_dir().join(format!(
+                "github-projects-ui-smoke-{}",
+                smoke_session.unwrap_or_else(uuid::Uuid::new_v4)
+            ))
         });
     let setup_directory = smoke_directory.clone();
     let exit_code = tauri::Builder::default()
@@ -409,12 +499,17 @@ pub fn run() {
             reminders_status,
             reminders_request_permission,
             reminders_retry,
+            service_request,
         ])
         .setup(move |app| {
             let directory = match &setup_directory {
                 Some(directory) => Ok(directory.clone()),
                 None => app.path().app_data_dir(),
             };
+            let runtime_directory = directory
+                .as_ref()
+                .map_err(|_| "The isolated runtime directory is unavailable")?
+                .clone();
             let store = directory
                 .map_err(|_| {
                     NativeError::new(
@@ -423,12 +518,12 @@ pub fn run() {
                     )
                 })
                 .and_then(Store::new);
-            install_lifecycle(app, store)?;
+            install_lifecycle(app, store, runtime_directory)?;
             if setup_directory.is_some() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(5));
-                    let result = smoke::run(handle.clone());
+                    let result = smoke::run(handle.clone(), relaunch);
                     if let Err(error) = &result {
                         eprintln!("{error}");
                     }
@@ -454,13 +549,14 @@ pub fn run() {
         .run_return(|app, event| match event {
             tauri::RunEvent::Reopen { .. } => show_window(app),
             tauri::RunEvent::Exit => {
+                app.state::<Arc<ServiceHost>>().shutdown();
                 let state = app.state::<NativeState>();
                 state.stopped.store(true, Ordering::SeqCst);
                 wake_scheduler(&state.wake);
             }
             _ => {}
         });
-    if let Some(directory) = smoke_directory {
+    if let Some(directory) = smoke_directory.filter(|_| smoke_session.is_none() || relaunch) {
         if std::fs::remove_dir_all(directory).is_err() {
             eprintln!("smoke-cleanup-failed: The temporary smoke workspace could not be removed.");
             std::process::exit(1);

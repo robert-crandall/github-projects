@@ -278,3 +278,10 @@ blockquote { margin: 12px 0; font-size: 12px; white-space: pre-wrap; overflow-wr
   .modal { padding: 20px; max-height: calc(100dvh - 24px); }
   .feedback { bottom: 36px; font-size: 11px; }
 }
+/* The native read gate never mounts an editable fallback workspace. */
+.desktop-loading {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem;
+}
+.desktop-loading p { max-width: 65ch; }

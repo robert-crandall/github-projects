@@ -51,6 +51,7 @@ Malformed input has `id: null`. The host should treat protocol failures as servi
 | Output backlog | 64 frames / 4 MiB; a stalled write fails after 2 seconds |
 | Request IDs | Unique per process; 1-180 ASCII identity characters; 4,096 requests per process |
 | Overall deadline | 120 seconds; cancellation propagates into gh/SDK cleanup |
+| GitHub collection | 90-second budget; three concurrent enrichment workers, one refresh at a time |
 | gh process | 20 seconds, 4 MiB combined stdout/stderr |
 | Copilot concurrency/deadline | One operation, 90 seconds including setup/inference |
 | Copilot payload/answer | 60,000 bytes each; at most one format correction within the same deadline |
@@ -100,7 +101,11 @@ Requests are recipient-specific. Another user/team's review or removal cannot su
 
 ### Coverage and limits
 
-The service explicitly requests `GET /notifications?all=true`, including read and unread outstanding threads. It fetches at most two 50-thread pages, then enriches at most 50 distinct threads, bounded by response size and deadline. Unsupported subjects, denied access, malformed responses, truncation, and rate limits are visible diagnostics. Saved local work must survive all missing/partial/error results.
+The service explicitly requests `GET /notifications?all=true`, including read and unread outstanding threads. It fetches at most two 50-thread pages, then enriches at most 50 distinct threads using three workers. The result preserves notification order regardless of worker completion order; only one refresh can run at a time.
+
+A 90-second collection budget stops remaining reads before the outer 120-second transport deadline. Completed threads are returned in one partial batch with explicit time-limit diagnostics for interrupted and unstarted evidence. If current source data was acquired before a timeline or subscription read timed out, that usable thread is retained with unavailable/unknown coverage. Explicit user cancellation still fails the operation and awaits worker cleanup; it is not partial success.
+
+A genuinely successful empty notification listing is distinct from a failed/nonempty listing with no usable threads: the latter is an error. Unsupported subjects, denied access, malformed responses, truncation, rate limits, and the response-size cap remain visible. Saved local work must survive all missing/partial/error results. The budget does not schedule another refresh or publish intermediate batches.
 
 Timeline discovery reads page 1 and, when necessary, the last page (100 events each). For exactly two pages, both are contiguous. With more pages, only the newest page is eligible evidence; disconnected page-1 history is discarded, and coverage remains partial. `coverage.newestPage`, `fetchedPages`, and `observedAt` describe the batch, not a durable server cursor. Malformed/identity-less events or incomplete newest coverage prevent definite promotion. Team membership is bounded to 200 teams; unavailable membership becomes unknown, never assumed membership.
 

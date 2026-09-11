@@ -16,6 +16,7 @@ fn main() {
             "reminders_status",
             "reminders_request_permission",
             "reminders_retry",
+            "service_request",
         ]),
     ))
     .expect("Native permissions could not be generated");

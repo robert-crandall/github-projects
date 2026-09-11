@@ -21,9 +21,12 @@ const messages: Record<ServiceErrorDTO['code'], string> = {
 };
 export class ServiceError extends Error {
   readonly dto: ServiceErrorDTO;
-  constructor(code: ServiceErrorDTO['code'], retryable = false) {
-    super(messages[code]);
-    this.dto = { code, message: messages[code], retryable };
+  constructor(code: ServiceErrorDTO['code'], retryable = false, context: 'general' | 'read' = 'general') {
+    const message = context === 'read' && (code === 'deadline' || code === 'cancelled')
+      ? `The read-only operation ${code === 'deadline' ? 'timed out' : 'was cancelled'}. Saved local work is unchanged; retry explicitly.`
+      : messages[code];
+    super(message);
+    this.dto = { code, message, retryable };
   }
 }
 export function sanitized(error: unknown): ServiceErrorDTO {

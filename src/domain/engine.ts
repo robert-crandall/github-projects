@@ -9,7 +9,10 @@ const CLOSED = 'demo-relay-88';
 const REQUESTS: Activity['kind'][] = ['review-request', 'team-request'];
 const copy = <T>(value: T): T => structuredClone(value);
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
-const isRequest = (event: Activity): boolean => REQUESTS.includes(event.kind);
+export const isRequest = (event: Activity): boolean => REQUESTS.includes(event.kind)
+  && (event.requestState === undefined || event.requestState === 'current')
+  && (event.requestState === undefined || event.kind !== 'team-request'
+    || (event.recipient?.kind === 'team' && event.recipient.viewerIsMember === true));
 const visibleEvent = (event: Activity): boolean => event.kind !== 'read' && event.kind !== 'acknowledged';
 const unique = <T>(values: T[]): T[] => [...new Set(values)];
 
@@ -18,7 +21,7 @@ function id(state: AppState, prefix: string): string {
   return `${prefix}-${state.sequence}`;
 }
 
-function action(state: AppState, title: string, origin: WorkAction['origin'] = 'fixture'): WorkAction {
+function action(state: AppState, title: string, origin: WorkAction['origin'] = state.runtime === 'desktop' ? 'github' : 'fixture'): WorkAction {
   return {
     id: id(state, 'local'), title, eventIds: [], status: 'available', notes: '', project: '',
     nextStep: '', captures: [], steps: [], origin, createdAt: state.clock, interpretation: 'none',
@@ -27,7 +30,8 @@ function action(state: AppState, title: string, origin: WorkAction['origin'] = '
 
 function pending(state: AppState, thread: Thread): Activity[] {
   if (thread.notification === 'done') return [];
-  return thread.events.filter(event => visibleEvent(event) && !state.handled.includes(event.id));
+  return thread.events.filter(event => visibleEvent(event) && !state.handled.includes(event.id)
+    && (state.runtime !== 'desktop' || thread.subscription !== 'unsubscribed' || isRequest(event) || event.kind === 'mention'));
 }
 
 function actionEvents(state: AppState, item: WorkAction): Activity[] {
@@ -36,19 +40,22 @@ function actionEvents(state: AppState, item: WorkAction): Activity[] {
 }
 
 function reviewAction(state: AppState, item: WorkAction): boolean {
-  return actionEvents(state, item).some(isRequest)
+  return actionEvents(state, item).some(event => REQUESTS.includes(event.kind))
     || (item.interpretation === 'supported' && !item.routine && !!item.threadId);
 }
 
 function reason(events: Activity[], kind: Row['kind']): string {
   if (kind === 'review') {
     if (events.some(event => event.kind === 'review-request')) return 'Direct review request · explicit request evidence';
-    if (events.some(event => event.kind === 'team-request')) {
-      return 'Team review request · integrations/terraform-provider-core-maintainers';
+    const team = events.find(event => event.kind === 'team-request');
+    if (team) {
+      return `Team review request · ${team.recipient?.name ?? 'team context unavailable'}`;
     }
     return 'Captured review · your saved intent';
   }
   const last = events.at(-1);
+  if (events.some(event => event.requestState === 'uncertain')) return 'Incomplete request evidence · inspect before deciding';
+  if (last?.requestState === 'historical') return 'Earlier request · no current obligation confirmed';
   if (last?.kind === 'mention') return 'New mention · inspect the message; no review request inferred';
   if (last?.kind === 'merge-queue') return 'Entered the merge queue · informational update';
   if (last?.kind === 'merged') return 'Source closed · informational update';
@@ -69,7 +76,7 @@ function threadRow(state: AppState, thread: Thread, fallback = false): Row | und
   const freshRequest = events.some(isRequest) && !retained.some(entry => entry.status === 'later');
   const kind: Row['kind'] = (item && reviewAction(state, item)) || freshRequest ? 'review' : 'update';
   return {
-    key: `t:${thread.id}`, title: item?.title ?? thread.title, reason: reason(evidence, kind), kind,
+    key: `t:${thread.id}`, title: item?.title ?? thread.title, reason: reason(freshRequest ? events.filter(isRequest) : evidence, kind), kind,
     thread, action: item, events: evidence, fresh: state.newKeys.includes(`t:${thread.id}`),
     available: !!local || events.length > 0,
   };
@@ -150,7 +157,7 @@ export function getRows(state: AppState, view: View = state.view): Row[] {
     (positions.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.key) ?? Number.MAX_SAFE_INTEGER));
 }
 
-function rank(row: Row): number {
+export function priorityRank(row: Row): number {
   if (row.kind === 'routine' || row.reason.startsWith('Local reminder due')) return 0;
   if (row.kind === 'review' && row.events.some(event => event.kind === 'review-request')) {
     return row.thread?.lines !== undefined && row.thread.lines <= 100 ? 1 : 2;
@@ -193,7 +200,7 @@ export function initialState(timeZone = 'UTC'): AppState {
     version: 2, clock, timeZone, threads: [], actions: [], staged: [], handled: [], seen: [], order: [],
     newKeys: [], selectedKey: `t:${PRIMARY}`, activeId: null, view: 'attention', draft: '',
     refresh: { lastSuccessAt: null, status: 'saved', message: 'Saved synthetic fixtures. Refresh applies staged demo activity only.' },
-    failures: { refresh: 'none', storage: false, interpretation: false, external: false }, undo: [], sequence: 100,
+    failures: { refresh: 'none', storage: false, interpretation: false, external: false }, undo: [], sequence: 100, operations: [],
   };
   const event = (threadId: string, suffix: string, kind: Activity['kind'], summary: string, minutes = -40): Activity => ({
     id: `${threadId}:${suffix}`, threadId, kind, at: addMinutes(clock, minutes), actor: 'demo-teammate', summary,
@@ -209,7 +216,8 @@ export function initialState(timeZone = 'UTC'): AppState {
       id: TEAM, repo: 'sample/terraform-provider', number: 202, kind: 'pr',
       title: 'Support import of integration settings', reason: 'review_requested',
       state: 'open', notification: 'unread', subscribed: true, lines: 180,
-      events: [event(TEAM, 'request-1', 'team-request', 'Review requested from integrations/terraform-provider-core-maintainers, not assigned personally.')],
+      events: [{ ...event(TEAM, 'request-1', 'team-request', 'Review requested from integrations/terraform-provider-core-maintainers, not assigned personally.'),
+        recipient: { kind: 'team', name: 'integrations/terraform-provider-core-maintainers', viewerIsMember: true } }],
     },
     {
       id: MENTION, repo: 'sample/docs', number: 303, kind: 'issue',
@@ -253,7 +261,7 @@ export function initialState(timeZone = 'UTC'): AppState {
     },
   ];
   state.handled = [`${PREVIOUS}:request-1`, `${CLOSED}:closed-1`];
-  state.order = unsortedRows(state, 'attention').sort((a, b) => rank(a) - rank(b)).map(row => row.key);
+  state.order = unsortedRows(state, 'attention').sort((a, b) => priorityRank(a) - priorityRank(b)).map(row => row.key);
   return state;
 }
 
@@ -305,7 +313,7 @@ function finishOccurrence(state: AppState, item: WorkAction, status: 'done' | 's
 
 type Reference = { repo: string; number: number };
 
-function capturedReference(text: string): Reference | undefined {
+export function capturedReference(text: string): Reference | undefined {
   const links = text.match(/(?:https|demo):\/\/[^\s<>"']+/g) ?? [];
   const references: Reference[] = [];
   for (const candidate of links) {
@@ -606,7 +614,8 @@ function undo(state: AppState): void {
     if (!entry.handledAdded.includes(eventId)) return true;
     const thread = state.threads.find(item => item.events.some(event => event.id === eventId));
     const position = thread?.events.findIndex(item => item.id === eventId) ?? -1;
-    const acknowledged = thread?.notification === 'done'
+    const acknowledged = state.operations.some(operation => operation.status === 'confirmed' && operation.eventIds.includes(eventId))
+      || thread?.notification === 'done'
       || (position >= 0 && thread?.events.slice(position + 1).some(item => item.kind === 'acknowledged'));
     const retainedHandling = state.actions.some(item => (item.status === 'done' || item.status === 'later' || item.status === 'removed')
       && item.eventIds.includes(eventId));
@@ -645,6 +654,9 @@ function reset(state: AppState): AppState {
 }
 
 export function transition(state: AppState, command: Command): AppState {
+  if (state.runtime === 'desktop' && ['stage', 'reset', 'advance', 'configure', 'notification', 'refresh', 'interpret'].includes(command.type)) {
+    throw new Error('Simulation commands are not available in a desktop workspace.');
+  }
   const next = copy(state);
   let undoable = false;
   switch (command.type) {
@@ -666,7 +678,9 @@ export function transition(state: AppState, command: Command): AppState {
       const item = action(next, next.draft.trim().split('\n')[0]!, 'capture');
       item.captures = [next.draft];
       item.interpretation = 'pending';
-      item.interpretationMessage = 'Original capture saved. Interpretation is a separate, optional action.';
+      item.interpretationMessage = next.runtime === 'desktop'
+        ? 'Original capture kept locally. Interpretation waits for a successful save.'
+        : 'Original capture saved. Interpretation is a separate, optional action.';
       next.actions.push(item);
       next.draft = '';
       next.selectedKey = `a:${item.id}`;
@@ -692,6 +706,7 @@ export function transition(state: AppState, command: Command): AppState {
       if (item.routine && !item.routine.dueAt) throw new Error('This routine is not due yet.');
       item.status = 'available';
       delete item.remindAt;
+      delete item.reminderDueAt;
       if (item.routine) delete item.routine.snoozedUntil;
       item.reminderDismissed = true;
       next.activeId = item.id;
@@ -720,8 +735,13 @@ export function transition(state: AppState, command: Command): AppState {
       unfinished(item);
       item.status = 'later';
       item.reminderDismissed = false;
-      if (remindAt) item.remindAt = remindAt;
-      else delete item.remindAt;
+      if (remindAt) {
+        item.remindAt = remindAt;
+        item.reminderDueAt = remindAt;
+      } else {
+        delete item.remindAt;
+        delete item.reminderDueAt;
+      }
       if (command.note?.trim() && !item.notes.split('\n\n').includes(command.note.trim())) {
         item.notes = [item.notes, command.note.trim()].filter(Boolean).join('\n\n');
       }
@@ -794,7 +814,7 @@ export function transition(state: AppState, command: Command): AppState {
       refresh(next);
       break;
     case 'reconsider': {
-      const ranked = getRows(next, 'attention').sort((a, b) => rank(a) - rank(b)).map(row => row.key);
+      const ranked = getRows(next, 'attention').sort((a, b) => priorityRank(a) - priorityRank(b)).map(row => row.key);
       next.order = [...ranked, ...next.order.filter(key => !ranked.includes(key))];
       next.newKeys = [];
       break;
@@ -806,6 +826,25 @@ export function transition(state: AppState, command: Command): AppState {
       next.clock = addMinutes(next.clock, command.minutes);
       settleRoutines(next);
       break;
+    case 'clock':
+      next.clock = instant(command.now);
+      settleRoutines(next);
+      break;
+    case 'routine': {
+      const item = ensureAction(next, command.key);
+      unfinished(item);
+      if (item.routine || item.steps.some(step => step.doneAt)) throw new Error('Existing routine progress cannot be replaced. Capture a separate routine.');
+      if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(command.time)
+        || !command.steps.length || command.steps.some(step => !step.trim())) throw new Error('Choose a daily time and at least one named step.');
+      const nextDueAt = nextDaily(next.clock, command.time, command.timeZone);
+      item.routine = { time: command.time, timeZone: command.timeZone, nextDueAt, history: [] };
+      item.steps = command.steps.map((title, index) => ({ id: `${item.id}-step-${index + 1}`, title: title.trim() }));
+      item.nextStep ||= item.steps[0]!.title;
+      item.interpretation = 'supported';
+      item.interpretationMessage = 'Daily routine saved. Record steps here after doing them in your tools.';
+      settleRoutines(next);
+      break;
+    }
     case 'notification':
       notification(next, command);
       break;
