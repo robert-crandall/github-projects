@@ -678,7 +678,9 @@ export function transition(state: AppState, command: Command): AppState {
       const item = action(next, next.draft.trim().split('\n')[0]!, 'capture');
       item.captures = [next.draft];
       item.interpretation = 'pending';
-      item.interpretationMessage = 'Original capture saved. Interpretation is a separate, optional action.';
+      item.interpretationMessage = next.runtime === 'desktop'
+        ? 'Original capture kept locally. Interpretation waits for a successful save.'
+        : 'Original capture saved. Interpretation is a separate, optional action.';
       next.actions.push(item);
       next.draft = '';
       next.selectedKey = `a:${item.id}`;

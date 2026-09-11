@@ -129,7 +129,7 @@ export function beginOperation(state: AppState, operation: Pick<ExternalOperatio
     throw new Error('A GitHub operation for this notification is already pending.');
   }
   next.operations.push({ ...operation, eventIds: [...new Set(operation.eventIds)], startedAt: state.clock, status: 'pending',
-    message: 'Intent saved locally. GitHub has not confirmed success.' });
+    message: 'Intent awaits local persistence. GitHub has not confirmed success.' });
   return next;
 }
 
@@ -147,12 +147,12 @@ export function finishOperation(state: AppState, id: string, result: { confirmed
   operation.message = 'GitHub confirmed this operation. Your local action is unchanged.';
   next.handled = [...new Set([...next.handled, ...operation.eventIds])];
   const thread = next.threads.find(thread => thread.id === operation.threadId)!;
-  if (operation.action === 'unsubscribe') {
+  if (operation.action === 'unsubscribe'
+    && (!thread.subscriptionObservedAt || Date.parse(operation.finishedAt) >= Date.parse(thread.subscriptionObservedAt))) {
     thread.subscribed = false;
     thread.subscription = 'unsubscribed';
     thread.subscriptionObservedAt = operation.finishedAt;
-  }
-  else if (!thread.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
+  } else if (operation.action === 'done' && !thread.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
     thread.notification = 'done';
   }
   return next;

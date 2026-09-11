@@ -221,6 +221,19 @@ test('restore rejects evidence references belonging to another thread', () => {
   expect(() => restoreDesktop(state, now)).toThrow('inconsistent references');
 });
 
+test('an old deduplicated unsubscribe confirmation cannot overwrite a newer authoritative resubscription', () => {
+  let state = beginOperation(loaded(), { id: 'retry-unsubscribe', threadId: '123', action: 'unsubscribe', eventIds: ['request'] });
+  state = mergeRefresh(state, { threads: [thread([event(), event('ordinary', 'comment')])],
+    startedAt: '2026-09-11T17:03:00Z', fetchedAt: '2026-09-11T17:04:00Z', status: 'complete', diagnostics: [] });
+  state = finishOperation(state, 'retry-unsubscribe', { confirmedAt: '2026-09-11T17:01:00Z' });
+  expect(state.operations[0]!.status).toBe('confirmed');
+  expect(state.threads[0]!.subscription).toBe('subscribed');
+  expect(state.threads[0]!.subscribed).toBe(true);
+  expect(state.threads[0]!.subscriptionObservedAt).toBe('2026-09-11T17:03:00Z');
+  expect(state.handled).not.toContain('ordinary');
+  expect(getRows(state)[0]!.events.map(event => event.id)).toContain('ordinary');
+});
+
 test('bounded suggestions compose a full permutation, preserve omitted slots within tiers and prioritize excluded due work', () => {
   let state = emptyWorkspace(now, 'UTC');
   const threads = Array.from({ length: 35 }, (_, index) => {

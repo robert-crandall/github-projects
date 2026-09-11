@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "dev:desktop": "vite --config vite.desktop.config.ts --host 127.0.0.1",
     "build:desktop": "tsc --noEmit && vite build --config vite.desktop.config.ts",
+    "build:service": "bun scripts/package-service.ts",
     "tauri": "tauri",
     "native:dev": "tauri dev",
     "native:build": "tauri build --bundles app",

@@ -2,7 +2,9 @@
 
 `native.ts` is the renderer's only native interface. It exports `nativePlatform`, `isDesktop`, runtime schemas, DTO types, and `NativePlatformError`. `createNativePlatform(transport)` supplies an injectable test boundary; the default transport refuses browser execution.
 
-This foundation does not connect `App.tsx`, `useWorkspace.ts`, or the domain engine. `index.html` and `foundation.tsx` form a separate empty desktop entry. Integration replaces that entry with the approved interface, connects its domain schema, and adds the restricted service sidecar host. No GitHub/SDK service or credentials enter this package.
+`index.html` and `desktop.tsx` start the approved workspace through `DesktopWorkspace`, `ServiceWorkspace`, and `DesktopApp`. The shared `WorkspaceApp` never invokes the browser `useWorkspace` hook in this entry. Initial rendering waits for a validated SQLite read; it never seeds fixtures or a writable fallback on read failure.
+
+`service.ts` validates operation-specific envelopes and results against the authoritative service schemas. It exposes only the restricted native JSONL host, not an HTTP client or SDK runtime. GitHub/SDK implementation code and credentials stay outside the renderer.
 
 ## Workspace transactions
 
@@ -26,7 +28,7 @@ The workspace object is a domain-owned JSON envelope. Integration validates it b
 
 A save atomically commits the workspace and its projected reminder schedules. There is no separate schedule registration command and no raw SQL API. SQLite uses `synchronous=FULL`, macOS `fullfsync`, a rollback journal, and a cross-process exclusive lock. Local saves need no network. A second desktop process cannot write the same store.
 
-Only a successful save response confirms persistence. Capture/edit queues must retain pending state on errors, serialize their saves, and adopt the returned revision only for the matching operation. `revision-conflict` means a stale writer must reload/reconcile, not retry with an invented revision. Recovery assigns a new UUID so old responses cannot become current again.
+Only a successful save response confirms persistence. `PersistenceQueue` retains pending state on errors, serializes saves, and adopts each returned revision in order. A newer pending generation prevents Saved feedback. `revision-conflict` means a stale writer must reload/reconcile, not retry with an invented revision. Recovery assigns a new UUID so old responses cannot become current again.
 
 ## Backups and explicit recovery
 
@@ -64,7 +66,7 @@ Native scheduling reads only persisted snapshots. It evaluates the later of `due
 
 `clockNow()` returns `{now,timeZone,error}` using the actual clock and detected local zone. If zone detection fails, `timeZone` is null and the error is explicit; persisted schedule zones remain unchanged.
 
-`listenNativeTicks(onTick,onError)` returns an unlisten function. `workspace://tick` events contain `{clock,reminders,error}` every approximately 15 seconds and after save, window show/focus, or permission/retry changes. The backend continues while hidden; an activity assertion prevents App Nap when schedules are registered but allows system sleep. After sleep the next tick reconciles elapsed wall-clock time. Integration should reconcile immediately on first `clockNow()` and on ticks; neither path may call GitHub or replace selected work.
+`listenNativeTicks(onTick,onError)` returns an unlisten function. `workspace://tick` events contain `{clock,reminders,error}` every approximately 15 seconds and after save, window show/focus, or permission/retry changes. The backend continues while hidden; an activity assertion prevents App Nap when schedules are registered but allows system sleep. The controller reconciles the first clock read and every tick without GitHub calls or selection changes. Clock-only changes do not save, preventing save-to-tick loops; durable routine reconciliation does save.
 
 | Method | Purpose |
 | --- | --- |
@@ -96,6 +98,16 @@ Both methods return `{status:'dispatch-requested',url}`. They reject invalid own
 
 PR handoff is exactly `ghapp://session/new?repo=OWNER%2FREPO&pr=123&mode=interactive&prompt=Review%20this%20PR`. Issue handoff is `ghapp://github.com/OWNER/REPO/issues/123`. Browser URLs always use `https://github.com/.../pull/123` or `/issues/123`. Native code invokes only `/usr/bin/open` with the generated URL, never a shell or caller-supplied executable. Success says nothing about Copilot confirmation, session creation, review completion, or return.
 
-Tauri capabilities grant the local `main` window only these bounded app commands and event listen/unlisten. Navigation remains local; new windows are denied. Production CSP disallows network connections except Tauri IPC. No shell, HTTP, SQL, filesystem, notification, or opener plugin is exposed to the renderer. The later sidecar host must keep that boundary narrow.
+Tauri capabilities grant the local `main` window only bounded app commands and event listen/unlisten. Navigation remains local; new windows are denied. Production CSP disallows network connections except Tauri IPC. No shell, HTTP, SQL, filesystem, notification, or opener plugin is exposed to the renderer.
 
 Errors use `{code,message,retryable}` and become `NativePlatformError` in TypeScript. Unexpected transport output is replaced with a generic error, not forwarded as credential-bearing diagnostics. Known storage/OS failures never log SQL, workspace content, subprocess output, or secrets.
+
+## Owned service and async reconciliation
+
+The Rust host lazily starts only the fixed packaged `github-projects-service` executable beside the native executable. Tauri bundles/signs the matching arm64 or x64 binary. Its working directory is private app data, or a generated TEST directory during explicit smoke checks. No localhost service, caller-supplied executable, path, environment, model, or command is accepted.
+
+Requests/replies are bounded to 1 MiB frames, four ordinary concurrent requests, a 150-second native timeout, and continuously drained bounded stderr. IDs correlate out-of-order replies; malformed or unknown responses stop the group. Quit, timeout, acknowledged active cancellation, and service-level cancelled/deadline results TERM then KILL the entire owned process group, including descendants. A no-op cancellation does not interrupt peers. Interrupted GitHub writes remain unconfirmed because they may have reached GitHub. The next request lazily starts a clean group.
+
+Manual refresh maps stable raw evidence into the latest domain state, not the snapshot at request start. The domain retains omitted history but downgrades stale request eligibility, protects completed evidence, and orders subscription observations against write confirmation and refresh start. A later authoritative resubscription can supersede an older unsubscribe.
+
+Write intents persist before dispatch; echoed context must match before confirmation persists. Restart turns pending outcomes into uncertainty without replay. Capture text persists before SDK interpretation. A generation registered before persistence prevents a closed preview from dispatching later. Preview fingerprints reject changed candidates, evidence, or target actions; bounded selected-scope orders compose into a full permutation only on explicit Apply.

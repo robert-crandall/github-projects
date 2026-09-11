@@ -23,6 +23,7 @@ export const threadSchema = z.object({
   subscription: z.enum(['subscribed', 'unsubscribed', 'unknown']).optional(),
   subscriptionObservedAt: time.optional(),
   rawReason: z.string().optional(),
+  sourceMetadata: z.record(z.string(), z.json()).optional(),
   coverage: z.object({
     timeline: z.enum(['complete', 'partial', 'unavailable']), newestPage: z.boolean(),
     fetchedPages: z.number().int().nonnegative(), observedAt: time,
