@@ -11,7 +11,7 @@ This is a new interaction model with fresh storage, not a reskin or a patch to t
 - `PRODUCT.md`: product authority, state semantics, and acceptance scenarios.
 - `DESIGN.md`: reusable visual guidance and replacement composition.
 - `docs/Design System.md` and `docs/Cognitive Interface Model.md`: interaction and accessibility constraints.
-- `docs/theme.md`: Fox and GitHub theme references and the remaining palette decisions.
+- `docs/theme.md`: Fox and GitHub theme references and the verified GitHub dark palette.
 
 Bring these files when copying this prompt to another workspace. Reuse the supplied purple GitHub logo if it is available; do not block the interaction on recreating an unavailable asset.
 
@@ -91,6 +91,8 @@ Keep staged source events separate from the visible saved snapshot.
 
 Use transparent deterministic recommendations: due commitments, then small reviews with fixture size evidence, then other explicit requests and captured actions. Informational updates remain secondary. Preserve the direct/team distinction without inventing effort estimates.
 
+Include **Triage with Copilot** as a first-class, explicitly simulated action. Preview suggested request/informational classifications and next actions with their evidence before applying an order. Label these deterministic sample rules, not live model output. Applying suggestions must not start, finish, defer, acknowledge, or unsubscribe work.
+
 A new review request needs a new event after the handled request. Generic timestamps, old notification reasons, new commits, and merge-queue activity cannot reopen a completed review.
 
 Repeated refresh of the same evidence must not duplicate a candidate. Capture can merge with the same outstanding action, but must not merge a later request into a completed action.
@@ -135,7 +137,7 @@ Explain simulations with brief labels. Never imply live GitHub, AI reasoning, na
 
 Use the Fox and GitHub themes from Copilot App / GitHub App as the visual references. Keep native system sans-serif. Dusk is rejected, including its old tokens and exports.
 
-Before locking visual styling, obtain a theme export or screenshots and establish the default theme. Supporting both has not yet been decided. Do not claim a guessed palette matches either theme; an interim neutral wireframe is not the finished visual prototype. Do not conduct a broad brand workshop.
+The first prototype uses GitHub dark as an implementation default. The verified app UI palette and its public Primer provenance are recorded in `docs/theme.md`; use those values. Fox remains an alternative reference, not a requirement to build a switcher now. Do not substitute guessed colors or conduct a broad brand workshop.
 
 - Use neutral large surfaces, restrained semantic accents, and foreground/background pairings from the chosen reference, with accessible contrast.
 - Establish hierarchy with space, type, labels, and stable list/detail relationships. No wall of cards or giant recommendation hero.
@@ -153,7 +155,7 @@ Use an isolated browser storage namespace. Never read or write old prototype key
 
 No GitHub API calls, credentials, OAuth flow, SDK initialization, notification writes, protocol launches, Slack calls, flag changes, or native desktop setup in this build. No backend is needed to evaluate the interaction.
 
-The eventual desktop app uses fresh local storage, native scheduling, GitHub notifications, restricted Copilot SDK assistance, and explicit Copilot App handoff. The prototype must make those boundaries apparent without implementing them.
+The eventual desktop app uses fresh local storage, native scheduling, GitHub notifications, and the **Copilot SDK for notification triage, capture interpretation, and prioritization**. Explicit Copilot App handoff is a separate capability, not a replacement for the SDK. The prototype must make those boundaries apparent without initializing live integrations.
 
 ## Completion criteria
 

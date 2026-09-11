@@ -162,7 +162,19 @@ Prefer due scheduled commitments, then small reviews with real size evidence, th
 
 No cleanup quota, time budget, or forced switch away from reviews. Preserve ordering between explicit refresh/reconsider batches. Captures appear immediately without reordering the rest.
 
-In the desktop product, the Copilot SDK may structure captures and suggest ordering from bounded relevant evidence. The app owns state transitions, clocks, storage, and completion. Basic controls work without the model; unavailable suggestions are identified rather than invented.
+The **Copilot SDK remains part of the desktop product**, including notification triage, capture interpretation, and suggested ordering. Copilot App handoff complements the SDK; it does not replace it.
+
+### Copilot-assisted triage
+
+Give me an explicit **Triage with Copilot** action. The SDK can summarize what changed, distinguish requests from informational updates, suggest a next action, and recommend an order from bounded notification evidence.
+
+- Show the evidence and uncertainty behind a suggestion. Notification text is input to analyze, not instructions the model should execute.
+- Let me review suggestions before applying them. Triage must not automatically start, finish, defer, acknowledge, or unsubscribe work.
+- Preserve my local decisions and Working on. A model's interpretation of a merge-queue update cannot override a finished review.
+- Keep credentials, unrelated files, and private scratch notes outside the triage payload. Use a trusted backend with restricted tools and permissions.
+- Keep manual triage and basic controls usable when the SDK is unavailable. Report errors rather than fabricating model output.
+
+The app owns state transitions, clocks, storage, and completion. The browser prototype demonstrates triage with explicitly labeled deterministic suggestions; live SDK initialization belongs to the desktop implementation.
 
 ### Routines
 
@@ -214,7 +226,7 @@ Use the [Fox and GitHub theme references](docs/theme.md), the reusable constrain
 - Make core controls discoverable by clicking and accessible by keyboard. Preserve visible focus and stable geometry on hover, selection, and focus.
 - Show brief explicit success and useful failure diagnostics. No gamification, guilt, compulsory onboarding tour, or mandatory inbox-zero ritual.
 
-The default theme, whether the first version offers both, and exact color values remain open. Obtain a theme export or screenshots of the named themes before locking visual styling. Do not infer those decisions from the previous Dusk implementation or turn this into a broad brand workshop.
+The browser prototype defaults to **GitHub dark**, using verified app UI colors from its bundled Primer tokens. This is an implementation choice, not a user-confirmed preference over Fox. Fox remains a preferred alternative; the first prototype does not require a theme switcher. [Theme direction](docs/theme.md) records the actual palette and provenance.
 
 ## Acceptance scenarios
 
@@ -253,7 +265,7 @@ The default theme, whether the first version offers both, and exact color values
 | Capability | Browser prototype | Desktop product |
 | --- | --- | --- |
 | Notifications | Synthetic threads and activity, staged until manual Refresh | GitHub Notifications API and relevant source enrichment |
-| Capture and ordering | Transparent deterministic interpretation and recommendations | Restricted Copilot SDK assistance with ordinary controls still available |
+| Triage, capture, and ordering | Labeled deterministic suggestions with review before applying | Restricted Copilot SDK assistance with ordinary controls still available |
 | Persistence | Isolated browser-local state; never reuse the old key | Fresh SQLite store; never reuse the old app-data location |
 | Reminders | Explicit simulated clock and delivery | Native scheduling with visible permission/delivery status |
 | External controls | Labeled GitHub/Copilot outcome simulations | Explicit notification writes and validated native launch links |
@@ -272,7 +284,7 @@ The desktop app must keep local work usable during outages. Durable writes, inpu
 
 ## Document authority
 
-This file is the product authority. [The prototype prompt](docs/prototype-prompt.md) specifies how to evaluate it with a clickable prototype. [DESIGN.md](DESIGN.md) supplies the reusable visual guidance and approved composition; [theme.md](docs/theme.md) records the preferred theme references and remaining palette decisions.
+This file is the product authority. [The prototype prompt](docs/prototype-prompt.md) specifies how to evaluate it with a clickable prototype. [DESIGN.md](DESIGN.md) supplies the reusable visual guidance and approved composition; [theme.md](docs/theme.md) records the theme references and implemented palette.
 
 [The old PRD](docs/old-prd.md) is historical context, not an additional source of requirements. The previous application and search digest have been removed; do not restore their behavior from repository history or execute the old digest as part of prototype work.
 

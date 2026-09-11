@@ -9,7 +9,7 @@ description: "The greenfield workspace's composition and visual constraints, usi
 
 **One primary thing. Calm surface.**
 
-I use the **Fox** and **GitHub** themes from Copilot App / GitHub App as the preferred visual references. [Theme direction](docs/theme.md) records what still needs an export or screenshot. Dusk is rejected; no previous palette values remain authoritative.
+I use the **Fox** and **GitHub** themes from Copilot App / GitHub App as the preferred visual references. The first prototype uses the verified GitHub dark palette recorded in [Theme direction](docs/theme.md). Dusk is rejected; no previous palette values remain authoritative.
 
 [PRODUCT.md](PRODUCT.md) owns behavior. The supplied [Design System](docs/Design%20System.md) and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) retain their reusable interaction constraints.
 
@@ -17,7 +17,7 @@ The composition is a compact list with one persistent detail pane and a stable W
 
 ## Color
 
-Do not invent or approximate named theme tokens before obtaining the reference. The default theme and whether to offer both remain open; a theme-switching interface is not implicitly required.
+Use the verified semantic values in `src/theme.css`. GitHub dark is the implementation default, not a user-confirmed choice over Fox; a theme-switching interface is not required for this prototype.
 
 - Use semantic roles for surfaces, text, boundaries, interaction states, and feedback.
 - Keep large surfaces neutral. Small accents identify actions and state without dominating the workspace.
