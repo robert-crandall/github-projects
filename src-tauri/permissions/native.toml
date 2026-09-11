@@ -6,5 +6,6 @@ commands.allow = [
   "workspace_create_backup", "workspace_list_backups", "workspace_read_backup",
   "workspace_export_json", "workspace_export_raw", "workspace_recover",
   "launch_github", "launch_copilot", "clock_now",
-  "reminders_status", "reminders_request_permission", "reminders_retry"
+  "reminders_status", "reminders_request_permission", "reminders_retry",
+  "service_request"
 ]

@@ -3,6 +3,7 @@ mod error;
 mod launch;
 mod model;
 mod reminders;
+mod service;
 mod smoke;
 mod storage;
 
@@ -17,6 +18,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use storage::{Backup, RawExport, StorageStatus, Store};
+use service::ServiceHost;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -205,6 +207,12 @@ async fn reminders_retry(
     Ok(())
 }
 
+#[tauri::command]
+async fn service_request(state: State<'_, Arc<ServiceHost>>, request: serde_json::Value) -> Result<serde_json::Value> {
+    let host = state.inner().clone();
+    background(move || host.request(request)).await
+}
+
 fn wake_scheduler(wake: &SyncSender<()>) {
     match wake.try_send(()) {
         Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
@@ -251,6 +259,7 @@ fn install_lifecycle(
         stopped: stopped.clone(),
         ticks: ticks.clone(),
     });
+    app.manage(Arc::new(ServiceHost::new(app.path().app_data_dir()?.join("service-runtime"))?));
     tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
         .on_navigation(navigation_allowed)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
@@ -269,6 +278,7 @@ fn install_lifecycle(
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app),
             "quit" => {
+                app.state::<Arc<ServiceHost>>().shutdown();
                 app.state::<NativeState>()
                     .stopped
                     .store(true, Ordering::SeqCst);
@@ -409,6 +419,7 @@ pub fn run() {
             reminders_status,
             reminders_request_permission,
             reminders_retry,
+            service_request,
         ])
         .setup(move |app| {
             let directory = match &setup_directory {
@@ -454,6 +465,7 @@ pub fn run() {
         .run_return(|app, event| match event {
             tauri::RunEvent::Reopen { .. } => show_window(app),
             tauri::RunEvent::Exit => {
+                app.state::<Arc<ServiceHost>>().shutdown();
                 let state = app.state::<NativeState>();
                 state.stopped.store(true, Ordering::SeqCst);
                 wake_scheduler(&state.wake);

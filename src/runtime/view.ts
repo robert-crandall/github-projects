@@ -1,6 +1,6 @@
 import type { AppState, Command, Row } from '../types.ts';
 
-export type Destination = { row: Row; kind: 'github' | 'copilot' | 'notification'; action?: 'done' | 'unsubscribe' };
+export type Destination = { row: Row; kind: 'github' | 'copilot' | 'notification'; action?: 'done' | 'unsubscribe'; retryId?: string };
 export type WorkspaceView = {
   state: AppState; scroll: Record<string, number>;
   dispatch: (command: Command, message?: string) => boolean;
