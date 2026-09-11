@@ -75,7 +75,7 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
         previous.id = fetched.id;
       }
     }
-    if (previous && (previous.repo !== fetched.repo || previous.number !== fetched.number || previous.kind !== fetched.kind)) {
+    if (previous && (previous.repo.toLowerCase() !== fetched.repo.toLowerCase() || previous.number !== fetched.number || previous.kind !== fetched.kind)) {
       throw new Error('GitHub returned a changed thread identity. Saved work is unchanged.');
     }
     const merged = new Map(previous?.events.map(event => [event.id, event]));

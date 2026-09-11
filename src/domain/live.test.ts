@@ -166,6 +166,31 @@ test('capture preview preserves originals and edits, matches only outstanding wo
   expect(state.actions[1]!.id).not.toBe(activeId);
 });
 
+test('case-normalized GitHub source association preserves a captured action and chosen work', () => {
+  const original = 'Review https://github.com/OCTO/PROJECT/pull/1';
+  let state = transition(emptyWorkspace(now, 'UTC'), { type: 'draft', text: original });
+  state = transition(state, { type: 'capture' });
+  const key = state.selectedKey!;
+  state = transition(state, { type: 'edit', key, notes: 'Keep these notes', title: 'My review' });
+  state = applyCaptureProposal(state, key, captureFingerprint(state, key), {
+    kind: 'action', title: 'Suggested review', steps: [], dailyAt: null, timeZone: 'UTC', uncertainty: '',
+  });
+  state = transition(state, { type: 'start', key });
+  const action = structuredClone(state.actions[0]!);
+  expect(action.threadId).toMatch(/^capture:/);
+  const next = refresh(state, [event()]);
+  expect(next.threads).toHaveLength(1);
+  expect(next.threads[0]!.repo).toBe('octo/project');
+  expect(next.actions).toEqual([{ ...action, threadId: '123' }]);
+  expect(next.actions[0]!.captures).toEqual([original]);
+  expect(next.actions[0]!.notes).toBe('Keep these notes');
+  expect(next.selectedKey).toBe(key);
+  expect(next.activeId).toBe(action.id);
+  for (const changed of [{ ...thread(), number: 2 }, { ...thread(), kind: 'issue' as const }]) {
+    expect(() => mergeRefresh(next, { threads: [changed], startedAt: now, fetchedAt: now, status: 'complete', diagnostics: [] })).toThrow('changed thread identity');
+  }
+});
+
 test('local reminder snooze retains occurrence identity across relaunch', () => {
   let state = transition(loaded(), { type: 'later', key: 't:123', remindAt: '2026-09-11T17:10:00Z' });
   const schedule = reminderSchedules(state)[0]!;

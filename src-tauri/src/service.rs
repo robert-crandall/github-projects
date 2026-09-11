@@ -24,6 +24,7 @@ pub struct ServiceHost {
     binary: PathBuf,
     directory: PathBuf,
     process: Mutex<Option<Arc<ServiceProcess>>>,
+    closed: AtomicBool,
 }
 
 struct ServiceProcess {
@@ -110,6 +111,7 @@ impl ServiceHost {
             binary,
             directory,
             process: Mutex::new(None),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -126,6 +128,12 @@ impl ServiceHost {
         bytes.push(b'\n');
         let process = {
             let mut current = self.process.lock().map_err(|_| protocol_error())?;
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(failure(
+                    "service-stopped",
+                    "The app is shutting down. No new service request was started.",
+                ));
+            }
             if current
                 .as_ref()
                 .is_none_or(|process| process.stopped.load(Ordering::SeqCst))
@@ -183,6 +191,7 @@ impl ServiceHost {
     }
 
     pub fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         if let Ok(mut current) = self.process.lock() {
             if let Some(process) = current.take() {
                 process.shutdown(failure(
@@ -394,6 +403,7 @@ mod tests {
             binary,
             directory: directory.path().join("private"),
             process: Mutex::new(None),
+            closed: AtomicBool::new(false),
         };
         let result = host
             .request(json!({"v":1,"id":"test","op":"github.refresh","input":{}}))
@@ -416,6 +426,7 @@ mod tests {
             binary,
             directory: directory.path().join("private"),
             process: Mutex::new(None),
+            closed: AtomicBool::new(false),
         };
         assert!(host
             .request_with_timeout(
@@ -442,6 +453,7 @@ mod tests {
             binary,
             directory: directory.path().join("private"),
             process: Mutex::new(None),
+            closed: AtomicBool::new(false),
         };
         let started = std::time::Instant::now();
         let result = host.request_with_timeout(json!({"v":1,"id":"test","op":"copilot.interpretCapture","input":{"text":"x".repeat(200_000)}}), Duration::from_millis(50));
@@ -462,6 +474,7 @@ mod tests {
             binary,
             directory: directory.path().join("private"),
             process: Mutex::new(None),
+            closed: AtomicBool::new(false),
         });
         (directory, host)
     }
@@ -590,5 +603,42 @@ mod tests {
             "confirmed"
         );
         host.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quit_prevents_queued_or_late_requests_from_spawning_a_new_group() {
+        let (_directory, host) = fixture("read request");
+        let locked = host.process.lock().unwrap();
+        let (attempted, waiting) = mpsc::sync_channel(1);
+        let late = host.clone();
+        let queued = std::thread::spawn(move || {
+            attempted.send(()).unwrap();
+            late.request_with_timeout(
+                json!({"v":1,"id":"late","op":"github.refresh","input":{}}),
+                Duration::from_millis(30),
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!queued.is_finished());
+        let closing = host.clone();
+        let shutdown = std::thread::spawn(move || closing.shutdown());
+        while !host.closed.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        drop(locked);
+        let result = queued.join().unwrap();
+        shutdown.join().unwrap();
+        host.shutdown();
+        assert_eq!(result.unwrap_err().code, "service-stopped");
+        assert_eq!(
+            host.request(json!({"v":1,"id":"after-quit","op":"github.refresh","input":{}}))
+                .unwrap_err()
+                .code,
+            "service-stopped"
+        );
+        assert!(host.process.lock().unwrap().is_none());
+        assert!(!host.directory.exists());
     }
 }
