@@ -1,50 +1,42 @@
-# Theme direction: Fox and GitHub
+# Theme direction: GitHub and Fox
 
-**Approved references:** the **Fox** and **GitHub** themes in Copilot App / GitHub App.
+The browser prototype uses **GitHub dark**. I chose that default to proceed with the build; it is not a user-confirmed preference over Fox.
 
-**Rejected:** Dusk. Its lavender surfaces, warm text, fern accent, and exported tokens are not requirements for the new app.
+The values are verified against Copilot App's bundled **Primer 11.10.0** semantic tokens. The [public Primer package](https://www.npmjs.com/package/@primer/primitives/v/11.10.0) supplies the underlying palette. These are UI colors, not a terminal palette or a guessed GitHub look.
 
-This document replaces the old Dusk export. It is a reference brief, not a verified token palette.
+Exact parity with the user's installed app release is not established. The prototype implements a small semantic projection, not Copilot App's components.
 
-## What is settled
+## Implemented palette
 
-- Match the named app themes rather than inventing a new brand or another custom palette.
-- Keep native system typography, a calm workspace, and one focal detail.
-- Use theme roles for surfaces, text, borders, selection, focus, and semantic feedback.
-- Keep colors independent of layout and work state so choosing a theme does not change behavior.
+[`src/theme.css`](../src/theme.css) is the implementation authority.
 
-The references are the themes in the app, not an unrelated theme with the same name or an assumed copy of the GitHub website.
-
-## What still needs a reference
-
-An authoritative theme export is preferable. Screenshots of each theme's list/detail view and selected or focused controls can establish the visual direction when exports are unavailable.
-
-| Decision | Status |
+| Role | GitHub dark |
 | --- | --- |
-| Default theme | Not selected between Fox and GitHub. |
-| Theme options | Offering both in the first version is not yet a requirement. |
-| Light/dark variants | Not specified; do not invent required variants. |
-| Exact colors and pairings | No verified export or screenshots have been supplied for either theme. |
+| Workspace / input | `#0d1117` |
+| Sidebar / subtle surface | `#151b23` |
+| Control / hover | `#212830` / `#262c36` |
+| Primary / secondary text | `#f0f6fc` / `#9198a1` |
+| Default / muted border | `#3d444d` / `#3d444db3` |
+| Emphasized control boundary | `#656c76` |
+| Link / focus | `#4493f8` |
+| Primary action / foreground | `#1f6feb` / `#ffffff` |
+| Selected row background | `#388bfd1a` |
+| Text selection / foreground | `#1f6feb` / `#ffffff` |
+| Success / warning / error text | `#3fb950` / `#d29922` / `#f85149` |
 
-Confirm these before treating the visual prototype as finished. A neutral wireframe can evaluate interaction first, but must not be presented as either theme.
+Preserve alpha in the muted border and selected-row values. Do not substitute an opaque approximation.
 
-## Applying the chosen theme
+## Fox remains a preferred alternative
 
-Map the reference into a small set of semantic roles:
+The user also likes Fox in Copilot App. Its app catalog and generated color roles were located during research, but this prototype does not implement a theme switcher or claim to render Fox.
 
-| Role family | Required coverage |
-| --- | --- |
-| Surfaces | Workspace, navigation, detail, input, hover, pressed, selected. |
-| Text | Primary, secondary, disabled, links, text on action fills. |
-| Boundaries | Dividers, controls, selected state, keyboard focus. |
-| Feedback | Success, warning, and error with readable foreground/background pairs. |
+A later Fox option should use those actual app roles, not an unrelated similarly named theme. Light, high-contrast, and other variants are not part of this first browser prototype.
 
-Use actual reference values when available. Do not fill missing values with old Dusk tokens or fabricated values labeled Fox/GitHub.
+## Invariants
 
-Check contrast on the real rendered pairings. Labels and interactive metadata must remain readable; selection and status cannot depend on hue alone. Focus must be visible without changing geometry.
+- No Dusk tokens, lavender/fern fallback, or invented named-theme values.
+- Theme roles stay independent of layout, stored commitments, and source activity.
+- Check contrast on rendered foreground/background pairings, including alpha surfaces.
+- Labels, icons, and structure accompany color. Focus remains visible without changing geometry.
 
-## Authority
-
-[`PRODUCT.md`](../PRODUCT.md) owns behavior. [`DESIGN.md`](../DESIGN.md) and the [Design System](Design%20System.md) retain the composition and accessibility constraints.
-
-Old application CSS, generated design sidecars, screenshots of the previous prototype, and Dusk exports are historical material, not fallback theme sources.
+[`PRODUCT.md`](../PRODUCT.md) owns behavior. [`DESIGN.md`](../DESIGN.md) and the [Design System](Design%20System.md) own composition and accessibility constraints. Old CSS and generated sidecars remain historical, not fallback sources.
