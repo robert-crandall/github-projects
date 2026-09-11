@@ -206,14 +206,21 @@ function pageLink(response: ApiResponse, relation: 'last' | 'next', path: string
 }
 function diagnose(scope: Diagnostic['scope'], error: unknown, threadId?: string): Diagnostic {
   const dto = sanitized(error);
-  return { scope, code: dto.code, message: dto.message, ...(threadId ? { threadId } : {}) };
+  const message = dto.code === 'deadline'
+    ? 'GitHub collection reached its time limit. Completed results are retained; refresh explicitly to retry missing evidence.'
+    : dto.message;
+  return { scope, code: dto.code, message, ...(threadId ? { threadId } : {}) };
 }
 
 export class GitHubService {
+  private refreshing = false;
+  private readonly refreshBudgetMs: number;
   private readonly writes = new Map<string, {
     context: string; result: Promise<z.infer<typeof writeResultSchema>>;
   }>();
-  constructor(private readonly api: GitHubApi = new GhApi()) {}
+  constructor(private readonly api: GitHubApi = new GhApi(), options: { refreshBudgetMs?: number } = {}) {
+    this.refreshBudgetMs = z.number().int().positive().max(LIMITS.refreshMs).parse(options.refreshBudgetMs ?? LIMITS.refreshMs);
+  }
   async connection(signal: AbortSignal) {
     const response = await this.api.request('GET', '/user', signal);
     requireStatus(response);
@@ -234,6 +241,22 @@ export class GitHubService {
     throw new ServiceError('limit');
   }
   async refresh(signal: AbortSignal) {
+    checkAbort(signal);
+    if (this.refreshing) throw new ServiceError('busy', true);
+    this.refreshing = true;
+    const budget = new AbortController();
+    const timer = setTimeout(() => budget.abort(new ServiceError('deadline', true)), this.refreshBudgetMs);
+    try {
+      return await this.collectRefresh(signal, AbortSignal.any([signal, budget.signal]));
+    } catch (error) {
+      if (error instanceof ServiceError) throw new ServiceError(error.dto.code, error.dto.retryable, 'read');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      this.refreshing = false;
+    }
+  }
+  private async collectRefresh(callerSignal: AbortSignal, signal: AbortSignal) {
     const { viewer, scopes } = await this.connection(signal);
     const diagnostics: Diagnostic[] = [];
     let memberships: Set<string> | null = null;
@@ -241,13 +264,14 @@ export class GitHubService {
       if (!scopes.some(scope => ['read:org', 'write:org', 'admin:org'].includes(scope))) throw new ServiceError('missing_scope');
       memberships = await this.memberships(signal);
     }
-    catch (error) { checkAbort(signal); diagnostics.push(diagnose('teams', error)); }
+    catch (error) { checkAbort(callerSignal); diagnostics.push(diagnose('teams', error)); }
     const notifications: Notification[] = [];
     let pages = 0;
     let complete = false;
     let received = 0;
     for (let page = 1; page <= LIMITS.notificationPages; page++) {
       try {
+        checkAbort(signal);
         const response = await this.api.request('GET', `/notifications?all=true&per_page=50&page=${page}`, signal);
         requireStatus(response);
         const batch = parse(z.array(z.unknown()).max(50), response.body);
@@ -260,7 +284,7 @@ export class GitHubService {
         }
         if (!pageLink(response, 'next', '/notifications')) { complete = true; break; }
       } catch (error) {
-        checkAbort(signal);
+        checkAbort(callerSignal);
         if (!pages) throw error;
         diagnostics.push(diagnose('notifications', error));
         break;
@@ -270,24 +294,49 @@ export class GitHubService {
       diagnostics.push(diagnose('notifications', new ServiceError('limit')));
       complete = false;
     }
+    const selected = notifications.slice(0, LIMITS.threads);
+    const collected: (Thread | undefined)[] = Array.from({ length: selected.length });
+    let nextIndex = 0;
+    const worker = async () => {
+      while (!signal.aborted && nextIndex < selected.length) {
+        const index = nextIndex++;
+        const notification = selected[index]!;
+        try {
+          collected[index] = await this.enrich(notification, viewer, memberships, diagnostics, signal, callerSignal);
+        } catch (error) {
+          checkAbort(callerSignal);
+          diagnostics.push(diagnose('thread', error, notification.id));
+        }
+      }
+    };
+    const workers = await Promise.allSettled(Array.from({ length: Math.min(LIMITS.enrichmentConcurrency, selected.length) }, worker));
+    checkAbort(callerSignal);
+    const failedWorker = workers.find(worker => worker.status === 'rejected');
+    if (failedWorker?.status === 'rejected') throw failedWorker.reason;
+    if (signal.aborted) {
+      diagnostics.push(diagnose('thread', signal.reason));
+      for (const notification of selected.slice(nextIndex)) {
+        diagnostics.push(diagnose('thread', signal.reason, notification.id));
+      }
+    }
     const threads: Thread[] = [];
     let resultBytes = 0;
-    for (const notification of notifications.slice(0, LIMITS.threads)) {
-      checkAbort(signal);
-      try {
-        const thread = await this.enrich(notification, viewer, memberships, diagnostics, signal);
-        const bytes = Buffer.byteLength(JSON.stringify(thread));
-        if (resultBytes + bytes > LIMITS.responseBytes * 0.8) {
-          diagnostics.push(diagnose('notifications', new ServiceError('limit')));
-          complete = false;
-          break;
-        }
-        resultBytes += bytes;
-        threads.push(thread);
-      } catch (error) {
-        checkAbort(signal);
-        diagnostics.push(diagnose('thread', error, notification.id));
+    for (const thread of collected) {
+      if (!thread) continue;
+      const bytes = Buffer.byteLength(JSON.stringify(thread));
+      if (resultBytes + bytes > LIMITS.responseBytes * 0.8) {
+        diagnostics.push(diagnose('notifications', new ServiceError('limit')));
+        complete = false;
+        break;
       }
+      resultBytes += bytes;
+      threads.push(thread);
+    }
+    const successfulEmpty = received === 0 && complete && !diagnostics.some(value => value.scope === 'notifications');
+    if (!threads.length && !successfulEmpty) {
+      const failure = signal.aborted ? 'deadline'
+        : diagnostics.find(value => value.scope !== 'teams')?.code ?? 'unavailable';
+      throw new ServiceError(failure, failure === 'deadline' || failure === 'unavailable' || failure === 'rate_limit');
     }
     return refreshSchema.parse({
       batchId: randomUUID(), fetchedAt: new Date().toISOString(), viewer,
@@ -300,7 +349,7 @@ export class GitHubService {
   }
   private async enrich(
     notification: Notification, viewer: string, memberships: Set<string> | null,
-    diagnostics: Diagnostic[], signal: AbortSignal,
+    diagnostics: Diagnostic[], signal: AbortSignal, callerSignal: AbortSignal,
   ): Promise<Thread> {
     const reference = sourceReference(notification);
     const root = `/repos/${reference.repo}`;
@@ -312,6 +361,7 @@ export class GitHubService {
     let coverage: Thread['coverage'] = { timeline: 'unavailable', newestPage: 0, fetchedPages: [], observedAt };
     let evidence: Evidence[] = [];
     try {
+      checkAbort(signal);
       const path = `${root}/issues/${reference.number}/timeline`;
       const first = await this.api.request('GET', `${path}?per_page=100&page=1`, signal);
       requireStatus(first);
@@ -346,17 +396,18 @@ export class GitHubService {
       }
       if (coverage.timeline === 'partial') diagnostics.push(diagnose('timeline', new ServiceError('limit'), notification.id));
     } catch (error) {
-      checkAbort(signal);
+      checkAbort(callerSignal);
       diagnostics.push(diagnose('timeline', error, notification.id));
     }
     let subscription: Thread['subscription'] = 'unknown';
     try {
+      checkAbort(signal);
       const subscriptionResponse = await this.api.request('GET', `/notifications/threads/${notification.id}/subscription`, signal);
       requireStatus(subscriptionResponse);
       const value = parse(z.object({ subscribed: z.boolean(), ignored: z.boolean() }), subscriptionResponse.body);
       subscription = value.ignored ? 'unsubscribed' : value.subscribed ? 'subscribed' : 'unknown';
     } catch (error) {
-      checkAbort(signal);
+      checkAbort(callerSignal);
       diagnostics.push(diagnose('subscription', error, notification.id));
     }
     return {

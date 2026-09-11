@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const LIMITS = {
   frameBytes: 1_048_576, responseBytes: 1_048_576, concurrent: 4, deadlineMs: 120_000,
   processBytes: 4_194_304, processMs: 20_000, notificationPages: 2, threads: 50,
+  refreshMs: 90_000, enrichmentConcurrency: 3,
   eventPages: 2, events: 200, evidenceText: 2_000, modelBytes: 60_000, modelMs: 90_000,
 } as const;
 
