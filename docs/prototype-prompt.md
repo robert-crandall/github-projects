@@ -1,148 +1,166 @@
-# Build prompt: GitHub-centric GTD visual prototype
+# Build prompt: a stable workspace with GitHub notifications
 
-I want you to build a polished, clickable **browser prototype** of my personal GitHub-centric Getting Things Done app.
+Build a polished, clickable **browser prototype** of the greenfield GitHub Projects app. I want to evaluate how it works before implementing the desktop backend.
 
-My goal is to evaluate the interface before wiring integrations. Build the interaction, not a static mockup, and not the eventual desktop backend.
+Notifications tell me what changed. Local actions record what I intend to do. Neither incoming activity nor recommendations may replace work I chose.
+
+This is a new interaction model with fresh storage, not a reskin or a patch to the old Now/Next/Sleep app.
 
 ## Read first
 
-- `PRODUCT.md`: confirmed requirements and scope authority.
-- `docs/Design System.md`: visual and interaction constraints.
-- `docs/Cognitive Interface Model.md`: how the interface should support my attention.
-- `docs/theme.md`: Dusk palette and semantic color roles.
-- `docs/successful-prompt.md`: reference for GitHub signals only. **Do not execute its commands.**
+- `PRODUCT.md`: product authority, state semantics, and acceptance scenarios.
+- `DESIGN.md`: reusable visual guidance and replacement composition.
+- `docs/Design System.md` and `docs/Cognitive Interface Model.md`: interaction and accessibility constraints.
+- `docs/theme.md`: Fox and GitHub theme references and the remaining palette decisions.
 
-Do not inherit the project-first landing page, notification routing engine, or broad feature checklist from `docs/old-prd.md`.
+Bring these files when copying this prompt to another workspace. Reuse the supplied purple GitHub logo if it is available; do not block the interaction on recreating an unavailable asset.
 
-If this prompt is copied to another workspace, bring the files above. Do not silently substitute generic styling when the supplied theme or design constraints are missing.
+Do not inherit requirements from `docs/old-prd.md`, `docs/successful-prompt.md`, existing application code, old direction comments, or generated design sidecars. No project-first dashboard, search-driven obligation collection, routing rules, or Sleep/Wake mechanism.
 
-## What I am trying to do
+## What I need to evaluate
 
-My GitHub digest is useful, but it misses work I capture myself:
+The defining scenario is:
 
-- A drive-by request to review a PR.
-- A routine: every day at 10am, alert Slack channels that I am increasing a feature flag, then increase it.
+1. I choose a requested PR review and leave myself a note.
+2. I use Review in Copilot and return with the same context.
+3. I mark my review Done, even though the PR remains open.
+4. I refresh after the PR enters the merge queue. My review stays finished.
+5. A genuinely new review request can appear separately without replacing other work.
 
-I need the app to collect those commitments, recommend one action, and preserve my place when I leave.
+The Copilot launch in this prototype is a labeled simulation, not a real external session.
 
-I favor quick reviews to close small loops. **Do not impose a review quota, cleanup timer, or forced switch to project work.**
+I will reject a moving target, a raw unsorted notification dump, buried external links, or an interface that makes every update look like a new obligation.
 
-I will reject an ugly interface, an unsorted task dump, or a screen where what matters now looks the same as what can wait.
+## First screen
 
-## First screen and navigation
+Use a compact list and a persistent detail pane. Give the selected item one clear focal area, not an oversized recommendation card or several equally prominent panels.
 
-Build an application, not a landing page.
+| Area | Content |
+| --- | --- |
+| **Working on** | A stable anchor for the one action I explicitly chose. Empty until I choose; never filled automatically by ranking. |
+| **Needs attention** | Relevant updates, requests, available captures, and due commitments. Group GitHub activity by issue or PR. Recommendations live here. |
+| **Later** | Actions I retained for another time, with optional reminders and context notes. |
 
-- **Now:** one dominant action with its source, short reason, and primary Start control. Once started, show the next concrete step and completion control.
-- **Next:** a compact, ranked list of other available work. A "show all" control is fine; a processing cutoff is not.
-- **Later:** collapsed, quieter, and clearly labeled. Keep future, deferred, and someday work discoverable.
-- **Waiting:** preserve the distinction between someone else blocking me and my choosing to defer work.
-- **Capture:** a visible, globally reachable control for freeform text and links. No mandatory classification form.
-- **Projects:** optional context reachable without making the main screen a project dashboard. Support a lightweight name, notes, and associated actions.
+Keep Capture and a labeled Refresh control visible. Show the last successful refresh time. Make history, routines, optional project context, and simulation controls secondary and discoverable.
 
-Use hierarchy and landmarks, not a wall of cards. Keep the main workspace calm and let me drill into detail. Never make chat the only way to capture, complete, defer, or switch work.
+Selecting a row opens details without switching Working on. **Work on this** explicitly chooses or resumes an action. A visible return control restores the current action after inspecting something else.
 
-## Working interactions
+On narrow screens, use a list/detail transition with Back. Preserve selected item, scroll position, and drafts.
 
-Implement these with real local state:
+## Item details and external destinations
 
-1. Capture arbitrary freeform text; save the original immediately.
-2. Show a simulated structured interpretation for the supported review and daily-routine examples. Make it editable.
-3. For unsupported input, retain a normal saved item and state the simulation's limitation. Do not discard it or fabricate interpretation.
-4. Start an action and keep it in Now until I complete or explicitly switch, even when new work arrives.
-5. Complete, undo, defer, restore, and mark work waiting with a reason.
-6. Autosave scratch notes and checklist progress.
-7. Track the routine's ordered "Announce change" and "Increase flag" steps. Do not imply either external action happened until I mark it done.
-8. Simulate the due time, one reminder, snooze, skip, and completed occurrences.
-9. Coalesce missed daily occurrences into one outstanding routine with history. Never present several flag increases as catch-up work.
-10. Preserve partial progress and original timestamps when time advances. Do not relabel yesterday's completed step as today's.
-11. Deduplicate a captured review against the same synthetic GitHub review obligation, retaining both sources.
-12. Persist captures, notes, progress, active work, and decisions across reloads.
+Lead with **what changed and why it might need me**. Show explicit request evidence separately from uncertain interpretation. Then show my action, next step, notes, and checklist.
 
-Completion is local prototype state, never proof of a GitHub review, Slack post, or flag change.
+Every GitHub row and detail must visibly expose **Open on GitHub**. PRs also expose **Review in Copilot**; issues expose **Open in Copilot**. Do not hide these under sources, an overflow menu, or a required detail disclosure.
 
-## Simulated prioritization
+Local tasks without references have no invented GitHub or Copilot action. Full original captures and evidence stay available as supporting detail.
 
-Use transparent deterministic logic for this prototype, not an LLM:
+Use stable synthetic identities such as `demo://github/sample/repository/pull/101`. Never turn fixture numbers into real GitHub or Copilot destinations.
 
-1. Keep an active action in Now.
-2. If nothing is active, recommend a due routine first.
-3. Otherwise, favor small reviews.
-4. Order remaining actionable work consistently, using staleness as a tie-breaker.
-5. Keep future, deferred, completed, and waiting work out of immediate recommendations.
+External buttons open a labeled simulation showing the intended destination and outcome. Cover launch requested, user cancellation, unavailable app, and return. None completes the local action or proves that a Copilot session exists.
 
-Make a due routine visible without replacing another active action. Do not nag repeatedly.
+The eventual PR link uses `ghapp://session/new` with a validated repository, PR number, `mode=interactive`, and a short fixed review prompt. Issue navigation uses `ghapp://github.com/OWNER/REPO/issues/NUMBER`. `PRODUCT.md` owns the live contract; do not register protocol handlers or call those URLs here.
 
-Use believable fixture evidence for "small review," such as a small diff. Do not claim precise completion times. Show a concise reason for the recommendation, and let me choose something else.
+## State and controls
 
-## Sample data and demo controls
+Represent notification threads, incoming activity, and local actions separately. A PR identity is not the identity of every future action on that PR.
 
-Seed a small but varied set of clearly synthetic work:
+| Control | Prototype behavior |
+| --- | --- |
+| **Work on this** | Choose a durable local action. Selecting or launching an item alone does not choose it. |
+| **Done** | Finish the local action and handle its associated evidence. Keep the PR and notification state separate. |
+| **Later** | Retain the action outside immediate work, with an optional reminder and note. |
+| **Mark notification done on GitHub** | Simulate acknowledgement of the displayed update without finishing or deleting retained local work. |
+| **Unsubscribe on GitHub** | Simulate subscription change without finishing retained local work. Explain that mentions and review requests can notify again. |
 
-- A small PR review requested directly of me.
-- A distinct team review request for `integrations/terraform-provider-core-maintainers`.
-- An authored PR with failing CI.
-- A mention that **may** need a reply, visibly weaker than an explicit request.
-- A manually captured task without a GitHub link.
-- The daily 10am feature-flag routine.
-- A future/deferred action, a waiting action, and an optional project with notes.
+Opening details records a local seen state, not completion or a simulated GitHub write. Do not require both local handling and GitHub acknowledgement just to clear one update.
 
-Give fixture PRs stable synthetic identities so duplicate capture can be exercised. Do not present invented PRs or people as live GitHub data or link fictitious work to potentially real PR URLs.
+No separate Waiting state. "Waiting for a response" is an optional note on a retained action in Later.
 
-Provide a small, secondary **Demo scenarios** control:
+Preserve local notes, checklists, captures, selected detail, current work, handled evidence, and decisions across reload. Local completion, switching, Later, and removal are recoverable. Local Undo must not pretend to reverse a simulated external write.
 
-- Before 10am / routine due.
-- New review arrives while I am active.
-- Return after several missed days.
-- No actionable work.
-- Simulated sync or interpretation error.
-- Reset sample data without silently deleting my captures.
+## Manual refresh and stable ordering
 
-Label simulated recommendations, data freshness, and notifications honestly. Keep the label unobtrusive, but never imply live GitHub, real Copilot reasoning, or OS notification delivery.
+Keep staged source events separate from the visible saved snapshot.
 
-## Visual direction
+- Arriving fixture activity stays staged until I click **Refresh**. Startup, focus, and timers do not apply it.
+- Apply refresh as one batch. Keep Working on, selected detail, focus, edits, and existing row order stable.
+- Put new entries in a labeled new-updates group. Update relevant evidence in place without replacing my notes or redirecting the detail pane.
+- Provide an explicit **Reconsider order** action. Do not re-rank after a delay, on clock ticks, or on note edits.
+- Simulate complete, partial, and failed refreshes. Preserve last good data and identify missing evidence instead of showing a false empty state.
 
-Use my supplied Dusk theme and Design System. Do not conduct another brand workshop.
+Use transparent deterministic recommendations: due commitments, then small reviews with fixture size evidence, then other explicit requests and captured actions. Informational updates remain secondary. Preserve the direct/team distinction without inventing effort estimates.
 
-- Native system sans-serif, not webfonts or decorative typography.
-- Neutral large surfaces; restrained semantic accents.
-- Now earns attention through composition, spacing, type, and a single primary action.
-- Next remains scannable. Later is quieter, not unreadable.
-- Labels and hierarchy carry meaning alongside color.
-- Short chunks and expandable detail; no dense explanatory paragraphs.
-- Visible keyboard focus, accessible controls, and no geometry changes on hover or focus.
-- Click-first discovery, with optional shortcuts.
-- Clear, brief success feedback and recoverable local actions.
-- No gamification, streaks, XP, guilt, compulsory reviews, or blocking onboarding tour.
+A new review request needs a new event after the handled request. Generic timestamps, old notification reasons, new commits, and merge-queue activity cannot reopen a completed review.
 
-Prioritize a desktop viewport, but keep the prototype usable when the browser window narrows. Do not add a separate mobile product.
+Repeated refresh of the same evidence must not duplicate a candidate. Capture can merge with the same outstanding action, but must not merge a later request into a completed action.
+
+## Capture and scheduled work
+
+Save arbitrary text and links immediately. Support editable, visibly simulated interpretation for a linked review and a daily routine. Unsupported text remains a saved task; interpretation failure never loses the original.
+
+Include the routine "Every day at 10am, announce the change, then increase the feature flag."
+
+- Track the ordered steps separately. Recording a step does not execute an external action.
+- Use an injectable clock with an explicit timezone. Simulate one non-blocking due reminder with Start, Snooze 30m, and Skip.
+- Coalesce missed days into one outstanding occurrence with missed-day history.
+- Preserve partial progress with original timestamps and a visible stale-progress warning.
+- Keep time-based reminders independent of Refresh. They do not select work or rearrange the existing list.
+
+Later without a reminder stays retained until I bring it back. An optional reminder can surface due work without displacing Working on. GitHub activity does not move retained actions out of Later.
+
+## Synthetic data and scenarios
+
+Seed enough clearly synthetic material to exercise:
+
+| Fixture | Why it exists |
+| --- | --- |
+| Small direct review request and separate team request | Distinguish personal requests from the specific Core Maintainers team context. |
+| Completed review with subsequent merge-queue activity | Prove generic activity cannot recreate the review task. |
+| Genuinely new review request on that same PR | Prove new action identity without losing completed history. |
+| Old mention reason with an ordinary later update | Prove a sticky notification label is not new request evidence. |
+| Local capture, Later follow-up, daily routine, and closed source with retained work | Prove local commitments do not depend on current notification presence. |
+
+Provide a secondary **Demo scenarios** control with grouped actions rather than a wall of buttons:
+
+- Stage a new request, ordinary activity, merge-queue activity, or a re-request for the next Refresh.
+- Simulate reading/acknowledging on GitHub and unsubscribe, including a later mention.
+- Advance time to a reminder or across several missed days.
+- Exercise empty, partial refresh, offline, storage failure, and failed external handoff states.
+- Reset synthetic fixtures without deleting my captures or touching any previous app's data.
+
+Explain simulations with brief labels. Never imply live GitHub, AI reasoning, native notification delivery, or a real Copilot session.
+
+## Visual constraints
+
+Use the Fox and GitHub themes from Copilot App / GitHub App as the visual references. Keep native system sans-serif. Dusk is rejected, including its old tokens and exports.
+
+Before locking visual styling, obtain a theme export or screenshots and establish the default theme. Supporting both has not yet been decided. Do not claim a guessed palette matches either theme; an interim neutral wireframe is not the finished visual prototype. Do not conduct a broad brand workshop.
+
+- Use neutral large surfaces, restrained semantic accents, and foreground/background pairings from the chosen reference, with accessible contrast.
+- Establish hierarchy with space, type, labels, and stable list/detail relationships. No wall of cards or giant recommendation hero.
+- Keep copy scannable, supporting evidence expandable, and destination controls visible.
+- Support click-first discovery and keyboard access with visible, zero-offset focus. Hover and focus never change geometry.
+- Keep success explicit and brief; failures diagnostic and recoverable. No guilt, gamification, compulsory sorting, or inbox-zero ritual.
 
 ## Technical boundaries
 
-- Inspect the workspace first. Reuse an existing frontend stack when available; otherwise use a conventional lightweight TypeScript frontend.
-- Use browser-local persistence appropriate to the prototype. Show storage failures rather than pretending a capture was saved.
-- Keep state, ranking, simulated interpretation, and simulated clock separate enough to replace later. Do not build a generic integration platform.
-- Use an injectable demo clock so time-based scenarios are reproducible. The prototype does not need to wait for real 10am.
-- Do not call GitHub, Slack, feature-flag services, or the Copilot SDK. Do not request credentials.
-- Do not install or initialize the SDK just to satisfy the future architecture.
-- Do not add arbitrary command execution, agents with write access, or production automation.
+Build the browser interaction only. Use the existing TypeScript/React tooling if present; in an empty workspace, choose a lightweight conventional frontend.
 
-The finished product will be a macOS app with the **GitHub Copilot SDK** in a trusted backend/application process. It will structure captures and help prioritize. Scheduling, storage, progress, and undo remain application logic.
+Keep local decisions, synthetic source events, refresh application, ranking, clock, and external simulations separable enough to replace later. Do not build a generic integration framework or preserve the old schema.
 
-Keep that replacement boundary clear, but do not implement it in this build.
+Use an isolated browser storage namespace. Never read or write old prototype keys or desktop stores. Report persistence failures honestly and keep pending edits recoverable.
+
+No GitHub API calls, credentials, OAuth flow, SDK initialization, notification writes, protocol launches, Slack calls, flag changes, or native desktop setup in this build. No backend is needed to evaluate the interaction.
+
+The eventual desktop app uses fresh local storage, native scheduling, GitHub notifications, restricted Copilot SDK assistance, and explicit Copilot App handoff. The prototype must make those boundaries apparent without implementing them.
 
 ## Completion criteria
 
-I should be able to perform every prototype acceptance scenario in `PRODUCT.md`, especially:
+Exercise the acceptance scenarios in `PRODUCT.md`, not just the happy-path screenshot.
 
-- Recognize Now versus Next versus Later immediately.
-- Capture the drive-by review and the daily routine without filling out a form.
-- Complete or switch work without losing my place.
-- Reload and recover notes and partial routine progress.
-- See one outstanding routine after missed days, not a catch-up backlog.
-- Distinguish a direct review request, team request, and uncertain mention.
-- Explore empty and error states without confusing missing data with no work.
+Pay particular attention to refresh stability, review completion versus merge-queue activity, new request identity, Later reminders, consistent destinations, handoff cancellation/failure, and recovery across reload.
 
-Use the project's existing checks where available. Inspect the rendered interface, not just its code, against the supplied visual constraints.
+Use existing project checks where available. Inspect the rendered interface at desktop and narrow widths, including keyboard navigation and long titles. A passing build alone does not establish the interaction.
 
-Deliver the working browser prototype with a concise description of how to run it and which integrations remain simulated. Do not expand into the real backend or desktop app.
+Deliver the working prototype with a short run command and an honest statement of which integrations remain simulated. Do not expand into the desktop backend.

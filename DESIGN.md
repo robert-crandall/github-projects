@@ -1,274 +1,109 @@
 ---
 name: "GitHub Projects"
-description: "The local prototype's semantic projection of supplied Ultra Dusk."
-colors:
-  substrate: "#30313d"
-  base: "#393a47"
-  panel: "#464653"
-  hover: "#51505d"
-  pressed: "#5c5966"
-  selected: "#4d4b61"
-  border: "#6c6673"
-  input-border: "#8b828d"
-  text: "#e6dbd1"
-  subtext: "#cabab7"
-  muted: "#a7979c"
-  primary: "#add991"
-  on-primary: "#282935"
-  primary-tint: "#484f51"
-  primary-on-tint: "#add991"
-  secondary-text: "#96b7fb"
-  danger: "#fd9b9b"
-  danger-border: "#77555e"
-  warn: "#eed198"
-  warn-border: "#776d63"
-typography:
-  headline:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "32px"
-    fontWeight: 650
-    lineHeight: 1.2
-    letterSpacing: "-0.025em"
-  title:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "18px"
-    fontWeight: 600
-    lineHeight: 1.4
-    letterSpacing: "-0.015em"
-  body:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "14px"
-    fontWeight: 400
-    lineHeight: 1.55
-  row-title:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "14px"
-    fontWeight: 500
-    lineHeight: 1.4
-  label:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "12px"
-    fontWeight: 400
-    lineHeight: 1.5
-  metadata:
-    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-    fontSize: "11px"
-    fontWeight: 400
-    lineHeight: 1.6
-rounded:
-  control: "6px"
-  container: "8px"
-spacing:
-  "4": "4px"
-  "8": "8px"
-  "12": "12px"
-  "16": "16px"
-  "18": "18px"
-  "24": "24px"
-  "30": "30px"
-components:
-  button-primary:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.on-primary}"
-    rounded: "{rounded.control}"
-    padding: "11px 18px"
-  button-primary-hover:
-    backgroundColor: "{colors.primary}"
-    textColor: "{colors.on-primary}"
-  button-primary-active:
-    backgroundColor: "{colors.primary-tint}"
-    textColor: "{colors.primary-on-tint}"
-  button-secondary:
-    backgroundColor: "{colors.panel}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.control}"
-    padding: "7px 12px"
-  button-quiet:
-    backgroundColor: "transparent"
-    textColor: "{colors.subtext}"
-    rounded: "{rounded.control}"
-    padding: "7px 8px"
-  button-icon:
-    backgroundColor: "transparent"
-    textColor: "{colors.subtext}"
-    rounded: "{rounded.control}"
-    padding: "6px"
-    width: "34px"
-  button-disabled:
-    backgroundColor: "{colors.substrate}"
-    textColor: "{colors.subtext}"
-  input:
-    backgroundColor: "{colors.substrate}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.control}"
-    padding: "10px 12px"
-  navigation-selected:
-    backgroundColor: "{colors.selected}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.control}"
-    padding: "10px 12px"
-  panel:
-    backgroundColor: "{colors.substrate}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.container}"
-  work-row:
-    textColor: "{colors.text}"
-    typography: "{typography.row-title}"
-  disclosure:
-    textColor: "{colors.text}"
+description: "The greenfield workspace's composition and visual constraints, using Fox and GitHub as theme references."
 ---
 
 # Design System: GitHub Projects
 
-## Overview
+## Direction
 
-**Creative North Star: "One primary thing. Calm surface."**
+**One primary thing. Calm surface.**
 
-I document the implemented application's semantic projections, not a new visual identity. [Ultra Dusk](docs/theme.md), the supplied [Design System](docs/Design%20System.md), and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) remain the visual and interaction authorities. This document and its sidecar defer to them. The frontmatter records reusable implementation values; it does not replace, reinterpret, or extend the supplied Dusk palette.
+I use the **Fox** and **GitHub** themes from Copilot App / GitHub App as the preferred visual references. [Theme direction](docs/theme.md) records what still needs an export or screenshot. Dusk is rejected; no previous palette values remain authoritative.
 
-I preserve the pinned world: lavender-cast neutral surfaces, warm text, native system sans, and fern on the primary control. Hierarchy comes from placement, space, type, and concise labels. Supporting information remains available without requiring attention at the same time.
+[PRODUCT.md](PRODUCT.md) owns behavior. The supplied [Design System](docs/Design%20System.md) and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) retain their reusable interaction constraints.
 
-**Key Characteristics:**
-- One primary thing on a calm neutral surface.
-- Native typography with scannable, short supporting text.
-- Restrained semantic accents and precomputed foreground pairings.
-- Visible, zero-offset focus and instant, non-moving control states.
-- Optional drill-in detail with clear paths back.
+The composition is a compact list with one persistent detail pane and a stable Working on anchor. It replaces the old Now/Next recommendation card. Old direction comments, implementation measurements, and generated sidecars do not override this brief.
 
-I extracted these decisions from [theme tokens](src/theme.css), [styles](src/styles.css), [the app shell](src/App.tsx), and [work components](src/components/Work.tsx). [PRODUCT.md](PRODUCT.md) owns product behavior; the direction comment in [index.html](index.html) owns this prototype's composition. I did not reopen the pinned visual direction.
+## Color
 
-## Colors
+Do not invent or approximate named theme tokens before obtaining the reference. The default theme and whether to offer both remain open; a theme-switching interface is not implicitly required.
 
-I retain Dusk's lavender-cast neutrals and warm-neutral text, using the application's semantic names rather than raw accent names.
-
-### Primary
-
-- `primary` projects Dusk's primary fill/text and confirm text: primary controls, focus, small active markers, and success glyphs.
-- `on-primary` projects `role.primary.on-fill`; it pairs with the primary fill.
-- `primary-tint` and `primary-on-tint` project `role.primary.tint` and `role.primary.on-tint`; they form the pressed primary pair.
-
-### Secondary
-
-- `secondary-text` projects `role.secondary.text` for review glyphs and team context. It is not a large-area fill or a second primary action.
-
-### Neutral
-
-| Application token | Supplied Dusk source | Implemented role |
-| --- | --- | --- |
-| `substrate` | `neutral.substrate` | Navigation, inputs, capture/demo panels, feedback |
-| `base` | `neutral.base` | Workspace and top bar |
-| `panel` | `neutral.panel` | Focus and empty-state surfaces; secondary buttons |
-| `hover` | `state.surface.hover` | Ordinary control hover |
-| `pressed` | `state.surface.active` | Ordinary control active state |
-| `selected` | `state.surface.selected` | Current navigation item |
-| `border` | `neutral.veil` | Quiet dividers and surface boundaries |
-| `input-border` | `control.input.border` / `control.button.border` | Fields and secondary controls |
-| `text` | `neutral.text` | Primary reading and control labels |
-| `subtext` | `neutral.subtext` | Supporting text and quiet actionable labels |
-| `muted` | `neutral.muted` | Decorative separators and unavailable undo text |
-
-### Semantic feedback
-
-- `danger` projects `role.danger.text`; `danger-border` projects `role.danger.tint-border`. Error glyphs and relevant work-kind glyphs carry the accent; error panels retain a neutral ground.
-- `warn` projects `role.warn.text`; `warn-border` projects `role.warn.tint-border`. Routine reminders and warnings use small accents and restrained boundaries, not large warning fills.
-
-**The Neutral Area Rule.** Large surfaces stay neutral; small semantic accents identify actions and state. Color supplements labels, icons, and structure.
-
-**The Paired Foreground Rule.** Use the supplied on-fill and on-tint pairings. Do not calculate new blends or add local fallback colors.
+- Use semantic roles for surfaces, text, boundaries, interaction states, and feedback.
+- Keep large surfaces neutral. Small accents identify actions and state without dominating the workspace.
+- Use readable foreground/background pairings from the selected reference. Check contrast rather than assuming a named theme makes every pairing accessible.
+- Use labels, icons, and structure alongside color for selection, request type, warnings, and errors.
+- Do not reuse Dusk values from old CSS or generated artifacts as silent fallbacks.
 
 ## Typography
 
-**Display and body family:** the native system stack in the frontmatter. There is no separate display face, downloaded font, or monospace UI family.
+Use the native system stack: `-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`. No webfonts, decorative display face, or monospace body copy.
 
-I use an observed role ramp, not an invented ratio. `headline` describes default page headings; `title` describes section headings. `body` describes paragraphs at the root text size, not a universal line-height for controls. `row-title`, `label`, and `metadata` describe compact list titles, field help, and row metadata respectively.
+Use a small hierarchy of page headings, detail titles, row titles, body text, labels, and metadata. Weight, spacing, and placement establish hierarchy without several competing headline sizes.
 
-The focused commitment has a deliberately larger title than ordinary section headings, with responsive sizing. Detail titles also have a local override. These are component treatments, not additional global typography tokens. Small prototype annotations do not establish a general-purpose body size.
+The selected detail has a clear title without recreating an oversized recommendation hero. Working on is identifiable through a persistent label and stable placement, not a second competing headline.
 
-Supporting paragraphs use short readable measures where needed; focus evidence caps at (65ch). Dates and counts use tabular numerals without changing font family. Sentence case and weight differentiate labels; monospace remains reserved for machine output under the supplied system.
+Supporting paragraphs use short readable measures. Dates and counts may use tabular numerals without changing font family. Monospace is reserved for machine output.
 
 ## Layout
 
-I record the existing desktop-first workspace, not a generic dashboard template. Its narrow navigation column frames a broad Now surface, compact ranked Next rows, and collapsed Later. Capture remains visibly reachable from every main view; demo controls remain secondary. Projects are optional drill-in context, not the landing composition.
+The desktop-first workspace pairs a compact list with one persistent detail pane. Working on anchors the action I chose; Needs attention contains recommendations and incoming updates; Later retains postponed commitments.
 
-The desktop shell pairs navigation (224px) with a flexible workspace. The centered main region caps at (1060px), including padding under the global border-box sizing rule. Rows and hairline dividers carry secondary work without repeating prominent cards. The spacing entries in the frontmatter are recurring observed steps, not a new CSS variable scale.
+Selection opens detail without changing Working on. A visible return control restores the current action after inspecting other items.
 
-| Existing media condition | Layout behavior |
+Keep Capture, Refresh, and the last successful refresh time visible. History, routines, and optional project context remain secondary navigation rather than additional permanent panes.
+
+| Surface | Layout behavior |
 | --- | --- |
-| At least (1500px) | More space above the main content and inside the focus surface |
-| At most (1100px) | Navigation narrows to (194px); content gutters tighten |
-| At most (760px) | Single-column shell; navigation becomes a horizontal scrolling row; Capture stays in the header |
-| At most (460px) | Smaller gutters; secondary icons recede; metadata and control groups stack where needed |
+| Wide desktop | Compact list and readable detail share the workspace; extra width does not add unrelated panels. |
+| Smaller desktop | Reduce gutters and navigation space before compromising readable titles and visible destinations. |
+| Narrow window | Show list or detail with an explicit Back control; retain selection, scroll position, and working context. |
 
-Disclosures keep provenance, editing, ranking explanations, and later work available on demand. Work detail provides an explicit route back. These are ways to expose depth on the current problem, not reasons to add unrelated panels.
+Rows and hairline dividers establish hierarchy without a wall of cards. Long titles and destination controls wrap rather than disappear. New updates occupy a labeled group; refresh must not move existing rows, selection, or keyboard focus.
 
-## Elevation & Depth
+## Depth and shapes
 
-I use tonal layering and reserved borders for persistent depth. The substrate frames the base workspace; the focus surface sits on the panel tone. Persistent surfaces have no drop shadow. Transient feedback currently has a local shadow, but I do not promote that single recipe into a reusable elevation scale.
+Use restrained tonal separation and reserved borders for persistent depth. Do not add decorative shadows or a new elevation scale.
 
-Primary-button hover adds an inset contrast stroke, not lift. Focus adds a visible ring without changing geometry. The sidecar preserves these component treatments rather than inventing shadow or motion tokens.
+Keep controls and containers simple. Reserve border space before interaction. Hover, pressed, and selected states change color, not size, padding, or position.
 
-## Shapes
+## Controls
 
-I retain gently rounded rectangular controls and containers. The recurring control and container radii appear in the frontmatter. Other component-specific corners do not constitute a broader radius scale.
+Use related primary, secondary, quiet, and icon treatments. The chosen theme supplies colors; hierarchy determines prominence.
 
-Boundaries generally reserve a one-pixel stroke. Ordinary buttons reserve a transparent border before interaction; fields and secondary buttons show their boundary at rest. Small circular state markers support nearby text rather than becoming standalone status signals. Lists rely on separators instead of pill-shaped tiles or decorative card grids.
+- **Primary:** the current local action, clearly distinguishable without a large accent surface.
+- **Secondary and quiet:** supporting actions remain readable and discoverable at rest.
+- **Icon:** descriptive accessible names; icons must not obscure the meaning of completion or external writes.
+- **Disabled:** a visibly unavailable state that does not resemble a successful action.
 
-## Components
+Keep native input, textarea, select, and checkbox behavior. Labels stay visible; helper text stays near the control. Use freeform textareas for scratch notes and capture instead of mandatory structured forms.
 
-### Buttons
+Keyboard focus must remain visible. Use a deliberate zero-offset focus treatment with sufficient contrast, and reserve its geometry. Never remove the default indicator without a visible replacement.
 
-I keep primary, secondary, quiet, and icon controls visually related.
+## Navigation and detail
 
-- **Primary:** fern fill with its on-fill text, stronger weight (650), and a minimum height (43px). Hover keeps the fill and adds an inset contrast stroke. Active uses the supplied tint/on-tint pair.
-- **Secondary:** neutral panel fill and the stronger input border. Ordinary hover and active use the shared surface-state tokens.
-- **Quiet:** supporting-text color on a transparent ground, becoming primary text on hover. Lower prominence does not remove click discovery.
-- **Icon:** compact fixed-width controls with descriptive accessible names. They share the same color-only state vocabulary.
-- **Disabled:** unavailable controls use neutral treatment and a not-allowed cursor. I do not derive a new accent or opacity scale.
+Use quiet native-text controls on neutral navigation surfaces. Identify the current view and selected row with structure and the appropriate accessible state, not hue alone.
 
-**The In-Place State Rule.** Control states are instant: no hover translation, scaling, padding change, or newly introduced layout border.
+Mark the active action separately so selecting detail cannot look like switching work. Narrow layouts retain labels and an explicit route back.
 
-### Inputs / Fields
+Lead detail with what changed and why it might need me, then my action, next step, checklist, and scratch notes. Keep request evidence distinct from inference. Working on is my choice, not a recommendation label.
 
-I retain native input, textarea, select, and checkbox behavior. Fields use a substrate ground, primary text, visible input borders, and the shared control radius. Labels stay visible; helper text sits below. Freeform scratch notes and capture use textareas rather than decorative editors.
+Local Done, Later, notification acknowledgement, and unsubscribe have different effects. Use the explicit labels from PRODUCT.md instead of a generic completion icon that hides the destination of the change.
 
-Keyboard focus uses a primary-colored outline (2px) with zero offset. Fields also change their border to primary. Other interactive elements receive the same visible zero-offset focus treatment. I preserve a visible replacement rather than suppressing focus.
+## Rows and supporting information
 
-### Navigation
+Keep rows compact: a work-kind glyph, readable title, repository and number, and a short reason. Text identifies the signal independently of glyph color.
 
-I use quiet native-text buttons on the neutral sidebar. Selection combines the selected surface, primary text, a small fern glyph/marker, and `aria-current`; it never depends on hue alone. Narrow layouts preserve the labels and allow horizontal navigation scrolling.
+**Open on GitHub** and **Review in Copilot** or **Open in Copilot** remain visible in rows and details without hover, expansion, or an overflow menu. Local actions without references have no invented destination.
 
-### Containers and focused work
+Disclosures reveal source history and full captures without opening a competing workspace. Later is quieter but discoverable, with reminder and waiting-note context retained.
 
-I keep capture, demo, and supporting panels neutral with reserved borders. The focused commitment uses the lighter panel tone and more internal space; its title and primary action establish dominance rather than an accent wash.
+User-requested expansion may change layout. Hover, focus, incoming activity, and delayed ranking must not.
 
-The focused work component presents a title, provenance, a short recommendation or active-state reason, and the relevant primary action. Active work exposes its concrete next step or ordered checklist and scratch notes. Details and sources remain a quieter drill-in action. This describes the implemented signature component, not a mandatory card template for every surface.
+## Feedback
 
-### Work rows and disclosures
+Use brief explicit success feedback and Undo where available. Failures show diagnostic text and recovery controls without replacing the saved workspace.
 
-I keep queue rows compact: a work-kind glyph, a readable title, short source/reason metadata, and a quiet explicit action. Text identifies the signal independently of glyph color. Titles wrap within the compact preview; drill-in detail retains access to the full content.
+Refresh progress stays local to its control. Saved work remains usable, including when GitHub is unavailable.
 
-Native disclosure controls reveal supporting material without opening a competing workspace. Later starts collapsed. Disclosure state may change layout because the user explicitly requested more content; hover and focus do not.
+Handoff feedback says only that a launch was requested, never that a review finished. Local Undo does not imply a GitHub action was reversed.
 
-### Feedback
+Prototype and simulated-data labels are factual. A neutral wireframe must not be labeled a finished Fox or GitHub theme.
 
-I use brief, explicit success feedback with a checkmark and Undo where available. Failure regions retain neutral surfaces while presenting diagnostic text and recovery controls. Prototype and simulated-data labels remain factual; they are not decorative status badges.
+## Boundaries
 
-## Do's and Don'ts
-
-### Do:
-
-- **Do** defer to the supplied Dusk theme and interaction documents before extending this application projection.
-- **Do** keep large surfaces neutral and use semantic foreground pairings.
-- **Do** build hierarchy with native typography, spacing, labels, and restrained emphasis.
-- **Do** keep focus visible at zero offset and preserve control geometry across states.
-- **Do** keep supporting detail optional and provide a clear path back.
-- **Do** keep success brief and explicit, and failures diagnostic.
-
-### Don't:
-
-- **Don't** replace the pinned world with a new brand, webfont, or monospace interface.
-- **Don't** turn the focus workspace into a dense multipanel project dashboard.
-- **Don't** use full-window accent fills or color as the only state signal.
-- **Don't** add decorative motion, hover lift, or scaling.
-- **Don't** turn incidental measurements, unused tokens, or implementation defects into design rules.
-- **Don't** invent tonal ramps, service status, or external execution that the prototype does not supply.
+- No Dusk palette, new brand workshop, decorative typography, or invented named-theme values.
+- No dense multi-panel project dashboard or giant recommendation card.
+- No full-window accent fills, color-only meaning, or unreadable secondary controls.
+- No decorative motion, hover lift, scaling, or focus-driven layout shifts.
+- No hidden external destinations or invented service status and execution.

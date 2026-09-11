@@ -1,5 +1,7 @@
 > For a designer (human or LLM) working on this app. Read alongside [`PRODUCT.md`](../PRODUCT.md).
 
+> These reusable constraints apply to the greenfield replacement. `PRODUCT.md` owns its workflow: a stable Working on anchor, compact list/detail views, and manual GitHub refresh. "One primary thing" does not mean an automatically changing recommendation card.
+
 > This is a set of **opinionated design constraints**, not a persona exercise or a diagnosis. It captures *how this user's mind works with software* so your hundred small decisions land right where the PRD is silent. Treat it as the generative ruleset; when in doubt, design toward these.
 
 ---
@@ -50,11 +52,11 @@ Design against **tedium, not difficulty.** This user leans *into* hard, challeng
 
 - **Vanilla defaults, all overridable.** Standard/stock choices are a relief, not a suspicion. Keep every default visible and changeable - the user will rarely override, but wants the door.
 
-- **Undo over confirmation.** A confirmation assumes the user is wrong; an undo trusts them and leaves a door open. Prefer no confirmation + a reliable undo. Build recoverability in (soft-delete everything) so friction isn't needed. Reserve hard confirms for the genuinely unrecoverable.
+- **Undo over confirmation.** Prefer reliable recovery for local decisions. Do not imply local Undo reverses an external GitHub action. Copilot App owns its session-creation confirmation; never claim a launch bypasses it.
 
 - **Click-first; shortcuts as reward.** Mouse-comfortable and click-to-discover. Support exploration by clicking; reward fluency with shortcuts; never gate core functionality behind a hotkey.
 
-- **Automate anything done twice.** Every repeated workflow should be scriptable/automatable. Non-negotiable, and it coexists with click-first: pointer for one-offs, scripts for repetition.
+- **Reduce repeated work.** Keep repeated workflows simple and leave room for automation. The explicit manual-refresh and no-automatic-switching requirements take precedence; this principle does not authorize background discovery or a generic automation platform.
 
 ---
 
@@ -82,7 +84,7 @@ Design against **tedium, not difficulty.** This user leans *into* hard, challeng
 
 ## Two constraints specific to this app
 
-- **The last 10% is the hard part.** Task *initiation* and especially *completion* (closing things out) are where this user stalls - not the interesting middle. Design should lower the activation energy to start and actively help *finish*. In the current scope, Copilot helps structure and prioritize work; the app tracks progress, but the user performs external actions.
+- **The last 10% is the hard part.** Make choosing and finishing work easy. Local Done means the action is finished even if the PR remains open. The desktop app can hand work to Copilot App, but launch is not completion. The browser prototype simulates that boundary.
 
 - **Every system has a half-life.** What works fades over time. Don't design a "solve it once" system; expect to rotate and refresh. Make decay *visible in context* rather than pretending the system self-heals or handing the user a maintenance chore list.
 
@@ -114,7 +116,7 @@ Before shipping a surface, ask:
 
 2. Is it **scannable** on a low-reading-capacity day?
 
-3. Is every destructive action **undoable** instead of confirmed?
+3. Are local decisions recoverable, and are external action limits explicit?
 
 4. Does anything here quietly demand **manual upkeep**?
 
