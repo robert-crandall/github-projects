@@ -43,7 +43,7 @@ Every save first makes a durable `latest` SQLite backup of the previous committe
 
 The recovery token rotates after save/recovery and is scoped to the native process. A successful raw export does not mean damaged content is valid. The renderer must distinguish saved JSON export from export of its own unsaved pending copy.
 
-Recovery preserves newer reminder receipts so restoring an older backup does not replay prior notifications. When the current database is corrupt and delivery history cannot be trusted, restored due schedules are marked `uncertain`, requiring explicit retry. Original bytes remain in the raw export.
+Recovery preserves newer reminder receipts so restoring an older backup does not replay prior notifications. When the current database is corrupt and delivery history cannot be trusted, SQLite retains a history-loss cutoff across saves, relaunches, and subsequent restores (including empty backups). Unknown delivery keys due at or before that cutoff are marked `uncertain`, requiring explicit retry. Genuinely future occurrences still dispatch normally. Original bytes remain in the raw export.
 
 ## Clock and reminder projection
 

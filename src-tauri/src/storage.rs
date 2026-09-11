@@ -86,6 +86,7 @@ fn validate(connection: &Connection) -> Result<()> {
 }
 
 pub(crate) fn read_connection(connection: &Connection) -> Result<WorkspaceRead> {
+    history_loss_cutoff(connection)?;
     let (revision, json, hash, saved_at): (String, Option<String>, Option<String>, Option<String>) =
         connection.query_row(
             "SELECT revision, snapshot, checksum, saved_at FROM workspace WHERE id = 1",
@@ -108,7 +109,8 @@ pub(crate) fn read_connection(connection: &Connection) -> Result<WorkspaceRead> 
             if saved_at
                 .as_deref()
                 .map(crate::model::timestamp)
-                .transpose()?
+                .transpose()
+                .map_err(|_| NativeError::corrupt())?
                 .is_none()
             {
                 return Err(NativeError::corrupt());
@@ -123,6 +125,21 @@ pub(crate) fn read_connection(connection: &Connection) -> Result<WorkspaceRead> 
         snapshot,
         saved_at,
     })
+}
+
+pub(crate) fn history_loss_cutoff(
+    connection: &Connection,
+) -> Result<Option<chrono::DateTime<Utc>>> {
+    let cutoff: Option<String> = connection.query_row(
+        "SELECT delivery_history_lost_before FROM workspace WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?;
+    cutoff
+        .as_deref()
+        .map(crate::model::timestamp)
+        .transpose()
+        .map_err(|_| NativeError::corrupt())
 }
 
 impl Store {
@@ -170,7 +187,8 @@ impl Store {
                 revision TEXT NOT NULL,
                 snapshot TEXT,
                 checksum TEXT,
-                saved_at TEXT
+                saved_at TEXT,
+                delivery_history_lost_before TEXT
             );
             CREATE TABLE reminder_deliveries (
                 delivery_key TEXT PRIMARY KEY,
@@ -364,8 +382,10 @@ impl Store {
             "UPDATE workspace SET revision=? WHERE id=1",
             [Uuid::new_v4().to_string()],
         )?;
+        let mut cutoff = history_loss_cutoff(&connection)?;
         match self.connection() {
             Ok(current) => {
+                cutoff = cutoff.max(history_loss_cutoff(&current)?);
                 let mut statement = current.prepare("SELECT delivery_key,schedule_id,occurrence_id,eligible_at,status,attempted_at,error_code FROM reminder_deliveries")?;
                 let rows = statement.query_map([], |row| {
                     Ok((
@@ -392,22 +412,27 @@ impl Store {
                     "storage-corrupt" | "unsupported-schema"
                 ) =>
             {
-                // Recovery must not repeat reminders that the damaged copy may have sent.
-                // Due occurrences without trustworthy delivery history need explicit retry.
-                if let Some(snapshot) = read_connection(&connection)?.snapshot {
-                    for schedule in snapshot.reminders {
-                        if schedule.eligible_at()? <= Utc::now() {
-                            connection.execute(
-                                "INSERT INTO reminder_deliveries VALUES (?,?,?,?,'uncertain',NULL,'recovery-delivery-uncertain')
-                                 ON CONFLICT(delivery_key) DO UPDATE SET status='uncertain',error_code='recovery-delivery-uncertain'
-                                 WHERE status IN ('blocked','retry')",
-                                params![schedule.delivery_key()?, schedule.id, schedule.occurrence_id, schedule.eligible_at()?.to_rfc3339()],
-                            )?;
-                        }
-                    }
-                }
+                cutoff = cutoff.max(Some(Utc::now()));
             }
             Err(error) => return Err(error),
+        }
+        // The watermark survives even an empty restore, so a later restore/import cannot
+        // resurrect a previously sent occurrence after its delivery ledger was lost.
+        connection.execute(
+            "UPDATE workspace SET delivery_history_lost_before=? WHERE id=1",
+            [cutoff.map(|instant| instant.to_rfc3339())],
+        )?;
+        if let (Some(cutoff), Some(snapshot)) = (cutoff, read_connection(&connection)?.snapshot) {
+            for schedule in snapshot.reminders {
+                if schedule.eligible_at()? <= cutoff {
+                    connection.execute(
+                        "INSERT INTO reminder_deliveries VALUES (?,?,?,?,'uncertain',NULL,'recovery-delivery-uncertain')
+                         ON CONFLICT(delivery_key) DO UPDATE SET status='uncertain',error_code='recovery-delivery-uncertain'
+                         WHERE status IN ('blocked','retry')",
+                        params![schedule.delivery_key()?, schedule.id, schedule.occurrence_id, schedule.eligible_at()?.to_rfc3339()],
+                    )?;
+                }
+            }
         }
         validate(&connection)?;
         drop(connection);
@@ -600,5 +625,28 @@ mod tests {
         let after = store.read().unwrap();
         assert_eq!(after.revision, original.revision);
         assert!(after.snapshot.is_none());
+    }
+
+    #[test]
+    fn invalid_saved_at_is_corruption_and_can_be_recovered() {
+        let dir = TempDir::new().unwrap();
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        let saved = store
+            .save(&store.read().unwrap().revision, snapshot("safe"))
+            .unwrap();
+        let backup = store.create_backup(&saved.revision).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE workspace SET saved_at='damaged timestamp' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        assert_eq!(store.read().unwrap_err().code, "storage-corrupt");
+        let restored = store
+            .recover(&backup.id, &store.status().recovery_token)
+            .unwrap();
+        assert_eq!(restored.snapshot.unwrap().workspace["note"], "safe");
     }
 }

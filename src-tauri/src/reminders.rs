@@ -1,7 +1,7 @@
 use crate::{
     error::{NativeError, Result},
     model::ReminderSchedule,
-    storage::{read_connection, Store},
+    storage::{history_loss_cutoff, read_connection, Store},
 };
 use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension};
@@ -110,9 +110,11 @@ impl Store {
         let permission = notifications.permission()?;
         let connection = self.connection()?;
         let saved = read_connection(&connection)?;
+        let cutoff = history_loss_cutoff(&connection)?;
         if let Some(snapshot) = saved.snapshot {
             for schedule in snapshot.reminders {
-                if schedule.eligible_at()? > now {
+                let eligible_at = schedule.eligible_at()?;
+                if eligible_at > now {
                     continue;
                 }
                 let key = schedule.delivery_key()?;
@@ -123,6 +125,13 @@ impl Store {
                         |row| row.get(0),
                     )
                     .optional()?;
+                if previous.is_none() && cutoff.is_some_and(|cutoff| eligible_at <= cutoff) {
+                    connection.execute(
+                        "INSERT INTO reminder_deliveries VALUES (?,?,?,?,'uncertain',NULL,'recovery-delivery-uncertain')",
+                        params![key, schedule.id, schedule.occurrence_id, schedule.eligible_at()?.to_rfc3339()],
+                    )?;
+                    continue;
+                }
                 if previous
                     .as_deref()
                     .is_some_and(|state| !matches!(state, "blocked" | "retry"))
@@ -551,6 +560,80 @@ mod tests {
         assert_eq!(
             status.deliveries[0].error_code.as_deref(),
             Some("recovery-delivery-uncertain")
+        );
+    }
+
+    #[test]
+    fn history_loss_survives_empty_restore_relaunch_and_older_scheduled_backup() {
+        let dir = TempDir::new().unwrap();
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        let empty_backup = store
+            .create_backup(&store.read().unwrap().revision)
+            .unwrap();
+        let mut state = snapshot();
+        state.reminders[0].due_at = "2020-01-01T17:00:00Z".into();
+        save(&mut store, state);
+        let scheduled_backup = store
+            .create_backup(&store.read().unwrap().revision)
+            .unwrap();
+        let mock = mock(PermissionState::Granted);
+        store.reconcile_reminders(Utc::now(), &mock).unwrap();
+        assert_eq!(mock.count.get(), 1);
+        std::fs::write(store.path(), b"damaged").unwrap();
+        store
+            .recover(&empty_backup.id, &store.status().recovery_token)
+            .unwrap();
+        assert!(store.read().unwrap().snapshot.is_none());
+        drop(store);
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        store
+            .recover(&scheduled_backup.id, &store.status().recovery_token)
+            .unwrap();
+        let status = store.reconcile_reminders(Utc::now(), &mock).unwrap();
+        assert_eq!(
+            mock.count.get(),
+            1,
+            "restoring an empty backup must not erase lost-history uncertainty"
+        );
+        assert_eq!(status.deliveries[0].status, "uncertain");
+        store
+            .retry_reminder(&status.deliveries[0].delivery_key, &status.revision)
+            .unwrap();
+        store.reconcile_reminders(Utc::now(), &mock).unwrap();
+        assert_eq!(mock.count.get(), 2, "explicit retry is still available");
+    }
+
+    #[test]
+    fn history_loss_covers_reintroduced_old_schedules_but_not_new_future_occurrences() {
+        let dir = TempDir::new().unwrap();
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        let backup = store
+            .create_backup(&store.read().unwrap().revision)
+            .unwrap();
+        std::fs::write(store.path(), b"damaged").unwrap();
+        store
+            .recover(&backup.id, &store.status().recovery_token)
+            .unwrap();
+        let cutoff = history_loss_cutoff(&store.connection().unwrap())
+            .unwrap()
+            .unwrap();
+        let mut state = snapshot();
+        state.reminders[0].due_at = "2020-01-01T17:00:00Z".into();
+        save(&mut store, state.clone());
+        let mock = mock(PermissionState::Granted);
+        let status = store.reconcile_reminders(Utc::now(), &mock).unwrap();
+        assert_eq!(mock.count.get(), 0);
+        assert_eq!(status.deliveries[0].status, "uncertain");
+
+        let future = cutoff + chrono::Duration::hours(1);
+        state.reminders[0].due_at = future.to_rfc3339();
+        state.reminders[0].occurrence_id = "routine-1:future-occurrence".into();
+        save(&mut store, state);
+        store.reconcile_reminders(future, &mock).unwrap();
+        assert_eq!(
+            mock.count.get(),
+            1,
+            "history loss must not disable genuinely future reminders"
         );
     }
 }
