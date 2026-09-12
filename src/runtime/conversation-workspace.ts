@@ -94,8 +94,9 @@ export class ConversationWorkspace {
     this.publish({ busy: true });
     try {
       await this.platform.conversationReset();
+      // Discard empties every source, including reads started by navigation while reset was pending.
       ++this.generation;
-      this.publish({ cache: null, error: '' });
+      this.publish({ cache: null, reading: false, error: '' });
     } catch (error) { this.publish({ error: message(error) }); }
     finally { this.publish({ busy: false }); }
   }

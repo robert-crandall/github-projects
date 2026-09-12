@@ -6,6 +6,111 @@ import { rawMessage } from './conversation-fixture.ts';
 import { ServiceError } from '../service/src/errors.ts';
 
 for (const kind of ['issue', 'pr'] as const) {
+  test(`conversation gaps remain reachable after ${kind} newest-page jumps and failed gap loads`, async ({ page, native }, testInfo) => {
+    const reference = { repo: 'octo/project', number: 123, kind };
+    native.threads[0]!.reference = reference;
+    native.conversationApi.seed(reference);
+    const path = '/repos/octo/project/issues/123/comments';
+    const comments = (start: number, count: number) => Array.from({ length: count }, (_, index) => rawMessage(reference, start + index, `Comment ${start + index}`));
+    native.conversationApi.routes.set(`${path}?per_page=5&page=1`, { status: 200, headers: {}, body: comments(1, 5) });
+    await page.goto('/');
+    await refresh(page);
+    await row(page, 't:123').click();
+    await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+    const reader = page.getByRole('region', { name: 'Conversation', exact: true });
+    await expect(reader.getByText('Comment 5', { exact: true })).toBeVisible();
+    const newest = (last: number) => {
+      native.conversationApi.routes.set(`${path}?per_page=5&page=1`, { status: 200, body: comments(1, 5),
+        headers: { link: `<https://api.github.com${path}?per_page=5&page=${last}>; rel="last"` } });
+      native.conversationApi.routes.set(`${path}?per_page=5&page=${last}`, { status: 200, headers: {}, body: comments((last - 1) * 5 + 1, 1) });
+    };
+    newest(3);
+    await reader.getByRole('button', { name: 'Reload newest messages', exact: true }).click();
+    await expect(reader.getByText('Comment 11', { exact: true })).toBeVisible();
+    await reader.locator('.conversation-pages > summary').click();
+    const pages = reader.getByRole('region', { name: 'Comments pages', exact: true });
+    await expect(pages.getByRole('button', { name: 'Load missing comments page 2', exact: true })).toBeEnabled();
+    await expect(pages).not.toContainText('All known pages are saved');
+    await pages.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath('gap-desktop.png') });
+    const viewport = page.viewportSize();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await pages.getByRole('button', { name: 'Load missing comments page 2', exact: true }).scrollIntoViewIfNeeded();
+    expect(await detail(page).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('gap-narrow.png') });
+    if (viewport) await page.setViewportSize(viewport);
+    if (kind === 'pr') {
+      await expect(reader.getByRole('region', { name: 'Reviews pages', exact: true }).getByRole('button', { name: /Load missing/ })).toHaveCount(0);
+      await expect(reader.getByRole('button', { name: 'Load older inline discussions', exact: true })).toBeEnabled();
+    }
+    const streamsBefore = native.requests.filter(request => request.op === 'github.conversation' && request.input.stream !== 'comments').length;
+    const callsBefore = native.conversationApi.calls.length;
+    const sourceBefore = structuredClone(native.state.threads);
+    native.conversationApi.routes.set(`${path}?per_page=5&page=2`, new ServiceError('rate_limit', true));
+    await pages.getByRole('button', { name: 'Load missing comments page 2', exact: true }).click();
+    await expect(pages).toContainText('partial / unavailable');
+    const retry = pages.getByRole('button', { name: 'Reload comments page 2', exact: true });
+    await expect(retry).toBeEnabled();
+    native.conversationApi.routes.set(`${path}?per_page=5&page=2`, {
+      status: 200, headers: {}, body: [...comments(6, 4), { id: 10, body: 'Malformed' }],
+    });
+    await retry.click();
+    await expect(reader.getByText('Comment 6', { exact: true })).toBeVisible();
+    await expect(pages).toContainText('partial / unavailable');
+    native.conversationApi.routes.set(`${path}?per_page=5&page=2`, { status: 200, headers: {}, body: comments(6, 5) });
+    await retry.click();
+    await expect(reader.getByText('Comment 10', { exact: true })).toBeVisible();
+    await expect(reader.getByText('Comment 6', { exact: true })).toHaveCount(1);
+    await expect(pages).toContainText('All known pages are saved');
+    expect(native.requests.filter(request => request.op === 'github.conversation' && request.input.stream !== 'comments')).toHaveLength(streamsBefore);
+    expect(native.conversationApi.calls.slice(callsBefore)).toEqual(Array(3).fill(`${path}?per_page=5&page=2`));
+    expect(native.state.threads).toEqual(sourceBefore);
+    newest(5);
+    await reader.getByRole('button', { name: 'Reload newest messages', exact: true }).click();
+    await expect(pages.getByRole('button', { name: 'Load missing comments page 4', exact: true })).toBeEnabled();
+    native.conversationApi.routes.set(`${path}?per_page=5&page=4`, { status: 200, headers: {}, body: comments(16, 5) });
+    await pages.getByRole('button', { name: 'Load missing comments page 4', exact: true }).click();
+    await expect(reader.getByText('Comment 20', { exact: true })).toBeVisible();
+    await expect(pages).toContainText('All known pages are saved');
+  });
+}
+
+test('cache discard during navigation releases reader controls and ignores the old native read', async ({ page, native }) => {
+  native.threads.push(thread([evidence('second')], '456'));
+  for (const source of native.threads) native.conversationApi.seed(source.reference);
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:456').click();
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await expect(page.getByText('END OF LONG MESSAGE', { exact: false })).toBeVisible();
+  await row(page, 't:123').click();
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await expect(page.getByText('END OF LONG MESSAGE', { exact: false })).toBeVisible();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Private note during discard');
+  await persisted(page);
+  const notes = structuredClone(native.state.notes);
+  const tasksBefore = structuredClone(native.state.tasks);
+  const requests = native.requests.length;
+  native.holdConversationReset = gate();
+  await page.getByRole('button', { name: 'Discard conversation cache', exact: true }).click();
+  await page.getByRole('button', { name: 'Discard cached conversations', exact: true }).click();
+  native.holdConversationRead = gate();
+  await row(page, 't:456').click();
+  await expect(page.getByText('Reading cached conversation...', { exact: true })).toBeVisible();
+  native.holdConversationReset.release();
+  await expect(page.getByRole('button', { name: 'Load conversation', exact: true })).toBeEnabled();
+  native.holdConversationRead.release();
+  native.holdConversationRead = undefined;
+  await expect(page.getByText('Reading cached conversation...', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).not.toContainText('END OF LONG MESSAGE');
+  expect(native.requests).toHaveLength(requests);
+  expect(native.state.notes).toEqual(notes);
+  expect(native.state.tasks).toEqual(tasksBefore);
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await expect(page.getByText('END OF LONG MESSAGE', { exact: false })).toBeVisible();
+});
+
+for (const kind of ['issue', 'pr'] as const) {
   test(`conversation reader loads actual ${kind} bodies through service and typed IPC only on explicit request`, async ({ page, native }) => {
     const reference = { repo: 'octo/project', number: 123, kind };
     native.threads[0]!.reference = reference;

@@ -1,12 +1,26 @@
 import { memo, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { conversationKey, type ConversationMessage, type Reference } from '../../service/src/schema.ts';
+import { conversationKey, type ConversationCache, type ConversationInput, type ConversationMessage, type Reference } from '../../service/src/schema.ts';
 import { webUrlSchema } from '../platform/native.ts';
 import type { Platform } from './desktop-workspace.ts';
 import { conversationStreams, type ConversationWorkspace } from './conversation-workspace.ts';
 
 const names = { description: 'Description', comments: 'Comments', reviews: 'Reviews', inline: 'Inline discussions' };
+export function missingPageRanges(pages: ConversationCache['pages'], stream: ConversationInput['stream']): { first: number; last: number }[] {
+  const source = pages.filter(page => page.stream === stream);
+  const known = [...new Set(source.map(page => page.page))].sort((a, b) => a - b);
+  const newest = source.reduce((last, page) => Math.max(last, page.page, page.newestPage), 0);
+  const ranges = [];
+  let previous = 0;
+  // Bound work by saved metadata, not by potentially very large page numbers.
+  for (const page of [...known, newest + 1]) {
+    if (page > previous + 1) ranges.push({ first: previous + 1, last: page - 1 });
+    previous = page;
+  }
+  return ranges;
+}
+
 export function groupMessages(messages: ConversationMessage[]): { id: string; messages: ConversationMessage[]; missingRoot: boolean }[] {
   const byId = new Map(messages.map(message => [message.id, message]));
   const groups = new Map<string, ConversationMessage[]>();
@@ -86,8 +100,7 @@ export const ConversationReader = memo(function ConversationReader({ reference, 
       <details className="conversation-pages" open={pagesOpen} onToggle={event => setPagesOpen(event.currentTarget.open)}><summary>Pages, freshness and older history</summary>
         {conversationStreams(reference).map(stream => {
           const pages = cache.pages.filter(page => page.stream === stream).sort((a, b) => a.page - b.page);
-          const successful = pages.filter(page => !page.error);
-          const oldest = successful[0];
+          const missing = missingPageRanges(cache.pages, stream);
           return <section key={stream} aria-label={`${names[stream]} pages`}>
             <h4>{names[stream]}</h4>
             {!pages.length && <p className="field-help">Not loaded. <button className="text-button" disabled={disabled} onClick={() => void controller.load(stream)}>Load {names[stream].toLowerCase()}</button></p>}
@@ -96,9 +109,16 @@ export const ConversationReader = memo(function ConversationReader({ reference, 
               <button className="text-button" disabled={disabled} onClick={() => void controller.load(stream, page.page)}>Reload {names[stream].toLowerCase()} page {page.page}</button>
               {page.error && <p className="inline-error">{page.error.message} Previously cached bodies may be out of date.</p>}
             </div>)}
-            {stream !== 'description' && oldest && (oldest.page > 1
-              ? <button className="secondary" disabled={disabled} onClick={() => void controller.load(stream, oldest.page - 1)}>Load older {names[stream].toLowerCase()}</button>
-              : <p className="field-help">Oldest page reached. Saved pages are not a live mirror; deleted messages may remain cached.</p>)}
+            {stream !== 'description' && <>
+              {missing.map(range => <div key={range.first} className="conversation-page">
+                <span>{range.first === range.last ? `Page ${range.first}` : `Pages ${range.first}-${range.last}`} not loaded.</span>
+                <button className="secondary" disabled={disabled} onClick={() => void controller.load(stream, range.last)}>
+                  {range.first === 1 ? `Load older ${names[stream].toLowerCase()}` : `Load missing ${names[stream].toLowerCase()} page ${range.last}`}
+                </button>
+              </div>)}
+              {!!pages.length && !missing.length && pages.every(page => !page.error)
+                && <p className="field-help">All known pages are saved. Saved pages are not a live mirror; deleted messages may remain cached.</p>}
+            </>}
           </section>;
         })}
       </details>

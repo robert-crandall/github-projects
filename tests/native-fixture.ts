@@ -55,16 +55,23 @@ export class NativeMock {
   holdRefresh?: ReturnType<typeof gate>;
   holdWrite?: ReturnType<typeof gate>;
   holdSave?: ReturnType<typeof gate>;
+  holdConversationRead?: ReturnType<typeof gate>;
+  holdConversationReset?: ReturnType<typeof gate>;
   activeSaves = 0;
   maxActiveSaves = 0;
   get state() { return desktopEnvelopeSchema.parse(this.saved.snapshot!.workspace).state; }
 
   private async invoke(command: string, args: Record<string, unknown>) {
     this.calls.push(command);
-    if (command === 'conversation_reset') { this.conversations.clear(); this.corruptCache = false; this.fullCache = false; return null; }
+    if (command === 'conversation_reset') {
+      if (this.holdConversationReset) await this.holdConversationReset.promise;
+      this.conversations.clear(); this.corruptCache = false; this.fullCache = false; return null;
+    }
     if (command === 'conversation_read') {
       if (this.corruptCache) throw new ExpectedFailure('Conversation cache is corrupt. Discard the cache explicitly; notes are safe.');
-      return this.conversations.get(cacheKey(referenceSchema.parse(args.reference))) ?? null;
+      const cached = structuredClone(this.conversations.get(cacheKey(referenceSchema.parse(args.reference))) ?? null);
+      if (this.holdConversationRead) await this.holdConversationRead.promise;
+      return cached;
     }
     if (command === 'conversation_merge') {
       if (this.corruptCache || this.fullCache) throw new ExpectedFailure('Conversation cache exceeds 4 MiB per source or 64 MiB total, or is corrupt. Discard the cache explicitly; notes are safe.');

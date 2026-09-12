@@ -10,12 +10,14 @@ import { DesktopWorkspace } from './desktop-workspace.ts';
 import { ServiceWorkspace, sourceThread } from './service-workspace.ts';
 import { beginOperation, finishOperation, mergeRefresh } from '../domain/live.ts';
 import { getRow, getRows } from '../domain/engine.ts';
-import { groupMessages } from './ConversationReader.tsx';
+import { groupMessages, missingPageRanges } from './ConversationReader.tsx';
 
 const reference = { repo: 'octo/project', number: 12, kind: 'pr' as const };
-function deferred() {
-  let resolve!: () => void;
-  return { promise: new Promise<void>(yes => { resolve = yes; }), resolve: () => resolve() };
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 async function harness() {
   const api = new ConversationApi();
@@ -25,6 +27,7 @@ async function harness() {
   const requests: Request[] = [];
   const writes: string[] = [];
   let cacheFailure = false;
+  const gates: { read?: ReturnType<typeof deferred<ConversationCache | null>>; reset?: ReturnType<typeof deferred<void>> } = {};
   const platform = createNativePlatform(async (command, args) => {
     switch (command) {
       case 'workspace_read': return saved;
@@ -34,7 +37,7 @@ async function harness() {
         saved = { revision: crypto.randomUUID(), snapshot: snapshotSchema.parse(args?.snapshot), savedAt: new Date().toISOString() };
         writes.push(JSON.stringify(saved.snapshot));
         return saved;
-      case 'conversation_read': return caches.get(cacheKey(referenceSchema.parse(args?.reference))) ?? null;
+      case 'conversation_read': return gates.read?.promise ?? caches.get(cacheKey(referenceSchema.parse(args?.reference))) ?? null;
       case 'conversation_merge': {
         if (cacheFailure) throw { code: 'cache-limit', message: 'The 4 MiB source cache is full.', retryable: false };
         const page = conversationPageSchema.parse(args?.page);
@@ -43,7 +46,9 @@ async function harness() {
         caches.set(key, cache);
         return cache;
       }
-      case 'conversation_reset': caches.clear(); cacheFailure = false; return null;
+      case 'conversation_reset':
+        if (gates.reset) await gates.reset.promise;
+        caches.clear(); cacheFailure = false; return null;
       default: throw new Error(`Unexpected native operation ${command}`);
     }
   });
@@ -61,7 +66,7 @@ async function harness() {
     return { v: 1, id: request.id, ok: true, result };
   });
   const remote = new ServiceWorkspace(workspace, client);
-  return { workspace, remote, platform, api, caches, requests, writes, saved: () => saved,
+  return { workspace, remote, platform, api, caches, requests, writes, gates, saved: () => saved,
     failCache: () => { cacheFailure = true; }, holdRefresh: (promise: Promise<void>) => { refreshGate = promise; } };
 }
 
@@ -178,3 +183,69 @@ test('cache limits fail explicitly and cache-only recovery never changes workspa
   expect(JSON.stringify(mock.saved())).toBe(before);
   expect(mock.api.calls).toHaveLength(calls);
 });
+
+test('missing ranges use independent stream metadata without enumerating large page numbers or hiding retries', () => {
+  const metadata = (page: number, newestPage = page, stream: 'comments' | 'reviews' | 'inline' = 'comments') => ({
+    reference, stream, page, newestPage, olderPage: page > 1 ? page - 1 : null, fetchedAt: '2026-09-11T17:00:00Z', error: null,
+  });
+  const pages = [
+    metadata(3), metadata(1), metadata(1, 1, 'reviews'), metadata(5, 5, 'inline'),
+    { ...metadata(5, 999_999), error: { code: 'access' as const, message: 'Unavailable page', retryable: false } },
+  ];
+  expect(missingPageRanges(pages, 'comments')).toEqual([{ first: 2, last: 2 }, { first: 4, last: 4 }, { first: 6, last: 999_999 }]);
+  expect(missingPageRanges(pages, 'reviews')).toEqual([]);
+  expect(missingPageRanges(pages, 'inline')).toEqual([{ first: 1, last: 4 }]);
+  expect(missingPageRanges([], 'comments')).toEqual([]);
+});
+
+for (const order of ['reset-first', 'read-first'] as const) {
+  for (const outcome of ['result', 'error'] as const) {
+    test(`cache discard and navigation recover with ${order} and a stale read ${outcome}`, async () => {
+      const mock = await harness();
+      const reader = mock.remote.conversation;
+      const other = { ...reference, number: 13 };
+      mock.api.seed(other);
+      await reader.select(other);
+      await reader.load();
+      const stale = structuredClone(reader.getSnapshot().cache);
+      await reader.select(reference);
+      await reader.load();
+      mock.workspace.update(state => ({ ...state, threads: [{
+        id: '123', ...reference, title: 'Retained source', reason: 'subscribed', notification: 'read',
+        state: 'open', subscribed: true, events: [], source: 'github',
+      }] }));
+      mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'Private thread note survives discard' });
+      mock.workspace.dispatch({ type: 'draft', text: 'Private task survives discard' });
+      mock.workspace.dispatch({ type: 'capture' });
+      await mock.workspace.flush();
+      expect(mock.workspace.state.notes[0]?.text).toBe('Private thread note survives discard');
+      expect(mock.workspace.state.tasks[0]?.title).toBe('Private task survives discard');
+      const before = structuredClone(mock.saved());
+      const requests = mock.requests.length;
+      mock.gates.reset = deferred();
+      const resetting = reader.reset();
+      mock.gates.read = deferred<ConversationCache | null>();
+      const selecting = reader.select(other);
+      expect(reader.getSnapshot()).toMatchObject({ reference: other, busy: true, reading: true });
+      const completeRead = async () => {
+        if (outcome === 'result') mock.gates.read!.resolve(stale);
+        else mock.gates.read!.reject({ code: 'stale-read', message: 'Stale cache read failed', retryable: true });
+        await selecting;
+      };
+      if (order === 'read-first') await completeRead();
+      mock.gates.reset.resolve();
+      await resetting;
+      expect(reader.getSnapshot()).toMatchObject({ reference: other, cache: null, reading: false, busy: false, error: '' });
+      if (order === 'reset-first') await completeRead();
+      await reader.select(other);
+      expect(reader.getSnapshot()).toMatchObject({ reference: other, cache: null, reading: false, busy: false, error: '' });
+      expect(mock.requests).toHaveLength(requests);
+      expect(mock.saved()).toEqual(before);
+      mock.gates.read = undefined;
+      await reader.load('description');
+      expect(reader.getSnapshot().cache?.reference).toEqual(other);
+      expect(mock.requests).toHaveLength(requests + 1);
+      expect(mock.saved()).toEqual(before);
+    });
+  }
+}
