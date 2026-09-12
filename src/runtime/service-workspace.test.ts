@@ -1,10 +1,12 @@
 import { expect, test } from 'bun:test';
-import type { Request, Thread as SourceThread } from '../../service/src/schema.ts';
+import { LIMITS, type Request, type Thread as SourceThread } from '../../service/src/schema.ts';
 import { mergeRefresh } from '../domain/live.ts';
+import { migrateWorkspace } from '../domain/migration.ts';
+import { legacyFixture } from '../domain/test-fixtures.ts';
 import { createNativePlatform, snapshotSchema, type NativeWorkspace } from '../platform/native.ts';
 import { ServiceClient, type ServiceTransport } from '../platform/service.ts';
 import { DesktopWorkspace } from './desktop-workspace.ts';
-import { getRow } from '../domain/engine.ts';
+import { getRow, getRows } from '../domain/engine.ts';
 import { ServiceWorkspace, sourceThread } from './service-workspace.ts';
 
 const evidence = (id = 'request-1', kind: 'review-request' | 'comment' | 'merge-queue' = 'review-request') => ({
@@ -28,14 +30,20 @@ function deferred<T>() {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 }
-async function harness(handler: ServiceTransport) {
-  let saved: NativeWorkspace = { revision: crypto.randomUUID(), snapshot: null, savedAt: null };
+async function harness(handler: ServiceTransport, snapshot: NativeWorkspace['snapshot'] = null) {
+  let saved: NativeWorkspace = { revision: crypto.randomUUID(), snapshot, savedAt: null };
   let failSave = false;
   let blockedSave: ReturnType<typeof deferred<void>> | undefined;
   const requests: Request[] = [];
+  const backups: NativeWorkspace[] = [];
   const platform = createNativePlatform(async (command, args) => {
     if (command === 'workspace_read') return structuredClone(saved);
     if (command === 'clock_now') return { now: new Date().toISOString(), timeZone: 'UTC', error: null };
+    if (command === 'workspace_create_backup') {
+      expect(args?.expectedRevision).toBe(saved.revision);
+      backups.push(structuredClone(saved));
+      return { id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+    }
     if (command === 'workspace_save') {
       if (blockedSave) await blockedSave.promise;
       if (failSave) throw { code: 'io', message: 'Test storage failure', retryable: true };
@@ -49,13 +57,137 @@ async function harness(handler: ServiceTransport) {
   await workspace.load(); await workspace.flush();
   const client = new ServiceClient(async request => { requests.push(request); return handler(request); });
   const remote = new ServiceWorkspace(workspace, client);
-  return { workspace, remote, requests, saved: () => saved, failSave: () => { failSave = true; },
+  return { workspace, remote, requests, backups, saved: () => saved, failSave: () => { failSave = true; },
     blockSave: () => { blockedSave = deferred<void>(); return blockedSave; }, platform };
 }
 const reply = (request: Request, result: unknown) => ({ v: 1, id: request.id, ok: true, result });
 function loadSource(workspace: DesktopWorkspace, source = thread()) {
   workspace.update(state => mergeRefresh(state, { threads: [sourceThread(source, [])], startedAt: new Date().toISOString(), fetchedAt: new Date().toISOString(), status: 'complete', diagnostics: [] }));
 }
+
+const placeholderId = 'capture:octo/project:1';
+function legacyCapture() {
+  const legacy = legacyFixture(true);
+  const previousId = legacy.threads[0]!.id;
+  legacy.threads[0] = { ...sourceThread(thread(), []), id: placeholderId, events: [] };
+  legacy.actions = legacy.actions.map(action => action.threadId === previousId
+    ? { ...action, threadId: placeholderId, eventIds: [], interpretation: 'supported' } : action);
+  legacy.selectedKey = 'a:captured';
+  return legacy;
+}
+
+test('migrated capture placeholders reject writes before intent and stay readable after promotion', async () => {
+  const snapshot = snapshotSchema.parse({
+    formatVersion: 1, workspace: { version: 1, state: legacyCapture(), scroll: {} }, reminders: [],
+  });
+  const mock = await harness(async request => {
+    expect(request.op).toBe('github.refresh');
+    return reply(request, batch());
+  }, snapshot);
+  expect(mock.backups[0]!.snapshot).toEqual(snapshot);
+  const tasks = structuredClone(mock.workspace.state.tasks);
+  const notes = structuredClone(mock.workspace.state.notes);
+  mock.workspace.dispatch({ type: 'view', view: 'inbox' });
+  mock.workspace.dispatch({ type: 'select', key: `t:${placeholderId}` });
+  await mock.workspace.flush();
+  const saved = structuredClone(mock.saved());
+  const row = getRow(mock.workspace.state, `t:${placeholderId}`)!;
+  for (const action of ['done', 'unsubscribe'] as const) {
+    await expect(mock.remote.write({ row, kind: 'notification', action })).rejects.toThrow();
+    expect(mock.workspace.state.operations).toEqual([]);
+  }
+  await mock.workspace.flush();
+  expect(mock.saved()).toEqual(saved);
+  expect(mock.requests).toEqual([]);
+  await mock.remote.refresh();
+  await mock.workspace.flush();
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load();
+  expect(relaunched.getSnapshot().loadError).toBe('');
+  await relaunched.flush();
+  expect(relaunched.state.selectedKey).toBe('t:123');
+  expect(relaunched.state.operations).toEqual([]);
+  expect(relaunched.state.tasks).toEqual(tasks.map(task => task.threadId === placeholderId ? { ...task, threadId: '123' } : task));
+  expect(relaunched.state.notes).toEqual(notes.map(note => note.threadId === placeholderId ? { ...note, threadId: '123' } : note));
+  expect(getRow(relaunched.state, 'a:routine')!.task!.notes).toBe('Routine notes');
+  expect(mock.requests.map(request => request.op)).toEqual(['github.refresh']);
+});
+
+test('promotion preserves existing failed operation context across save and relaunch without replay', async () => {
+  const state = migrateWorkspace(legacyCapture());
+  state.operations.push({
+    id: 'previous-invalid-write', threadId: placeholderId, action: 'done', eventIds: [],
+    startedAt: state.clock, status: 'failed', message: 'Invalid notification identity',
+  });
+  const mock = await harness(async request => {
+    expect(request.op).toBe('github.refresh');
+    return reply(request, batch());
+  }, snapshotSchema.parse(JSON.parse(JSON.stringify({ formatVersion: 1, workspace: { version: 1, state, scroll: {} }, reminders: [] }))));
+  const original = structuredClone(mock.workspace.state.operations[0]!);
+  await expect(mock.remote.write({
+    row: getRow(mock.workspace.state, `t:${placeholderId}`)!, kind: 'notification', action: 'done', retryId: original.id,
+  })).rejects.toThrow();
+  expect(mock.workspace.state.operations).toEqual([original]);
+  await mock.remote.refresh();
+  await mock.workspace.flush();
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load();
+  expect(relaunched.getSnapshot().loadError).toBe('');
+  await relaunched.flush();
+  expect(relaunched.state.operations).toEqual([{ ...original, threadId: '123' }]);
+  expect(relaunched.state.notes.map(note => note.text)).toEqual(state.notes.map(note => note.text));
+  expect(relaunched.state.tasks.map(task => task.title)).toEqual(state.tasks.map(task => task.title));
+  expect(mock.requests.map(request => request.op)).toEqual(['github.refresh']);
+});
+
+test('successive acknowledgements drain over 200 pending events without handling newer in-flight evidence', async () => {
+  const events = Array.from({ length: LIMITS.events + 1 }, (_, index) => evidence(`comment-${String(index + 1).padStart(3, '0')}`, 'comment'));
+  let source = thread(events.slice(0, LIMITS.events));
+  const firstWrite = deferred<Extract<Request, { op: 'github.acknowledge' }>>();
+  const confirmation = deferred<void>();
+  let writes = 0;
+  const mock = await harness(async request => {
+    if (request.op === 'github.refresh') return reply(request, batch([source]));
+    if (request.op !== 'github.acknowledge') throw new Error(`Unexpected service operation ${request.op}`);
+    if (++writes === 1) {
+      firstWrite.resolve(request);
+      await confirmation.promise;
+    }
+    return reply(request, { ...request.input, action: 'acknowledge', confirmedAt: new Date().toISOString(), status: 'confirmed' });
+  });
+  await mock.remote.refresh();
+  source = thread(events.slice(1));
+  await mock.remote.refresh();
+  const before = getRow(mock.workspace.state, 't:123')!;
+  expect(before.events).toHaveLength(201);
+  const writing = mock.remote.write({ row: before, kind: 'notification', action: 'done' });
+  const request = await firstWrite.promise;
+  expect(request.input.displayedEvidenceIds).toEqual(events.slice(1).map(event => event.id));
+  const newer = { ...evidence('newer-request'), at: '2026-09-11T17:01:00Z' };
+  source = thread([newer]);
+  await mock.remote.refresh();
+  confirmation.resolve();
+  await writing;
+  expect(mock.workspace.state.handled).toHaveLength(200);
+  expect(mock.workspace.state.handled).not.toContain(events[0]!.id);
+  expect(mock.workspace.state.handled).not.toContain(newer.id);
+  const remaining = getRow(mock.workspace.state, 't:123')!;
+  expect(remaining.thread!.events).toHaveLength(202);
+  expect(getRows(mock.workspace.state)).toHaveLength(1);
+  await mock.remote.write({ row: remaining, kind: 'notification', action: 'done' });
+  const acknowledged = mock.requests.filter(request => request.op === 'github.acknowledge');
+  expect(acknowledged.map(request => request.input.displayedEvidenceIds)).toEqual([
+    events.slice(1).map(event => event.id), [events[0]!.id, newer.id],
+  ]);
+  expect(remaining.events.map(event => event.id)).toEqual([events[0]!.id, newer.id]);
+  expect(getRows(mock.workspace.state)).toEqual([]);
+  expect(mock.workspace.state.handled).toHaveLength(202);
+  expect(getRow(mock.workspace.state, 't:123')!.thread!.events).toHaveLength(202);
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load();
+  expect(relaunched.state.threads[0]!.notification).toBe('done');
+  expect(getRows(relaunched.state)).toEqual([]);
+});
 
 test('manual refresh uses latest notes and Done; capture, edits, load and clocks never call model or network', async () => {
   const pending = deferred<unknown>();

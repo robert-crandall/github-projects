@@ -459,6 +459,48 @@ test('v2 migration creates a durable original before writing v3 and relaunch doe
   expect(native.state.notes).toEqual(beforeReload.notes);
 });
 
+test('migrated capture placeholders keep source links but hide notification writes until Refresh resolves them', async ({ page, native }) => {
+  const legacy = legacyFixture(true);
+  const placeholderId = 'capture:octo/project:123';
+  legacy.threads[0]!.id = placeholderId;
+  legacy.threads[0]!.events = [];
+  legacy.actions = legacy.actions.map(action => action.threadId
+    ? { ...action, threadId: placeholderId, eventIds: [], interpretation: 'supported' } : action);
+  native.saved.snapshot = snapshotSchema.parse({
+    formatVersion: 1, workspace: { version: 1, state: legacy, scroll: {} }, reminders: [],
+  });
+  await page.goto('/');
+  await persisted(page);
+  await tasks(page).click();
+  await row(page, 'a:captured').click();
+  await detail(page).getByRole('button', { name: 'Open thread notes' }).click();
+  await expect(page.getByLabel('Thread note 3')).toHaveValue('Captured thread annotation');
+  await expect(detail(page).getByRole('button', { name: 'Mark notification done on GitHub' })).toHaveCount(0);
+  await expect(detail(page).getByRole('button', { name: 'Unsubscribe on GitHub' })).toHaveCount(0);
+  await expect(detail(page)).toContainText('Refresh to look for a GitHub notification');
+  await expect(detail(page).getByRole('button', { name: 'Review in Copilot' })).toBeVisible();
+  await detail(page).getByRole('button', { name: 'Open on GitHub', exact: true }).click();
+  await page.getByRole('button', { name: 'Request launch' }).click();
+  await expect(page.getByRole('dialog')).toContainText('Launch requested, not completed');
+  expect(native.launches[0]!.args).toEqual({ identity: { source: 'github', owner: 'octo', repo: 'project', kind: 'pr', number: 123 } });
+  await page.getByRole('button', { name: 'Return to workspace' }).click();
+  expect(native.requests).toEqual([]);
+  await refresh(page);
+  expect(native.state.operations).toEqual([]);
+  expect(native.state.selectedKey).toBe('t:123');
+  await expect(detail(page).getByRole('button', { name: 'Mark notification done on GitHub' })).toBeVisible();
+  await expect(detail(page).getByRole('button', { name: 'Unsubscribe on GitHub' })).toBeVisible();
+  await page.reload();
+  await persisted(page);
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('First distinct annotation');
+  await expect(page.getByLabel('Thread note 2')).toHaveValue('Second distinct annotation');
+  await expect(page.getByLabel('Thread note 3')).toHaveValue('Captured thread annotation');
+  await tasks(page).click();
+  await row(page, 'a:routine').click();
+  await expect(page.getByLabel('Task notes')).toHaveValue('Routine notes');
+  expect(native.requests.map(request => request.op)).toEqual(['github.refresh']);
+});
+
 test('failed migration backup blocks editing and writes until preserving the original succeeds', async ({ page, native }) => {
   native.saved.snapshot = snapshotSchema.parse({
     formatVersion: 1, workspace: { version: 1, state: legacyFixture(true), scroll: {} }, reminders: [],

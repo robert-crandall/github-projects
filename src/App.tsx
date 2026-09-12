@@ -4,6 +4,7 @@ import {
   GitPullRequest, Github, Inbox, MessageSquare, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
 } from 'lucide-react';
 import { earlierThreads, getRow, getRows } from './domain/engine.ts';
+import { threadIdSchema } from '../service/src/schema.ts';
 import type { AppState, LocalHistory, Row, Scenario, Task, View } from './types.ts';
 import { useWorkspace } from './useWorkspace.ts';
 import type { Destination, WorkspaceView } from './runtime/view.ts';
@@ -172,6 +173,7 @@ function Detail({ row, state, dispatch, open, back, unsaved }: {
   const task = row.task;
   const thread = row.thread;
   const notes = thread ? state.notes.filter(note => note.threadId === thread.id) : [];
+  const canWrite = state.runtime !== 'desktop' || (thread?.source === 'github' && threadIdSchema.safeParse(thread.id).success);
   return <article className="detail" aria-label="Selected item">
     <header className="detail-toolbar">
       <button className="text-button back-control" onClick={back}><ArrowLeft size={15} />Back to list</button>
@@ -210,8 +212,9 @@ function Detail({ row, state, dispatch, open, back, unsaved }: {
           <button className="text-button" onClick={() => dispatch({ type: 'note', threadId: thread.id, text: '' })}><Plus size={14} />Add note</button>
         </section>
         <section className="thread-controls"><h3>GitHub notification</h3><p className="muted">{thread.notification} · {thread.subscription ?? (thread.subscribed ? 'subscribed' : 'unsubscribed')}. These controls do not change notes or Tasks.</p>
-          <div className="button-row"><button className="text-button" onClick={() => open({ row, kind: 'notification', action: 'done' })}>Mark notification done on GitHub</button>
+          {canWrite ? <div className="button-row"><button className="text-button" onClick={() => open({ row, kind: 'notification', action: 'done' })}>Mark notification done on GitHub</button>
             <button className="text-button" onClick={() => open({ row, kind: 'notification', action: 'unsubscribe' })}>Unsubscribe on GitHub</button></div>
+            : <p className="field-help">Refresh to look for a GitHub notification before using notification controls. You can still open the source above.</p>}
         </section>
         <details className="sources"><summary>Saved source history<ChevronDown size={14} /></summary>
           {thread.events.map(event => <div className="source-event" key={event.id}><span className="preserve-text">{event.summary}</span><small>{event.actor} · {stamp(event.at, state.timeZone, true)}</small></div>)}

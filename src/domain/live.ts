@@ -55,6 +55,7 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
         const previousId = previous.id;
         for (const note of next.notes) if (note.threadId === previousId) note.threadId = fetched.id;
         for (const task of next.tasks) if (task.threadId === previousId) task.threadId = fetched.id;
+        for (const operation of next.operations) if (operation.threadId === previousId) operation.threadId = fetched.id;
         if (next.selectedKey === `t:${previousId}`) next.selectedKey = `t:${fetched.id}`;
         next.order = next.order.map(key => key === `t:${previousId}` ? `t:${fetched.id}` : key);
         previous.events = previous.events.map(event => ({ ...event, threadId: fetched.id }));

@@ -106,7 +106,9 @@ export type View = AppState['view'];
 export type Scenario = 'new-review' | 'comment' | 'merge-queue' | 're-request' | 'sticky-mention' | 'closed' | 'read' | 'acknowledged' | 'mention' | 'empty';
 export type Row = {
   key: string; title: string; reason: string; kind: 'review' | 'update' | 'task';
-  thread?: Thread; task?: Task; events: Activity[]; fresh: boolean; available: boolean;
+  thread?: Thread; task?: Task; fresh: boolean; available: boolean;
+  // Pending evidence for writes; the reader retains the full history in thread.events.
+  events: Activity[];
 };
 export type Command =
   | { type: 'select'; key: string | null }

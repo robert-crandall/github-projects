@@ -1,4 +1,4 @@
-import { LIMITS, type Evidence, type Thread as SourceThread } from '../../service/src/schema.ts';
+import { LIMITS, threadIdSchema, type Evidence, type Thread as SourceThread } from '../../service/src/schema.ts';
 import { beginOperation, finishOperation, mergeRefresh, type RefreshBatch } from '../domain/live.ts';
 import type { Activity, Thread } from '../types.ts';
 import { ServiceClient, type ServiceOutput } from '../platform/service.ts';
@@ -83,7 +83,9 @@ export class ServiceWorkspace implements RemoteWorkspace {
   }
   async write(destination: Destination): Promise<void> {
     const thread = destination.row.thread;
-    if (!thread || !destination.action || thread.source !== 'github') throw new Error('Open a real GitHub notification before confirming this operation.');
+    if (!thread || !destination.action || thread.source !== 'github' || !threadIdSchema.safeParse(thread.id).success) {
+      throw new Error('Open a real GitHub notification before confirming this operation.');
+    }
     const previous = destination.retryId ? this.workspace.state.operations.find(operation => operation.id === destination.retryId) : undefined;
     if (destination.retryId && (!previous || previous.status === 'confirmed' || previous.status === 'pending'
       || previous.threadId !== thread.id || previous.action !== destination.action)) throw new Error('This operation cannot be retried with a different context.');

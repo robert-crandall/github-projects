@@ -43,7 +43,7 @@ function DestinationPanel({ destination, controller, remote, close }: {
           : 'Open this issue in Copilot App. The repository may need to be configured there; Open on GitHub remains available.'
           : 'Open this validated GitHub source in your browser.'}</p>
       {destination.retryId && <p className="notice-inline warning">A prior attempt was not saved as confirmed. Retrying uses its original evidence, not newer requests.</p>}
-      {isWrite && row.events.length > 200 && <p className="notice-inline">This operation records the 200 most recent displayed events. Older local evidence remains unchanged.</p>}
+      {isWrite && row.events.length > 200 && <p className="notice-inline">This operation records the 200 most recent pending events. Older local evidence remains unchanged.</p>}
       {phase === 'pending' && <p role="status">{isWrite ? 'Saving intent, then waiting for GitHub confirmation...' : 'Requesting native launch...'}</p>}
       {error && <p className="inline-error" role="alert">{error}</p>}
     </>}

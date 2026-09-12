@@ -29,7 +29,7 @@ function threadRow(state: AppState, thread: Thread): Row {
   const latest = thread.events.at(-1);
   return {
     key: `t:${thread.id}`, title: thread.title, kind: thread.kind === 'pr' ? 'review' : 'update',
-    reason: latest?.summary ?? 'No source activity saved yet.', thread, events: thread.events,
+    reason: latest?.summary ?? 'No source activity saved yet.', thread, events,
     fresh: state.newKeys.includes(`t:${thread.id}`), available: events.length > 0,
   };
 }
