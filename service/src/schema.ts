@@ -22,7 +22,7 @@ const text = z.string().max(LIMITS.evidenceText);
 export const errorCodeSchema = z.enum([
   'invalid_input', 'invalid_output', 'missing_cli', 'authentication', 'missing_scope',
   'access', 'rate_limit', 'unavailable', 'deadline', 'cancelled', 'busy', 'protocol',
-  'limit', 'unsupported', 'copilot_unavailable', 'copilot_output', 'internal',
+  'limit', 'unsupported', 'copilot_unavailable', 'copilot_output', 'internal', 'source_changed',
 ]);
 export const errorSchema = z.strictObject({
   code: errorCodeSchema, message: z.string().max(300), retryable: z.boolean(),
@@ -79,6 +79,7 @@ export const refreshSchema = z.strictObject({
 export const writeInputSchema = z.strictObject({
   operationId: idSchema, threadId: threadIdSchema, reference: referenceSchema,
   displayedEvidenceIds: z.array(idSchema).max(LIMITS.events),
+  notificationUpdatedAt: time.optional(),
 });
 export const writeResultSchema = writeInputSchema.extend({
   action: z.enum(['acknowledge', 'unsubscribe']), confirmedAt: time,

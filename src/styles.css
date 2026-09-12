@@ -96,6 +96,8 @@ p { line-height: 1.65; }
 .evidence { margin: 26px 0 22px; padding: 1px 0; }
 .evidence > p { font-size: 13px; color: var(--secondary); }
 .detail-actions { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+.archive-controls { margin-top: 18px; }
+.archive-controls .field-help { margin: 0; }
 .notes-section { margin-top: 30px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .section-heading label { font-size: 12px; font-weight: 550; }
@@ -201,10 +203,8 @@ blockquote { margin: 12px 0; font-size: 12px; white-space: pre-wrap; overflow-wr
 .thread-note + .thread-note { margin-top: 24px; }
 .note-source { font-size: 12px; color: var(--secondary); margin-bottom: 8px; }
 .notes-section > .text-button { margin-top: 12px; }
-.completed-tasks > h3, .earlier-threads > summary { display: flex; align-items: center; gap: 8px; padding: 14px 18px; font-size: 12px; color: var(--secondary); border-bottom: 1px solid var(--border); }
-.completed-tasks > h3 span, .earlier-threads > summary span { margin-left: auto; }
-.earlier-threads > summary { cursor: pointer; }
-.earlier-threads > .field-help { padding: 0 18px 12px; }
+.completed-tasks > h3 { display: flex; align-items: center; gap: 8px; padding: 14px 18px; font-size: 12px; color: var(--secondary); border-bottom: 1px solid var(--border); }
+.completed-tasks > h3 span { margin-left: auto; }
 .back-control { display: none; }
 @media (min-width: 1600px) {
   .app { grid-template-columns: 236px minmax(0, 1fr); }

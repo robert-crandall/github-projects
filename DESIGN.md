@@ -21,7 +21,7 @@ The app works like an email client: inboxes on the left, a compact list in the m
 
 Selecting a row only opens it. Refresh must not move focus, replace local edits, select a task, or reorder existing rows. New source rows can append in a labeled group.
 
-**Earlier threads** is a compact disclosure below Inbox. It preserves access to acknowledged/unsubscribed conversations and notes without treating them as pending work. A migrated linked Task can open its thread notes directly.
+**Archive** is a peer location beside Inbox and Tasks, not a disclosure or second task system. It keeps conversations and notes reachable until new activity returns the same thread to Inbox. A migrated linked Task opens its thread notes in the correct location.
 
 | Surface | Behavior |
 | --- | --- |
@@ -49,9 +49,9 @@ Thread notes are private, locally saved textareas. Migration may produce several
 
 Task detail uses text, notes and a Done checkbox. No required project, priority, Working on, checklist ritual, or routine configuration. Original migrated progress remains read-only history, not executable steps.
 
-Keep native input behavior, visible labels, keyboard focus and Command/Ctrl+K capture. Capture uses a focused dialog; external writes use confirmation dialogs that state the destination and effect.
+Keep native input behavior, visible labels, keyboard focus and Command/Ctrl+K capture. Capture uses a focused dialog. **Archive thread** is an immediate primary action with inline copy naming its local and GitHub effects. Keep the selected reader open after its row leaves the list so notes, scroll and focus remain stable. **Restore to Inbox** reverses only local placement.
 
-GitHub acknowledgement, unsubscribe and local task Done are distinct. Never use an ambiguous completion icon to hide an external write.
+Unsubscribe and explicit acknowledgement retries use confirmation dialogs. Show pending, unconfirmed and confirmed outcomes honestly; closing a pending dialog does not cancel its request. Connections exposes unconfirmed writes after navigation/relaunch. GitHub acknowledgement, unsubscribe and local task Done remain distinct; do not add a competing ordinary Done control beside Archive.
 
 ## Feedback and recovery
 
@@ -65,4 +65,4 @@ Prototype labels and synthetic-data notices remain factual. Legacy routine recor
 
 ## Boundaries
 
-No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status. Archive semantics and filters remain separate follow-up issues.
+No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status. Filtering and terminal suppression remain a separate follow-up.

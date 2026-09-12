@@ -43,13 +43,19 @@ Use **Connections → Check connections** to check prerequisites. It does not fe
 2. **Capture** (Command/Ctrl+K) saves exact text directly into **Tasks**. Links and daily phrasing remain ordinary text.
 3. Edit task text or notes and check **Done**. GitHub activity never reopens completed tasks.
 4. **Refresh** loads a bounded batch while preserving current notes, selection, row order and task completion.
-5. **Mark notification done on GitHub** and **Unsubscribe** require confirmation and a saved intent. **Earlier threads** keeps notes reachable afterward.
+5. **Archive thread** clears Inbox immediately and marks the notification done on GitHub after saving its intent. **Archive** keeps notes/history reachable. **Restore to Inbox** is local-only; **Unsubscribe on GitHub** remains a separate confirmed action.
+
+Archive works offline: the local move stays saved while an unconfirmed GitHub write remains visible for explicit retry. A failed local save prevents dispatch. No write replays on reconnect or relaunch. Source placeholders without a notification ID archive only here, with an explicit explanation. New source notification activity returns the same thread with its notes; stale responses, read/unread changes, sticky reasons and older history do not.
+
+Archive never closes a source or completes a Task. Unsubscribe does not archive locally; mentions and review requests can still notify. Restore cannot undo GitHub Done or unsubscribe. More than 200 pending evidence IDs require an explicit **Acknowledge remaining evidence** batch. Retries keep their original evidence and source timestamp; older intents without a timestamp require Refresh and confirmation of current evidence instead.
+
+GitHub marks a whole notification done, not individual messages. The app refuses a clearly stale acknowledgement before writing, but GitHub cannot atomically check and delete: activity arriving between those requests may also be marked done there. Newer evidence already received locally always survives.
 
 **Open on GitHub** and **Review in Copilot** / **Open in Copilot** remain visible on threads. Dispatch is not proof that a session exists or a review finished. Private notes never enter those links or external writes.
 
 The reader shows real issue/PR descriptions, comments, reviews and grouped inline replies, with author, source time and source links. Markdown renders without executing HTML or automatically fetching images/embeds. Long bodies are not clipped. **Pages, freshness and older history** exposes page timestamps, partial errors, **Load older** and explicit page reloads for older edits. Each missing range has an explicit action that loads one page, including gaps left when newest messages jump ahead. Comments, reviews and inline discussions track their pages independently; failed or partial pages retain a reload action.
 
-Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns cleared threads to Inbox. Archive/resurface behavior follows in #10, and filtering/terminal suppression in #11.
+Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns archived threads to Inbox. Filtering/terminal suppression follows in #11.
 
 ## Local storage and recovery
 
@@ -63,7 +69,7 @@ SQLite saves the checksummed, revisioned workspace atomically. **Saved on this M
 
 Current version-2 data converts to version 3 after a durable immutable backup succeeds. Linked action notes become separate thread annotations with original titles/history. Explicit captured tasks stay Tasks even when linked; **Open thread notes** leads back to the moved annotation. Their new task notes start empty. Standalone actions/routines become Tasks with preserved notes and history. Completed/removed tasks stay Done. No unrelated older application storage is inspected.
 
-The migration retains capture text, progress, step timestamps, project/next-step text and routine history. The original backup also preserves the retired undo stack. Loading version 3 does not repeat the conversion.
+The migration retains capture text, progress, step timestamps, project/next-step text and routine history. The original backup also preserves the retired undo stack. Loading version 3 does not repeat the conversion. Existing retained threads move into Archive once; later local Restore remains effective across relaunch.
 
 Unconfirmed GitHub writes remain visible and explicitly retryable after relaunch. They never replay automatically. A timeout or interrupted process may follow a successful remote write; check GitHub or retry explicitly rather than treating it as success.
 
@@ -88,6 +94,7 @@ bun run test
 bun run test:browser
 bun run build
 bun run build:desktop
+bun run build:service
 bun run test:native
 (cd service && bun run typecheck && bun run build arm64 && bun test)
 bun run native:build
@@ -107,7 +114,7 @@ session=$(uuidgen)
 "$app" --native-ui-smoke-relaunch --integration-smoke-session "$session"
 ```
 
-These use generated TEST directories, not app data. They check SQLite, renderer capture/notes/Done, full cached conversation rendering through real native IPC, cache-only discard retaining notes, hiding/showing the window, and a separate process relaunch. No GitHub request runs. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself.
+These use generated TEST directories, not app data. They check SQLite, renderer capture/notes/Done, full cached conversation rendering through real native IPC, Archive plus acknowledgement, identical refresh, loading old pages, new activity returning the same thread, cache-only discard, hiding/showing and a separate process relaunch. An explicit smoke-only native service fixture supplies source responses; unexpected service/model operations fail instead of reaching GitHub. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself. Smoke failures exit nonzero.
 
 `--integration-service-smoke-check` explicitly performs a tiny synthetic SDK inference and a bounded read-only GitHub refresh through the packaged native host. It consumes Copilot service access and must not run as an automatic test. `--integration-read-smoke-check` performs only the read-only refresh. Both use private TEST directories and report counts/status, never source bodies or tokens.
 
@@ -117,4 +124,4 @@ These use generated TEST directories, not app data. They check SQLite, renderer 
 - [Native integration contract](src/platform/README.md) documents SQLite revisions, recovery, retired schedules, destinations, and owned process hosting.
 - [Service contract](service/README.md) documents auth, exact endpoints, source coverage, SDK isolation, and bounded JSONL transport.
 
-GitHub refresh is a bounded view of notifications and REST timeline evidence, not full repository synchronization. The independent conversation reader fetches REST message pages, not every historical revision, file diff, resolved-review status or repository content. The service is capability-restricted but not an operating-system sandbox. External Copilot App launching is separate from SDK previews.
+GitHub refresh is a bounded view of notifications and REST timeline evidence, not full repository synchronization. Missing notifications prove nothing. Archive retains a monotonic source timestamp; without a notification baseline, activity must be newer than the local archive time. A newly discovered same-timestamp ID alone cannot prove new activity. The independent conversation reader fetches REST message pages, not every historical revision, file diff, resolved-review status or repository content. The service is capability-restricted but not an operating-system sandbox. External Copilot App launching is separate from SDK previews.

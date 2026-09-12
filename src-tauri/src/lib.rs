@@ -224,9 +224,13 @@ fn clock_now() -> Clock {
 
 #[tauri::command]
 async fn service_request(
+    app: tauri::AppHandle,
     state: State<'_, Arc<ServiceHost>>,
     request: serde_json::Value,
 ) -> Result<serde_json::Value> {
+    if let Some(fixture) = app.try_state::<smoke::ServiceFixture>() {
+        return fixture.request(request);
+    }
     let host = state.inner().clone();
     background(move || host.request(request)).await
 }
@@ -413,6 +417,8 @@ pub fn run() {
             ))
         });
     let setup_directory = smoke_directory.clone();
+    let smoke_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let setup_failed = smoke_failed.clone();
     let exit_code = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             workspace_read,
@@ -453,11 +459,13 @@ pub fn run() {
                 .and_then(Store::new);
             install_lifecycle(app, store, runtime_directory)?;
             if setup_directory.is_some() {
+                app.manage(smoke::ServiceFixture::default());
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(5));
                     let result = smoke::run(handle.clone(), relaunch);
                     if let Err(error) = &result {
+                        setup_failed.store(true, std::sync::atomic::Ordering::SeqCst);
                         eprintln!("{error}");
                     }
                     handle.exit(if result.is_ok() { 0 } else { 1 });
@@ -489,7 +497,11 @@ pub fn run() {
             std::process::exit(1);
         }
     }
-    std::process::exit(exit_code);
+    std::process::exit(if smoke_failed.load(std::sync::atomic::Ordering::SeqCst) {
+        1
+    } else {
+        exit_code
+    });
 }
 
 #[cfg(test)]

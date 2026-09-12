@@ -451,6 +451,9 @@ export class GitHubService {
     }
     checkAbort(signal);
     if (action === 'acknowledge') {
+      if (value.notificationUpdatedAt && Date.parse(notification.updated_at) > Date.parse(value.notificationUpdatedAt)) {
+        throw new ServiceError('source_changed');
+      }
       requireStatus(await this.api.request('DELETE', endpoint, signal), 204);
     } else {
       const response = await this.api.request('PUT', `${endpoint}/subscription`, signal, { ignored: true });

@@ -2,6 +2,8 @@ import { threadSchema, type AppState, type ExternalOperation, type Thread } from
 import { transition } from './engine.ts';
 import { instant } from './clock.ts';
 import { migrateWorkspace } from './migration.ts';
+import { archiveBoundary, hasNewActivity, latestTime } from './archive.ts';
+import { threadIdSchema } from '../../service/src/schema.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
   new Intl.DateTimeFormat('en-US', { timeZone });
@@ -65,6 +67,25 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
     if (previous && (previous.repo.toLowerCase() !== fetched.repo.toLowerCase() || previous.number !== fetched.number || previous.kind !== fetched.kind)) {
       throw new Error('GitHub returned a changed thread identity. Saved work is unchanged.');
     }
+    const confirmed = next.operations.filter(operation => operation.threadId === fetched.id && operation.status === 'confirmed');
+    const acknowledgedAt = latestTime(confirmed.filter(operation => operation.action === 'done').map(operation => operation.startedAt));
+    const boundary = previous?.archive ?? (previous?.notification === 'done' && acknowledgedAt ? archiveBoundary(previous, acknowledgedAt) : null);
+    fetched.archive = previous?.archive ?? null;
+    const newActivity = previous && hasNewActivity({ ...previous, archive: boundary }, fetched);
+    if (newActivity) {
+      fetched.archive = null;
+      next.newKeys = [...new Set([...next.newKeys, `t:${fetched.id}`])];
+    }
+    const stale = previous?.notificationUpdatedAt && fetched.notificationUpdatedAt
+      && Date.parse(fetched.notificationUpdatedAt) < Date.parse(previous.notificationUpdatedAt);
+    fetched.notificationUpdatedAt = latestTime([previous?.notificationUpdatedAt, fetched.notificationUpdatedAt]);
+    if (stale && previous) {
+      fetched.title = previous.title;
+      fetched.state = previous.state;
+      fetched.reason = previous.reason;
+      fetched.rawReason = previous.rawReason;
+      fetched.sourceMetadata = previous.sourceMetadata;
+    }
     const merged = new Map(previous?.events.map(event => [event.id, event]));
     const fetchedEventIds = new Set(fetched.events.map(event => event.id));
     for (const [id, event] of merged) {
@@ -78,7 +99,8 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       merged.set(event.id, event);
     }
     fetched.events = [...merged.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
-    const confirmed = next.operations.filter(operation => operation.threadId === fetched.id && operation.status === 'confirmed');
+    // Timeline enrichment can be newer than the notification listing that accompanied it.
+    if (stale && previous && (previous.notification !== 'done' || !newActivity)) fetched.notification = previous.notification;
     const authoritativeSubscription = fetched.subscription === 'subscribed' || fetched.subscription === 'unsubscribed';
     if (authoritativeSubscription && (!previous?.subscriptionObservedAt || Date.parse(startedAt) > Date.parse(previous.subscriptionObservedAt))) {
       fetched.subscribed = fetched.subscription === 'subscribed';
@@ -88,7 +110,8 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       fetched.subscription = previous.subscription;
       fetched.subscriptionObservedAt = previous.subscriptionObservedAt;
     }
-    if (confirmed.some(operation => operation.action === 'done')
+    if (confirmed.some(operation => operation.action === 'done'
+      && (!fetched.notificationUpdatedAt || (operation.notificationUpdatedAt && Date.parse(operation.notificationUpdatedAt) >= Date.parse(fetched.notificationUpdatedAt))))
       && !fetched.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
       fetched.notification = 'done';
     }
@@ -105,17 +128,20 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
   return transition(next, { type: 'clock', now: next.clock });
 }
 
-export function beginOperation(state: AppState, operation: Pick<ExternalOperation, 'id' | 'threadId' | 'action' | 'eventIds'>): AppState {
+export function beginOperation(state: AppState, operation: Pick<ExternalOperation, 'id' | 'threadId' | 'action' | 'eventIds' | 'notificationUpdatedAt'>, deferIfPending = false): AppState {
   const next = structuredClone(state);
   const thread = next.threads.find(thread => thread.id === operation.threadId);
-  if (!thread || thread.source !== 'github' || operation.eventIds.some(id => !thread.events.some(event => event.id === id))) {
+  if (!thread || thread.source !== 'github' || !threadIdSchema.safeParse(thread.id).success
+    || operation.eventIds.some(id => !thread.events.some(event => event.id === id))) {
     throw new Error('The displayed GitHub evidence changed. Open the notification again.');
   }
-  if (next.operations.some(existing => existing.id === operation.id || (existing.threadId === operation.threadId && existing.status === 'pending'))) {
+  const pending = next.operations.some(existing => existing.threadId === operation.threadId && existing.status === 'pending');
+  if (next.operations.some(existing => existing.id === operation.id) || (pending && !deferIfPending)) {
     throw new Error('A GitHub operation for this notification is already pending.');
   }
-  next.operations.push({ ...operation, eventIds: [...new Set(operation.eventIds)], startedAt: state.clock, status: 'pending',
-    message: 'Intent awaits local persistence. GitHub has not confirmed success.' });
+  next.operations.push({ ...operation, eventIds: [...new Set(operation.eventIds)], startedAt: state.clock, status: pending ? 'failed' : 'pending',
+    message: pending ? 'Not sent because another GitHub write is pending. Archive stays here; retry this acknowledgement explicitly when it finishes.'
+      : 'Intent awaits local persistence. GitHub has not confirmed success.' });
   return next;
 }
 
@@ -138,7 +164,9 @@ export function finishOperation(state: AppState, id: string, result: { confirmed
     thread.subscribed = false;
     thread.subscription = 'unsubscribed';
     thread.subscriptionObservedAt = operation.finishedAt;
-  } else if (operation.action === 'done' && !thread.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
+  } else if (operation.action === 'done'
+    && (!thread.notificationUpdatedAt || (operation.notificationUpdatedAt && Date.parse(operation.notificationUpdatedAt) >= Date.parse(thread.notificationUpdatedAt)))
+    && !thread.events.some(event => !next.handled.includes(event.id) && event.kind !== 'read' && event.kind !== 'acknowledged')) {
     thread.notification = 'done';
   }
   return next;

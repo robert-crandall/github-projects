@@ -47,7 +47,8 @@ test('missing and repeatedly fetched threads never erase notes or regenerate ack
   let state = transition(loaded(), { type: 'note', threadId: '123', text: 'Preserve' });
   state = beginOperation(state, { id: 'ack', threadId: '123', action: 'done', eventIds: ['request'] });
   state = finishOperation(state, 'ack', { confirmedAt: now });
-  expect(getRows(refresh(refresh(state)))).toEqual([]);
+  expect(getRows(refresh(refresh(state)))[0]!.events).toEqual([]);
+  expect(getRows(refresh(refresh(state)))).toHaveLength(1);
   const missing = mergeRefresh(state, { threads: [], startedAt: now, fetchedAt: now, status: 'partial', diagnostics: ['Timeline unavailable'] });
   expect(missing.notes).toEqual(state.notes);
   expect(missing.threads[0]!.events[0]!.requestState).toBe('uncertain');
@@ -81,7 +82,7 @@ test('unsubscribe survives in-flight refresh; failed and pending writes stay exp
   state = finishOperation(state, 'retry', { confirmedAt: now });
   state = refresh(state, [event(), event('comment', 'comment')]);
   expect(state.threads[0]!.subscribed).toBe(false);
-  expect(getRows(state)).toEqual([]);
+  expect(getRows(state)).toHaveLength(1);
   state = refresh(state, [event('new-request')]);
   expect(getRows(state)).toHaveLength(1);
   expect(state.tasks).toEqual([]);
@@ -94,7 +95,7 @@ test('a newer authoritative resubscription supersedes unsubscribe, not an older 
     startedAt: now, fetchedAt: '2026-09-11T17:02:00Z', status: 'complete' as const, diagnostics: [] };
   state = mergeRefresh(state, delayed);
   expect(state.threads[0]!.subscription).toBe('unsubscribed');
-  expect(getRows(state)).toEqual([]);
+  expect(getRows(state)).toHaveLength(1);
   state = beginOperation(state, { id: 'retry', threadId: '123', action: 'unsubscribe', eventIds: ['request'] });
   state = mergeRefresh(state, { ...delayed, startedAt: '2026-09-11T17:03:00Z', fetchedAt: '2026-09-11T17:04:00Z' });
   state = finishOperation(state, 'retry', { confirmedAt: '2026-09-11T17:01:00Z' });

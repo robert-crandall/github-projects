@@ -22,6 +22,10 @@ export const threadSchema = z.object({
   source: z.literal('github').optional(),
   subscription: z.enum(['subscribed', 'unsubscribed', 'unknown']).optional(),
   subscriptionObservedAt: time.optional(),
+  notificationUpdatedAt: time.optional(),
+  archive: z.object({
+    at: time, notificationUpdatedAt: time.optional(), evidenceAt: time.optional(),
+  }).nullable().optional(),
   rawReason: z.string().optional(),
   sourceMetadata: z.record(z.string(), z.json()).optional(),
   coverage: z.object({
@@ -52,6 +56,7 @@ export const externalOperationSchema = z.object({
   eventIds: z.array(z.string()), startedAt: time,
   status: z.enum(['pending', 'uncertain', 'failed', 'confirmed']),
   message: z.string(), finishedAt: time.optional(),
+  notificationUpdatedAt: time.optional(),
 });
 const viewSchema = z.enum(['attention', 'later', 'history', 'routines', 'projects']);
 const undoSchema = z.object({
@@ -88,7 +93,7 @@ export const stateSchema = legacyStateSchema.omit({
   version: true, actions: true, activeId: true, view: true, undo: true, failures: true,
 }).extend({
   version: z.literal(3), tasks: z.array(taskSchema), notes: z.array(noteSchema),
-  view: z.enum(['inbox', 'tasks']),
+  view: z.enum(['inbox', 'archive', 'tasks']),
   failures: z.object({ refresh: z.enum(['none', 'partial', 'error']), storage: z.boolean(), external: z.boolean() }),
   undo: z.array(z.object({ before: taskSchema, after: taskSchema })),
 });
@@ -117,10 +122,11 @@ export type Command =
   | { type: 'capture' }
   | { type: 'edit'; key: string; title?: string; notes?: string }
   | { type: 'note'; threadId: string; noteId?: string; text: string }
+  | { type: 'archive' | 'restore-thread'; threadId: string }
   | { type: 'done' | 'restore'; key: string }
   | { type: 'undo' | 'refresh' | 'reset' }
   | { type: 'stage'; scenario: Scenario }
   | { type: 'advance'; minutes: number }
   | { type: 'clock'; now: string }
-  | { type: 'notification'; threadId: string; action: 'read' | 'done' | 'unsubscribe' }
+  | { type: 'notification'; threadId: string; action: 'read' | 'done' | 'unsubscribe'; retryId?: string }
   | { type: 'configure'; refreshFailure?: AppState['failures']['refresh']; storageFailure?: boolean; externalFailure?: boolean };

@@ -94,8 +94,9 @@ test('service -> client -> native cache -> runtime keeps complete content separa
   expect(mock.writes.every(write => !write.includes('END OF LONG MESSAGE'))).toBe(true);
   expect(getRow(mock.workspace.state, 't:123')!.events).toEqual(source.events);
   mock.workspace.update(state => finishOperation(beginOperation(state, {
-    id: 'confirmed-test', threadId: '123', action: 'done', eventIds: source.events.map(event => event.id),
+    id: 'confirmed-test', threadId: '123', action: 'done', eventIds: source.events.map(event => event.id), notificationUpdatedAt: source.notificationUpdatedAt,
   }), 'confirmed-test', { confirmedAt: new Date().toISOString() }));
+  mock.workspace.dispatch({ type: 'archive', threadId: '123' });
   const inboxBefore = getRows(mock.workspace.state, 'inbox');
   expect(inboxBefore).toEqual([]);
   await mock.remote.conversation.load('inline', 1);

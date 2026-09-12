@@ -1,4 +1,6 @@
-import { legacyStateSchema, stateSchema, type AppState } from '../types.ts';
+import { legacyStateSchema, stateSchema, threadSchema, type AppState } from '../types.ts';
+import { archiveBoundary } from './archive.ts';
+import { pendingEvidence } from './engine.ts';
 
 export function migrateWorkspace(value: unknown): AppState {
   if (typeof value === 'object' && value !== null && 'version' in value && value.version === 3) {
@@ -63,5 +65,13 @@ export function validateWorkspace(state: AppState): AppState {
   }
   try { new Intl.DateTimeFormat('en-US', { timeZone: state.timeZone }); }
   catch { throw new Error(`The saved workspace has an invalid timezone: ${state.timeZone}. Your saved copy has not been replaced.`); }
+  for (const thread of state.threads) {
+    if (thread.archive !== undefined) continue;
+    const updatedAt = threadSchema.shape.notificationUpdatedAt.safeParse(thread.sourceMetadata?.updatedAt);
+    if (!thread.notificationUpdatedAt && updatedAt.success && updatedAt.data) {
+      thread.notificationUpdatedAt = updatedAt.data;
+    }
+    thread.archive = pendingEvidence(state, thread).length ? null : archiveBoundary(thread, state.clock);
+  }
   return state;
 }

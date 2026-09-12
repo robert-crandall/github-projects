@@ -2,6 +2,7 @@ import type { ServiceErrorDTO } from './schema.ts';
 
 const messages: Record<ServiceErrorDTO['code'], string> = {
   invalid_input: 'The operation input is invalid.',
+  source_changed: 'GitHub has newer notification activity. No acknowledgement was sent. Refresh and confirm a new operation; the old retry keeps its original boundary.',
   invalid_output: 'The upstream response was invalid; saved work is unchanged.',
   missing_cli: 'Install the required gh or Copilot CLI and reopen the app.',
   authentication: 'Sign in to the required GitHub CLI or Copilot CLI, then retry.',

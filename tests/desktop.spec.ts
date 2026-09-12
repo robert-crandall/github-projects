@@ -5,6 +5,146 @@ import { evidence, gate, persisted, refresh, test, thread } from './native-fixtu
 import { rawMessage } from './conversation-fixture.ts';
 import { ServiceError } from '../service/src/errors.ts';
 
+test('Archive retains notes across identical refresh, old conversation pages, real new activity and relaunch', async ({ page, native }, testInfo) => {
+  native.conversationApi.seed(native.threads[0]!.reference);
+  await page.goto('/');
+  await refresh(page);
+  await capture(page, 'Completed independent capture');
+  await page.getByRole('checkbox', { name: 'Done', exact: true }).check();
+  await inbox(page).click();
+  await row(page, 't:123').click();
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await expect(page.getByText('Newest comment', { exact: true })).toBeVisible();
+  const note = page.getByLabel('Thread notes', { exact: true });
+  await note.fill('PRIVATE archive context');
+  await persisted(page);
+  const tasksBefore = structuredClone(native.state.tasks);
+  await page.getByRole('button', { name: 'Archive thread', exact: true }).click();
+  await expect.poll(() => native.state.operations[0]?.status).toBe('confirmed');
+  await expect(row(page, 't:123')).toHaveCount(0);
+  await expect(note).toHaveValue('PRIVATE archive context');
+  expect(native.state.tasks).toEqual(tasksBefore);
+  const archive = page.getByRole('navigation', { name: 'Inboxes' }).getByRole('button', { name: /^Archive/ });
+  await archive.click();
+  await row(page, 't:123').click();
+  await refresh(page);
+  await expect(row(page, 't:123')).toBeVisible();
+  await page.locator('.conversation-pages > summary').click();
+  await page.getByRole('button', { name: 'Load older comments', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Reload comments page 2', exact: true })).toBeVisible();
+  await expect(row(page, 't:123')).toBeVisible();
+  await note.fill('PRIVATE archive context, edited offline');
+  await note.focus();
+  const position = await detail(page).evaluate(element => element.scrollTop);
+  const notesBefore = structuredClone(native.state.notes);
+  native.holdRefresh = gate();
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await note.focus();
+  native.threads[0]!.notification = 'read';
+  native.threads[0]!.reason = 'review_requested';
+  native.threads[0]!.subscription = 'unknown';
+  native.holdRefresh.release();
+  native.holdRefresh = undefined;
+  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
+  await expect(note).toBeFocused();
+  expect(Math.abs(await detail(page).evaluate(element => element.scrollTop) - position)).toBeLessThan(3);
+  await expect(row(page, 't:123')).toBeVisible();
+  await page.getByRole('button', { name: 'Restore to Inbox', exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('archive-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await detail(page).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('archive-narrow.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const newAt = '2026-09-11T17:01:00Z';
+  native.threads[0] = { ...native.threads[0]!, updatedAt: newAt, notification: 'unread',
+    evidence: [...native.threads[0]!.evidence, { ...evidence('fresh-mention', 'mention'), at: newAt }] };
+  await refresh(page);
+  await expect(row(page, 't:123')).toHaveCount(0);
+  await expect(note).toHaveValue('PRIVATE archive context, edited offline');
+  expect(native.state.notes).toEqual(notesBefore);
+  expect(native.state.tasks).toEqual(tasksBefore);
+  expect(native.state.threads).toHaveLength(1);
+  expect(native.state.handled).not.toContain('fresh-mention');
+  await inbox(page).click();
+  await row(page, 't:123').click();
+  await persisted(page);
+  const requests = native.requests.length;
+  await page.reload();
+  await expect(note).toHaveValue('PRIVATE archive context, edited offline');
+  await expect(row(page, 't:123')).toBeVisible();
+  await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online')); });
+  expect(native.requests).toHaveLength(requests);
+  expect(JSON.stringify(native.requests)).not.toContain('PRIVATE');
+});
+
+test('offline Archive and interrupted acknowledgement retain local placement, explicit retry and local-only Restore', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Interrupted archive note');
+  native.failWrite = true;
+  await page.getByRole('button', { name: 'Archive thread', exact: true }).click();
+  await expect.poll(() => native.state.operations[0]?.status).toBe('failed');
+  await expect(row(page, 't:123')).toHaveCount(0);
+  const original = structuredClone(native.state.operations[0]!);
+  await page.reload();
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Interrupted archive note');
+  expect(native.requests.filter(request => request.op === 'github.acknowledge')).toHaveLength(1);
+  native.failWrite = false;
+  native.holdWrite = gate();
+  await page.getByRole('button', { name: 'Retry GitHub operation', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
+  await expect.poll(() => native.requests.filter(request => request.op === 'github.acknowledge').length).toBe(2);
+  await page.getByRole('button', { name: 'Close; request continues' }).click();
+  await expect(detail(page)).toContainText('pending');
+  await page.reload();
+  await expect(detail(page)).toContainText('uncertain');
+  expect(native.state.operations[0]!.id).toBe(original.id);
+  expect(native.state.threads[0]!.archive).not.toBeNull();
+  native.holdWrite.release();
+  native.holdWrite = undefined;
+  await page.getByRole('button', { name: 'Retry GitHub operation', exact: true }).click();
+  await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
+  await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
+  await page.getByRole('button', { name: 'Return to workspace' }).click();
+  const writes = native.requests.filter(request => request.op === 'github.acknowledge');
+  expect(writes).toHaveLength(3);
+  expect(writes.every(request => request.input.operationId === original.id && request.input.notificationUpdatedAt === original.notificationUpdatedAt)).toBe(true);
+  const count = native.requests.length;
+  await page.getByRole('button', { name: 'Restore to Inbox' }).click();
+  await expect(row(page, 't:123')).toBeVisible();
+  expect(native.state.threads[0]!.notification).toBe('done');
+  expect(native.requests).toHaveLength(count);
+  await page.reload();
+  await expect(row(page, 't:123')).toBeVisible();
+});
+
+test('unsubscribe remains distinct and a later mention returns an archived thread without reopening Tasks', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Subscription context');
+  await page.getByRole('button', { name: 'Unsubscribe on GitHub' }).click();
+  await expect(page.getByRole('dialog')).toContainText('Mentions and new review requests may still notify');
+  await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
+  await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
+  await page.getByRole('button', { name: 'Return to workspace' }).click();
+  await expect(row(page, 't:123')).toBeVisible();
+  await page.getByRole('button', { name: 'Archive thread' }).click();
+  await expect.poll(() => native.state.operations.at(-1)?.status).toBe('confirmed');
+  native.threads[0]!.subscription = 'unsubscribed';
+  await refresh(page);
+  await expect(row(page, 't:123')).toHaveCount(0);
+  const newAt = '2026-09-11T17:01:00Z';
+  native.threads[0]!.updatedAt = newAt;
+  native.threads[0]!.evidence.push({ ...evidence('mention-after-unsubscribe', 'mention'), at: newAt });
+  await refresh(page);
+  await expect(row(page, 't:123')).toBeVisible();
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Subscription context');
+  expect(native.state.threads[0]!.subscription).toBe('unsubscribed');
+  expect(native.state.tasks).toEqual([]);
+});
+
 for (const kind of ['issue', 'pr'] as const) {
   test(`conversation gaps remain reachable after ${kind} newest-page jumps and failed gap loads`, async ({ page, native }, testInfo) => {
     const reference = { repo: 'octo/project', number: 123, kind };
@@ -434,11 +574,10 @@ test('acknowledgement waits for persisted intent and leaves concurrently refresh
   const before = structuredClone(native.state);
   native.holdRefresh = gate();
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await detail(page).getByRole('button', { name: 'Mark notification done on GitHub' }).click();
   native.holdSave = gate();
   native.holdWrite = gate();
-  await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
-  await expect(page.getByText('Saving intent, then waiting for GitHub confirmation...')).toBeVisible();
+  await detail(page).getByRole('button', { name: 'Archive thread' }).click();
+  await expect(page.getByRole('button', { name: 'Restore to Inbox' })).toBeVisible();
   await expect.poll(() => native.activeSaves).toBe(1);
   expect(native.requests.filter(request => request.op === 'github.acknowledge')).toEqual([]);
   native.holdSave.release();
@@ -447,14 +586,14 @@ test('acknowledgement waits for persisted intent and leaves concurrently refresh
   const intent = structuredClone(native.state.operations[0]!);
   expect(intent.eventIds).toEqual(['request-1']);
   expect(intent.status).toBe('pending');
-  native.threads = [thread([evidence(), evidence('later-request')])];
+  native.threads = [{ ...thread([evidence(), evidence('later-request')]), updatedAt: '2026-09-11T17:01:00Z',
+    evidence: [evidence(), { ...evidence('later-request'), at: '2026-09-11T17:01:00Z' }] }];
   native.holdRefresh.release();
   native.holdRefresh = undefined;
   await expect.poll(() => native.state.threads[0]!.events.length).toBe(2);
   native.holdWrite.release();
   native.holdWrite = undefined;
-  await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
-  await page.getByRole('button', { name: 'Return to workspace' }).click();
+  await expect(page.getByText('GitHub confirmed Done. This thread is in Inbox here; notes and Tasks are unchanged.')).toBeVisible();
   expect(native.state.handled).toEqual(['request-1']);
   expect(native.state.threads[0]?.notification).toBe('unread');
   expect(native.state.operations[0]).toMatchObject({ id: intent.id, status: 'confirmed', eventIds: ['request-1'] });
@@ -464,8 +603,8 @@ test('acknowledgement waits for persisted intent and leaves concurrently refresh
   expect(JSON.stringify(native.requests)).not.toContain('Private note');
 });
 
-for (const action of ['Mark notification done on GitHub', 'Unsubscribe on GitHub']) {
-  test(`${action} retains separately editable notes under Earlier threads after relaunch`, async ({ page, native }) => {
+for (const action of ['Archive thread', 'Unsubscribe on GitHub']) {
+  test(`${action} retains separately editable notes after relaunch`, async ({ page, native }) => {
     await page.goto('/');
     await refresh(page);
     await capture(page, 'Separate task stays open');
@@ -477,23 +616,26 @@ for (const action of ['Mark notification done on GitHub', 'Unsubscribe on GitHub
     await persisted(page);
     const before = structuredClone(native.state);
     await detail(page).getByRole('button', { name: action, exact: true }).click();
-    await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
-    await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
-    await page.getByRole('button', { name: 'Return to workspace' }).click();
+    if (action === 'Archive thread') {
+      await expect.poll(() => native.state.operations[0]?.status).toBe('confirmed');
+    } else {
+      await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
+      await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
+      await page.getByRole('button', { name: 'Return to workspace' }).click();
+    }
     expect(native.state.tasks).toEqual(before.tasks);
     expect(native.state.notes).toEqual(before.notes);
-    expect(action.startsWith('Mark') ? native.state.threads[0]?.notification : native.state.threads[0]?.subscription)
-      .toBe(action.startsWith('Mark') ? 'done' : 'unsubscribed');
-    await inbox(page).click();
-    await page.locator('.earlier-threads > summary').click();
-    await page.locator('.earlier-threads').locator('[data-row-key="t:123"] .row-select').click();
+    expect(action === 'Archive thread' ? native.state.threads[0]?.notification : native.state.threads[0]?.subscription)
+      .toBe(action === 'Archive thread' ? 'done' : 'unsubscribed');
+    await page.getByRole('navigation', { name: 'Inboxes' }).getByRole('button', { name: action === 'Archive thread' ? /^Archive/ : /^Inbox/ }).click();
+    await row(page, 't:123').click();
     await page.getByLabel('Thread note 2').fill('Second edited after acknowledgement');
     await persisted(page);
     await page.reload();
     await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('First retained annotation');
     await expect(page.getByLabel('Thread note 2')).toHaveValue('Second edited after acknowledgement');
     expect(native.state.tasks).toEqual(before.tasks);
-    expect(native.requests.map(request => request.op)).toEqual(['github.refresh', action.startsWith('Mark') ? 'github.acknowledge' : 'github.unsubscribe']);
+    expect(native.requests.map(request => request.op)).toEqual(['github.refresh', action === 'Archive thread' ? 'github.acknowledge' : 'github.unsubscribe']);
   });
 }
 
@@ -747,10 +889,15 @@ test('migrated capture placeholders keep source links but hide notification writ
   expect(native.launches[0]!.args).toEqual({ identity: { source: 'github', owner: 'octo', repo: 'project', kind: 'pr', number: 123 } });
   await page.getByRole('button', { name: 'Return to workspace' }).click();
   expect(native.requests).toEqual([]);
+  await page.getByRole('button', { name: 'Restore to Inbox' }).click();
+  await page.getByRole('button', { name: 'Archive thread' }).click();
+  await expect(page.getByText('Archived here. This source has no GitHub notification ID, so no GitHub write was sent.')).toBeVisible();
+  expect(native.state.operations).toEqual([]);
+  expect(native.requests).toEqual([]);
   await refresh(page);
   expect(native.state.operations).toEqual([]);
   expect(native.state.selectedKey).toBe('t:123');
-  await expect(detail(page).getByRole('button', { name: 'Mark notification done on GitHub' })).toBeVisible();
+  await expect(detail(page).getByRole('button', { name: 'Restore to Inbox' })).toBeVisible();
   await expect(detail(page).getByRole('button', { name: 'Unsubscribe on GitHub' })).toBeVisible();
   await page.reload();
   await persisted(page);
