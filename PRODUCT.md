@@ -42,7 +42,19 @@ Verify each write response against its persisted intent, including the captured 
 
 GitHub Done uses a whole-notification DELETE. Preflight refuses clearly newer notification activity, but GitHub cannot make GET and DELETE atomic. Activity arriving between them may also be marked done remotely. Never claim event-scoped remote acknowledgement; newer local evidence survives regardless. Unconfirmed writes remain visible on the thread and in Connections.
 
-Filtering and terminal suppression follow in [#11](https://github.com/robert-crandall/github-projects/issues/11). Future terminal semantics mean confirmed merged, closed, or **currently in GitHub's merge queue**, not release/deployment tracking. Do not implement those future features here.
+## Filtering and terminal state
+
+**Filtering rules** organizes GitHub threads only, never Tasks. A rule matches an exact `owner/repo`, source type (PR or issue), and/or literal title substring. All supplied criteria must match; at least one is required. Repository and title comparisons ignore case. No regular expressions, scripts, model calls or network requests run when matching.
+
+Saved rules can be created, edited, disabled, deleted and moved up/down. The **first enabled match wins**. Preview lists matching saved threads, all enabled matches in order, and the effective location before saving. Changes to criteria, destinations or source placement require preview again. The preview is not a new GitHub fetch.
+
+Actions route to a named inbox or keep a thread out of Inbox in **Filtered**. Named inboxes have stable identities separate from names; names cannot be blank, duplicate or built-in locations. Deleting an inbox requires explicitly editing or deleting every referencing rule, including disabled rules. Rule changes re-evaluate placement without deleting notes/history or moving manually archived threads. Rules and inboxes share the existing local save/recovery contract.
+
+Manual Archive takes precedence over filtering. Otherwise confirmed merged PRs, closed issues/PRs, and PRs **currently in GitHub's merge queue** stay in Filtered ahead of ordinary routing. Each thread shows its placement reason and source observation time. Suppression is local: it never acknowledges, unsubscribes, closes a source or completes a Task.
+
+Current queue membership comes only from GitHub GraphQL `PullRequest.mergeQueueEntry`, not historical timeline entries, auto-merge, mergeability or CI. A successful null means not currently queued; denied, unsupported, malformed or partial state results remain unknown. Source-state freshness is independent of notification timestamps and historical messages.
+
+Terminal checkpoints preserve the notification/evidence boundary. New activity while confirmed terminal advances that boundary but does not return the thread. After a confirmed exit/reopen, genuinely newer activity resumes normal routing; old-history hydration does not. Unknown/failed/missing state checks fail open with a warning, while retaining checkpoint provenance so later old history cannot become new activity. Manual Archive is not cleared by an unknown check. Saved observations survive relaunch; only explicit Refresh checks them again.
 
 ## Refresh and saves
 

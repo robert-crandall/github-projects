@@ -4,13 +4,14 @@ import { instant } from './clock.ts';
 import { migrateWorkspace } from './migration.ts';
 import { archiveBoundary, hasNewActivity, latestTime } from './archive.ts';
 import { threadIdSchema } from '../../service/src/schema.ts';
+import { reconcileTerminal, unknownSourceState } from './terminal.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
   new Intl.DateTimeFormat('en-US', { timeZone });
   return {
     version: 3, runtime: 'desktop', clock: instant(now), timeZone,
     threads: [], tasks: [], notes: [], staged: [], handled: [], seen: [], order: [], newKeys: [],
-    selectedKey: null, view: 'inbox', draft: '', operations: [],
+    selectedKey: null, view: 'inbox', draft: '', operations: [], rules: [], inboxes: [],
     refresh: { lastSuccessAt: null, status: 'saved', message: 'Refresh loads GitHub activity. Notes and tasks are available without a connection.' },
     failures: { refresh: 'none', storage: false, external: false }, undo: [], sequence: 0,
   };
@@ -42,6 +43,9 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
   for (const thread of next.threads) {
     if (!fetchedThreadIds.has(thread.id)) {
       thread.events = thread.events.map(event => event.requestState === 'current' ? { ...event, requestState: 'uncertain' } : event);
+      if (!thread.sourceState || Date.parse(startedAt) >= Date.parse(thread.sourceState.observedAt)) {
+        thread.sourceState = unknownSourceState(startedAt);
+      }
     }
   }
   for (const incoming of batch.threads) {
@@ -80,8 +84,6 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       && Date.parse(fetched.notificationUpdatedAt) < Date.parse(previous.notificationUpdatedAt);
     fetched.notificationUpdatedAt = latestTime([previous?.notificationUpdatedAt, fetched.notificationUpdatedAt]);
     if (stale && previous) {
-      fetched.title = previous.title;
-      fetched.state = previous.state;
       fetched.reason = previous.reason;
       fetched.rawReason = previous.rawReason;
       fetched.sourceMetadata = previous.sourceMetadata;
@@ -99,6 +101,21 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       merged.set(event.id, event);
     }
     fetched.events = [...merged.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
+    const observed = fetched.sourceState;
+    const oldObservation = previous?.sourceState;
+    const olderObservation = observed && oldObservation && (Date.parse(observed.observedAt) < Date.parse(oldObservation.observedAt)
+      || (observed.updatedAt && oldObservation.updatedAt && Date.parse(observed.updatedAt) < Date.parse(oldObservation.updatedAt)));
+    if (olderObservation && previous) fetched.title = previous.title;
+    fetched.sourceState = olderObservation ? oldObservation : observed ?? unknownSourceState(startedAt);
+    const evidenceAt = latestTime([fetched.notificationUpdatedAt, ...fetched.events
+      .filter(event => event.kind !== 'read' && event.kind !== 'acknowledged').map(event => event.at)]);
+    if (evidenceAt && fetched.sourceState.state !== 'unknown' && Date.parse(evidenceAt) > Date.parse(fetched.sourceState.observedAt)) {
+      fetched.sourceState = { ...unknownSourceState(fetched.sourceState.observedAt),
+        error: { code: 'source_changed', retryable: true, message: 'Activity is newer than the source-state check. Terminal suppression is off until an explicit Refresh confirms current state.' } };
+    }
+    fetched.state = fetched.sourceState.state === 'queued' ? 'queued'
+      : fetched.sourceState.state === 'closed' || fetched.sourceState.state === 'merged' ? 'closed' : 'open';
+    reconcileTerminal(previous, fetched);
     // Timeline enrichment can be newer than the notification listing that accompanied it.
     if (stale && previous && (previous.notification !== 'done' || !newActivity)) fetched.notification = previous.notification;
     const authoritativeSubscription = fetched.subscription === 'subscribed' || fetched.subscription === 'unsubscribed';

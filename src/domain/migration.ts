@@ -1,6 +1,7 @@
 import { legacyStateSchema, stateSchema, threadSchema, type AppState } from '../types.ts';
 import { archiveBoundary } from './archive.ts';
 import { pendingEvidence } from './engine.ts';
+import { validateFilters } from './filtering.ts';
 
 export function migrateWorkspace(value: unknown): AppState {
   if (typeof value === 'object' && value !== null && 'version' in value && value.version === 3) {
@@ -43,7 +44,7 @@ export function migrateWorkspace(value: unknown): AppState {
   const selectedKey = selectedTask ? `a:${selectedTask.id}` : selectedAction?.threadId
     ? `t:${selectedAction.threadId}` : legacy.selectedKey;
   return validateWorkspace({
-    ...common, version: 3, tasks, notes, selectedKey,
+    ...common, version: 3, tasks, notes, selectedKey, rules: [], inboxes: [],
     view: selectedKey ? selectedTask ? 'tasks' : 'inbox' : view === 'attention' ? 'inbox' : 'tasks',
     failures: { refresh: failures.refresh, storage: failures.storage, external: failures.external },
     undo: [],
@@ -51,6 +52,7 @@ export function migrateWorkspace(value: unknown): AppState {
 }
 
 export function validateWorkspace(state: AppState): AppState {
+  validateFilters(state);
   const threads = new Set(state.threads.map(thread => thread.id));
   const tasks = new Set(state.tasks.map(task => task.id));
   const notes = new Set(state.notes.map(note => note.id));

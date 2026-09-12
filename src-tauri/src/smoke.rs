@@ -19,7 +19,9 @@ impl ServiceFixture {
         let result = match request["op"].as_str() {
             Some("github.refresh") => {
                 let count = self.refreshes.fetch_add(1, Ordering::SeqCst);
-                let at = if count < 2 {
+                let at = if count >= 4 {
+                    now.as_str()
+                } else if count < 2 {
                     old
                 } else {
                     "2026-09-11T18:00:00Z"
@@ -32,6 +34,7 @@ impl ServiceFixture {
                         "id":"123","reference":{"repo":"octo/project","kind":"pr","number":123},
                         "title":"Native conversation reader","reason":"mention","notification":"unread",
                         "updatedAt":at,"lastReadAt":null,"state":"open","size":null,"subscription":"subscribed",
+                        "sourceState":{"state":if count == 3 {"queued"} else {"open"},"observedAt":now,"updatedAt":at,"error":null},
                         "coverage":{"timeline":"complete","newestPage":1,"fetchedPages":[1],"observedAt":at},
                         "evidence":[{"id":format!("native-event:{at}"),"kind":"comment","at":at,"actor":"octocat",
                             "text":"Native archive evidence","recipient":{"kind":"none"},"requestState":"not-request","textTruncated":false}]
@@ -117,6 +120,93 @@ fn wait_for(window: &tauri::WebviewWindow, script: &str) -> Result<()> {
         "smoke-failed",
         &format!("The bundled renderer did not reach: {script}"),
     ))
+}
+
+fn fill_rule_field(window: &tauri::WebviewWindow, label: &str, value: &str) -> Result<()> {
+    let label = serde_json::to_string(label).map_err(|_| failed())?;
+    let value = serde_json::to_string(value).map_err(|_| failed())?;
+    evaluate(
+        window,
+        &format!(
+            r#"
+      (() => {{
+        const input = [...document.querySelectorAll('dialog label')].find(label => label.textContent.startsWith({label})).querySelector('input,select');
+        const select = input instanceof HTMLSelectElement;
+        Object.getOwnPropertyDescriptor(select ? HTMLSelectElement.prototype : HTMLInputElement.prototype,'value').set.call(input,{value});
+        input.dispatchEvent(new Event(select ? 'change' : 'input',{{bubbles:true}}));
+      }})(); true"#
+        ),
+    )?;
+    std::thread::sleep(Duration::from_millis(150));
+    Ok(())
+}
+
+fn filtering_rules(window: &tauri::WebviewWindow) -> Result<()> {
+    evaluate(window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Filtering rules').click(); true")?;
+    wait_for(
+        window,
+        "document.querySelector('dialog[open] .inbox-settings') !== null",
+    )?;
+    evaluate(
+        window,
+        "document.querySelector('.inbox-settings summary').click(); true",
+    )?;
+    fill_rule_field(window, "Inbox name", "Native inbox")?;
+    evaluate(window, "[...document.querySelectorAll('dialog button')].find(button => button.textContent === 'Create inbox').click(); true")?;
+    wait_for(window, "document.querySelector('.inbox-settings .rule-list')?.textContent.includes('Native inbox')")?;
+    evaluate(window, "[...document.querySelectorAll('dialog button')].find(button => button.textContent === 'New rule').click(); true")?;
+    wait_for(window, "document.querySelector('.rule-editor') !== null")?;
+    fill_rule_field(window, "Rule name", "Native route")?;
+    fill_rule_field(window, "Thread type", "pr")?;
+    evaluate(window, "const select=document.querySelector('.rule-editor label select:last-child'); const action=[...document.querySelectorAll('.rule-editor select')].at(-1); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(action,action.options[1].value); action.dispatchEvent(new Event('change',{bubbles:true})); true")?;
+    std::thread::sleep(Duration::from_millis(150));
+    evaluate(window, "[...document.querySelectorAll('dialog button')].find(button => button.textContent === 'Preview matches').click(); true")?;
+    wait_for(window, "document.querySelector('.rule-preview')?.textContent.includes('Effective location: Native inbox')")?;
+    evaluate(window, "[...document.querySelectorAll('dialog button')].find(button => button.textContent === 'Save rule').click(); true")?;
+    wait_for(window, "document.querySelector('.rule-editor') === null")?;
+    evaluate(window, "[...document.querySelectorAll('dialog button')].find(button => button.textContent === 'Back to workspace').click(); true")?;
+    wait_for(window, "document.querySelector('[aria-label=\"Thread location\"]')?.textContent.includes('Native route') && !document.querySelector('.queue .work-row[data-row-key=\"t:123\"]')")?;
+    evaluate(window, "[...document.querySelectorAll('nav button')].find(button => button.textContent.startsWith('Native inbox')).click(); true")?;
+    wait_for(
+        window,
+        "document.querySelector('.queue .work-row[data-row-key=\"t:123\"]') !== null",
+    )?;
+    evaluate(
+        window,
+        "document.querySelector('.queue .row-select').click(); true",
+    )?;
+    wait_for(
+        window,
+        "document.querySelector('#thread-note-0')?.value === 'Private native reader note'",
+    )?;
+    evaluate(window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Refresh').click(); true")?;
+    wait_for(window, "!document.querySelector('.refresh-button')?.disabled && document.querySelector('[aria-label=\"Thread location\"]')?.textContent.includes('Currently in GitHub') && !document.querySelector('.queue .work-row[data-row-key=\"t:123\"]')")?;
+    evaluate(window, "[...document.querySelectorAll('nav button')].find(button => button.textContent.startsWith('Filtered')).click(); true")?;
+    wait_for(
+        window,
+        "document.querySelector('.queue .work-row[data-row-key=\"t:123\"]') !== null",
+    )?;
+    evaluate(
+        window,
+        "document.querySelector('.queue .row-select').click(); true",
+    )?;
+    wait_for(window, "document.querySelector('#thread-note-0')?.value === 'Private native reader note' && document.querySelector('.conversation')?.textContent.includes('NATIVE_FULL_BODY_END')")?;
+    evaluate(window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Refresh').click(); true")?;
+    wait_for(window, "!document.querySelector('.refresh-button')?.disabled && !document.querySelector('.queue .work-row[data-row-key=\"t:123\"]') && document.querySelector('[aria-label=\"Thread location\"]')?.textContent.includes('Native route')")?;
+    evaluate(window, "[...document.querySelectorAll('nav button')].find(button => button.textContent.startsWith('Native inbox')).click(); true")?;
+    wait_for(
+        window,
+        "document.querySelector('.queue .work-row[data-row-key=\"t:123\"]') !== null",
+    )?;
+    evaluate(
+        window,
+        "document.querySelector('.queue .row-select').click(); true",
+    )?;
+    wait_for(
+        window,
+        "document.querySelector('#thread-note-0')?.value === 'Private native reader note'",
+    )?;
+    Ok(())
 }
 
 fn conversation_reader(window: &tauri::WebviewWindow) -> Result<()> {
@@ -207,6 +297,7 @@ fn conversation_reader(window: &tauri::WebviewWindow) -> Result<()> {
         window,
         "document.querySelector('#thread-note-0')?.value === 'Private native reader note'",
     )?;
+    filtering_rules(window)?;
     wait_for(window, "[...document.querySelectorAll('button')].some(button => button.textContent === 'Discard conversation cache' && !button.disabled)")?;
     evaluate(window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Discard conversation cache').click(); true")?;
     wait_for(window, "[...document.querySelectorAll('button')].some(button => button.textContent === 'Discard cached conversations')")?;
@@ -229,7 +320,7 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
     let window = app.get_webview_window("main").ok_or_else(failed)?;
     if relaunch {
         wait_for(&window, "document.querySelector('#task-notes')?.value === 'Native smoke note survives relaunch' && document.querySelector('.detail h2')?.textContent === 'Native smoke capture' && document.querySelector('.task-controls input[type=checkbox]')?.checked === false")?;
-        evaluate(&window, "[...document.querySelectorAll('nav button')].find(button => button.textContent.startsWith('Inbox')).click(); true")?;
+        evaluate(&window, "[...document.querySelectorAll('nav button')].find(button => button.textContent.startsWith('Native inbox')).click(); true")?;
         wait_for(
             &window,
             "document.querySelector('.queue .work-row[data-row-key=\"t:123\"]') !== null",
@@ -244,7 +335,7 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
         )?;
         println!(
             "{}",
-            serde_json::json!({"ok":true,"actualProcessRelaunch":true,"taskAndNotesRetained":true,"resurfacedThreadRetained":true,"networkRequests":0,"permissionRequested":false})
+            serde_json::json!({"ok":true,"actualProcessRelaunch":true,"taskAndNotesRetained":true,"resurfacedThreadRetained":true,"rulesAndNamedInboxRetained":true,"networkRequests":0,"permissionRequested":false})
         );
         return Ok(());
     }
@@ -280,7 +371,7 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
     }
     conversation_reader(&window)?;
     let fixture = app.state::<ServiceFixture>();
-    if fixture.refreshes.load(std::sync::atomic::Ordering::SeqCst) != 3
+    if fixture.refreshes.load(std::sync::atomic::Ordering::SeqCst) != 5
         || fixture.writes.load(std::sync::atomic::Ordering::SeqCst) != 1
     {
         return Err(failed());
@@ -312,6 +403,7 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
             "nativeConversationReader": true, "untruncatedCachedBody": true, "cacheResetKeepsNotes": true,
             "nativeArchiveAndAcknowledgement": true, "identicalRefreshKeepsArchive": true,
             "oldHistoryKeepsArchive": true, "newActivityResurfacesSameThread": true,
+            "nativeRulePreviewAndRouting": true, "queueEntryAndExit": true, "automaticSuppressionWrites": 0,
             "permissionRequested": false, "networkRequests": 0,
         })
     );

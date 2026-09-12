@@ -23,6 +23,8 @@ Selecting a row only opens it. Refresh must not move focus, replace local edits,
 
 **Archive** is a peer location beside Inbox and Tasks, not a disclosure or second task system. It keeps conversations and notes reachable until new activity returns the same thread to Inbox. A migrated linked Task opens its thread notes in the correct location.
 
+Named inboxes appear under Inbox. **Filtered** is a visible peer containing rule-excluded and terminal threads, with counts and the same reader/notes. Long inbox names wrap; navigation scrolls within its pane, horizontally on narrow windows.
+
 | Surface | Behavior |
 | --- | --- |
 | Wide desktop | All three panes remain visible; reader text has a restrained measure. |
@@ -51,6 +53,10 @@ Task detail uses text, notes and a Done checkbox. No required project, priority,
 
 Keep native input behavior, visible labels, keyboard focus and Command/Ctrl+K capture. Capture uses a focused dialog. **Archive thread** is an immediate primary action with inline copy naming its local and GitHub effects. Keep the selected reader open after its row leaves the list so notes, scroll and focus remain stable. **Restore to Inbox** reverses only local placement.
 
+**Filtering rules** opens a focused editor without replacing the selected reader. Use labeled native inputs for exact repository, source type and literal title text; no query language. Show saved rules in explicit top-to-bottom order with enabled, edit, delete and up/down controls. Require **Preview matches** before saving a draft. Preview shows effective Archive/Filtered placement when it takes precedence over a rule. Named inbox management stays in a compact disclosure within the same editor. Escape returns focus to its opener.
+
+The reader names the current location, winning rule or terminal reason, and saved source-state observation time. Unknown state uses a visible warning rather than a terminal badge. Filtered threads keep the ordinary reader and notes; filtering never looks like a confirmed GitHub write. Editing rules and refreshing preserve selection and read position even when the row moves.
+
 Unsubscribe and explicit acknowledgement retries use confirmation dialogs. Show pending, unconfirmed and confirmed outcomes honestly; closing a pending dialog does not cancel its request. Connections exposes unconfirmed writes after navigation/relaunch. GitHub acknowledgement, unsubscribe and local task Done remain distinct; do not add a competing ordinary Done control beside Archive.
 
 ## Feedback and recovery
@@ -65,4 +71,4 @@ Prototype labels and synthetic-data notices remain factual. Legacy routine recor
 
 ## Boundaries
 
-No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status. Filtering and terminal suppression remain a separate follow-up.
+No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status.

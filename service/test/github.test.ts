@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { GhApi, GitHubService, classifyEvents, parseResponse, sourceReference, type ApiResponse, type GitHubApi } from '../src/github.ts';
+import { GhApi, GitHubService, classifyEvents, parseResponse, pullRequestStateQuery, sourceReference, type ApiResponse, type GitHubApi } from '../src/github.ts';
 import { ServiceError } from '../src/errors.ts';
 import { requestSchema } from '../src/schema.ts';
 
@@ -24,7 +24,7 @@ const response = (body: unknown, headers: Record<string, string> = {}, status = 
 class FakeApi implements GitHubApi {
   calls: { method: string; path: string; body?: unknown }[] = [];
   overrides = new Map<string, ApiResponse | ServiceError>();
-  async request(method: 'GET' | 'DELETE' | 'PUT', path: string, _signal: AbortSignal, body?: { ignored: true }) {
+  async request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', path: string, _signal: AbortSignal, body?: { ignored: true } | { query: string }) {
     this.calls.push({ method, path, body });
     const override = this.overrides.get(`${method} ${path}`);
     if (override instanceof Error) throw override;
@@ -35,6 +35,9 @@ class FakeApi implements GitHubApi {
     if (method === 'GET' && /^\/notifications\/threads\/\d+$/.test(path)) return response(notification(path.split('/').at(-1)));
     if (method === 'GET' && path.endsWith('/subscription')) return response({ subscribed: true, ignored: false });
     if (path.endsWith('/pulls/12')) return response(pending);
+    if (method === 'POST' && path === '/graphql') return response({ data: { repository: { pullRequest: {
+      state: 'OPEN', updatedAt: at(20), mergeQueueEntry: null,
+    } } } });
     if (path.includes('/timeline?')) return response([request(1)]);
     if (method === 'DELETE') return response(null, {}, 204);
     if (method === 'PUT') return response({ ignored: true });
@@ -44,6 +47,82 @@ class FakeApi implements GitHubApi {
 const signal = () => new AbortController().signal;
 const classify = (events: Parameters<typeof classifyEvents>[0], source = pending) =>
   classifyEvents(events, reference, source, viewer, new Set()).evidence;
+
+describe('authoritative current source state', () => {
+  const query = pullRequestStateQuery(reference);
+  const current = (state = 'OPEN', mergeQueueEntry: unknown = null) => response({
+    data: { repository: { pullRequest: { state, updatedAt: at(20), mergeQueueEntry } } },
+  });
+  test('current queue entry wins despite newer comments; null membership wins despite historical queue entry', async () => {
+    const api = new FakeApi();
+    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([
+      { id: 1, event: 'added_to_merge_queue', created_at: at(2) },
+      { id: 2, event: 'commented', created_at: at(3), body: 'Still queued' },
+    ]));
+    api.overrides.set('POST /graphql', current('OPEN', { id: 'MQE_kwDOExample' }));
+    let result = await new GitHubService(api).refresh(signal());
+    expect(result.threads[0]!.sourceState).toMatchObject({ state: 'queued', updatedAt: at(20), error: null });
+    expect(result.threads[0]!.evidence.at(-1)!.kind).toBe('comment');
+    api.overrides.set('POST /graphql', current());
+    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([
+      { id: 1, event: 'added_to_merge_queue', created_at: at(2) },
+    ]));
+    result = await new GitHubService(api).refresh(signal());
+    expect(result.threads[0]!.sourceState.state).toBe('open');
+    expect(api.calls.every(call => call.method === 'GET' || (call.method === 'POST' && call.path === '/graphql'))).toBe(true);
+  });
+  test('GraphQL merged/closed races override an earlier REST open result; closed issues use current REST state', async () => {
+    const api = new FakeApi();
+    for (const state of ['MERGED', 'CLOSED']) {
+      api.overrides.set('POST /graphql', current(state));
+      expect((await new GitHubService(api).refresh(signal())).threads[0]!.sourceState.state).toBe(state === 'MERGED' ? 'merged' : 'closed');
+    }
+    api.overrides.set('GET /notifications?all=true&per_page=50&page=1', response([{
+      ...notification(), subject: { type: 'Issue', title: 'Issue', url: 'https://api.github.com/repos/integrations/provider/issues/12' },
+    }]));
+    api.overrides.set('GET /repos/integrations/provider/issues/12', response({ number: 12, title: 'Closed issue', state: 'closed', updated_at: at(19) }));
+    api.calls = [];
+    const result = await new GitHubService(api).refresh(signal());
+    expect(result.threads[0]!.sourceState).toMatchObject({ state: 'closed', updatedAt: at(19), error: null });
+    expect(api.calls.some(call => call.path.startsWith('/graphql'))).toBe(false);
+  });
+  test('permission, unsupported, malformed and partial GraphQL results are unknown, never authoritative null', async () => {
+    for (const failure of [
+      new ServiceError('access'),
+      response({ data: { repository: { pullRequest: { state: 'OPEN', updatedAt: at(20), mergeQueueEntry: null } } }, errors: [{ type: 'FORBIDDEN' }] }),
+      response({ errors: [{ type: 'undefinedField', path: ['query', 'repository', 'pullRequest', 'mergeQueueEntry'] }] }),
+      response({ data: { repository: null } }),
+      response({ data: { repository: { pullRequest: { state: 'OPEN', updatedAt: at(20) } } } }),
+    ]) {
+      const api = new FakeApi();
+      api.overrides.set('POST /graphql', failure);
+      const result = await new GitHubService(api).refresh(signal());
+      expect(result.status).toBe('partial');
+      expect(result.threads[0]!.sourceState.state).toBe('unknown');
+      expect(result.threads[0]!.sourceState.error?.message).toContain('unknown');
+      expect(result.diagnostics.some(diagnostic => diagnostic.scope === 'source-state')).toBe(true);
+      expect(api.calls.every(call => call.method === 'GET' || (call.method === 'POST' && call.path === '/graphql'))).toBe(true);
+    }
+  });
+  test('GhApi allows only the fixed read-only GraphQL contract, not arbitrary query or mutation', async () => {
+    const calls: string[][] = [];
+    const api = new GhApi(async (_path, args, _signal, input) => {
+      calls.push(args);
+      expect(JSON.parse(input!)).toEqual({ query });
+      return { code: 0, stdout: `HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(current().body)}` };
+    }, async () => '/synthetic/gh');
+    await api.request('POST', '/graphql', signal(), { query });
+    expect(calls[0]).toContain('POST');
+    expect(calls[0]).toContain('/graphql');
+    expect(calls[0]).toContain('--input');
+    for (const invalid of ['mutation{}', `${query} query {viewer{login}}`, '{viewer{login}}']) {
+      await expect(api.request('POST', '/graphql', signal(), { query: invalid })).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+    }
+    await expect(api.request('GET', `/graphql?query=${encodeURIComponent(query)}`, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+    await expect(api.request('POST', '/other', signal(), { query })).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+    expect(calls).toHaveLength(1);
+  });
+});
 
 describe('GitHub evidence identity', () => {
   test('merge queue, commits and sticky reason never become a review request', async () => {

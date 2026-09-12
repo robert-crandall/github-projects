@@ -200,7 +200,7 @@ test('failed and partial Refresh preserve saved context and recover only on expl
   expect((await saved(page)).tasks).toEqual(before.tasks);
   await stage(page, 'empty');
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await expect(page.locator('.queue .work-row')).toHaveCount(before.threads.filter(thread => !thread.archive).length);
+  await expect(page.locator('.queue .work-row')).toHaveCount(before.threads.filter(thread => !thread.archive && !thread.terminal).length);
   expect((await saved(page)).notes).toEqual(before.notes);
   expect((await saved(page)).threads).toHaveLength(before.threads.length);
 });

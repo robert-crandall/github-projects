@@ -1,6 +1,24 @@
 import { z } from 'zod';
+import { repoSchema, sourceStateSchema } from '../service/src/schema.ts';
 
 const time = z.iso.datetime();
+const boundarySchema = z.object({ at: time, notificationUpdatedAt: time.optional(), evidenceAt: time.optional() });
+const localId = z.string().min(1).max(100).regex(/^[A-Za-z0-9-]+$/);
+const nameSchema = z.string().trim().min(1, 'Enter a name.').max(80, 'Use at most 80 characters.');
+export const inboxSchema = z.strictObject({ id: localId, name: nameSchema });
+export const ruleCriteriaSchema = z.strictObject({
+  repo: z.string().refine(value => repoSchema.safeParse(value).success, 'Use an exact owner/repo, without a URL or wildcards.').optional(),
+  kind: z.enum(['pr', 'issue']).optional(),
+  title: z.string().trim().min(1, 'Enter title text to match.').max(200).optional(),
+}).refine(value => value.repo !== undefined || value.kind !== undefined || value.title !== undefined,
+  'Choose at least one criterion; empty rules cannot match everything.');
+export const ruleSchema = z.strictObject({
+  id: localId, name: nameSchema, enabled: z.boolean(), criteria: ruleCriteriaSchema,
+  action: z.discriminatedUnion('type', [
+    z.strictObject({ type: z.literal('inbox'), inboxId: localId }),
+    z.strictObject({ type: z.literal('exclude') }),
+  ]),
+});
 const stepSchema = z.object({ id: z.string(), title: z.string(), doneAt: time.optional() });
 export const eventSchema = z.object({
   id: z.string(), threadId: z.string(),
@@ -23,8 +41,10 @@ export const threadSchema = z.object({
   subscription: z.enum(['subscribed', 'unsubscribed', 'unknown']).optional(),
   subscriptionObservedAt: time.optional(),
   notificationUpdatedAt: time.optional(),
-  archive: z.object({
-    at: time, notificationUpdatedAt: time.optional(), evidenceAt: time.optional(),
+  archive: boundarySchema.nullable().optional(),
+  sourceState: sourceStateSchema.optional(),
+  terminal: z.object({
+    reason: z.enum(['closed', 'merged', 'queued']), boundary: boundarySchema,
   }).nullable().optional(),
   rawReason: z.string().optional(),
   sourceMetadata: z.record(z.string(), z.json()).optional(),
@@ -93,7 +113,9 @@ export const stateSchema = legacyStateSchema.omit({
   version: true, actions: true, activeId: true, view: true, undo: true, failures: true,
 }).extend({
   version: z.literal(3), tasks: z.array(taskSchema), notes: z.array(noteSchema),
-  view: z.enum(['inbox', 'archive', 'tasks']),
+  view: z.union([z.enum(['inbox', 'archive', 'tasks', 'filtered']), z.templateLiteral(['inbox:', localId])]),
+  inboxes: z.array(inboxSchema).max(50).default([]),
+  rules: z.array(ruleSchema).max(100).default([]),
   failures: z.object({ refresh: z.enum(['none', 'partial', 'error']), storage: z.boolean(), external: z.boolean() }),
   undo: z.array(z.object({ before: taskSchema, after: taskSchema })),
 });
@@ -108,6 +130,8 @@ export type Thread = z.infer<typeof threadSchema>;
 export type Activity = z.infer<typeof eventSchema>;
 export type ExternalOperation = z.infer<typeof externalOperationSchema>;
 export type View = AppState['view'];
+export type Rule = z.infer<typeof ruleSchema>;
+export type NamedInbox = z.infer<typeof inboxSchema>;
 export type Scenario = 'new-review' | 'comment' | 'merge-queue' | 're-request' | 'sticky-mention' | 'closed' | 'read' | 'acknowledged' | 'mention' | 'empty';
 export type Row = {
   key: string; title: string; reason: string; kind: 'review' | 'update' | 'task';
@@ -122,6 +146,12 @@ export type Command =
   | { type: 'capture' }
   | { type: 'edit'; key: string; title?: string; notes?: string }
   | { type: 'note'; threadId: string; noteId?: string; text: string }
+  | { type: 'save-inbox'; inbox: NamedInbox }
+  | { type: 'delete-inbox'; id: string }
+  | { type: 'save-rule'; rule: Rule }
+  | { type: 'delete-rule'; id: string }
+  | { type: 'enable-rule'; id: string; enabled: boolean }
+  | { type: 'move-rule'; id: string; direction: 'up' | 'down' }
   | { type: 'archive' | 'restore-thread'; threadId: string }
   | { type: 'done' | 'restore'; key: string }
   | { type: 'undo' | 'refresh' | 'reset' }
