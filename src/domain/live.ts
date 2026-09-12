@@ -2,7 +2,7 @@ import { threadSchema, type AppState, type ExternalOperation, type Thread } from
 import { transition } from './engine.ts';
 import { instant } from './clock.ts';
 import { migrateWorkspace } from './migration.ts';
-import { hasNewActivity, latestTime } from './archive.ts';
+import { archiveBoundary, hasNewActivity, latestTime } from './archive.ts';
 import { threadIdSchema } from '../../service/src/schema.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
@@ -67,8 +67,12 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
     if (previous && (previous.repo.toLowerCase() !== fetched.repo.toLowerCase() || previous.number !== fetched.number || previous.kind !== fetched.kind)) {
       throw new Error('GitHub returned a changed thread identity. Saved work is unchanged.');
     }
+    const confirmed = next.operations.filter(operation => operation.threadId === fetched.id && operation.status === 'confirmed');
+    const acknowledgedAt = latestTime(confirmed.filter(operation => operation.action === 'done').map(operation => operation.startedAt));
+    const boundary = previous?.archive ?? (previous?.notification === 'done' && acknowledgedAt ? archiveBoundary(previous, acknowledgedAt) : null);
     fetched.archive = previous?.archive ?? null;
-    if (previous && hasNewActivity(previous, fetched)) {
+    const newActivity = previous && hasNewActivity({ ...previous, archive: boundary }, fetched);
+    if (newActivity) {
       fetched.archive = null;
       next.newKeys = [...new Set([...next.newKeys, `t:${fetched.id}`])];
     }
@@ -76,7 +80,6 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       && Date.parse(fetched.notificationUpdatedAt) < Date.parse(previous.notificationUpdatedAt);
     fetched.notificationUpdatedAt = latestTime([previous?.notificationUpdatedAt, fetched.notificationUpdatedAt]);
     if (stale && previous) {
-      fetched.notification = previous.notification;
       fetched.title = previous.title;
       fetched.state = previous.state;
       fetched.reason = previous.reason;
@@ -96,7 +99,8 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
       merged.set(event.id, event);
     }
     fetched.events = [...merged.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
-    const confirmed = next.operations.filter(operation => operation.threadId === fetched.id && operation.status === 'confirmed');
+    // Timeline enrichment can be newer than the notification listing that accompanied it.
+    if (stale && previous && (previous.notification !== 'done' || !newActivity)) fetched.notification = previous.notification;
     const authoritativeSubscription = fetched.subscription === 'subscribed' || fetched.subscription === 'unsubscribed';
     if (authoritativeSubscription && (!previous?.subscriptionObservedAt || Date.parse(startedAt) > Date.parse(previous.subscriptionObservedAt))) {
       fetched.subscribed = fetched.subscription === 'subscribed';

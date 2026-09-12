@@ -240,7 +240,7 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
         )?;
         wait_for(
             &window,
-            "document.querySelector('#thread-note-0')?.value === 'Private native reader note'",
+            "document.querySelector('#thread-note-0')?.value === 'Private native reader note' && document.querySelector('.workspace-footer')?.textContent.includes('Saved on this Mac')",
         )?;
         println!(
             "{}",

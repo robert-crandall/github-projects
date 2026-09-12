@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, setSystemTime, test } from 'bun:test';
 import { LIMITS, type Request, type Thread as SourceThread } from '../../service/src/schema.ts';
 import { mergeRefresh } from '../domain/live.ts';
 import { migrateWorkspace } from '../domain/migration.ts';
@@ -230,6 +230,53 @@ test('Archive saves placement and intent together before dispatch, and newer sou
   await relaunched.load();
   expect(getRows(relaunched.state)).toHaveLength(1);
   expect(relaunched.state.notes[0]!.text).toBe('Private archive note');
+});
+
+test.each([['read', 'archived'], ['unread', 'archived'], ['read', 'restored'], ['unread', 'restored']] as const)(
+  'a newer review request stays pending after confirmed Archive despite stale %s metadata (%s), including across relaunch and the next Archive', async (notification, placement) => {
+  setSystemTime(new Date('2026-09-11T18:00:00Z'));
+  try {
+    let source = thread();
+    const mock = await harness(async request => {
+      if (request.op === 'github.refresh') return reply(request, batch([source]));
+      expect(request.op).toBe('github.acknowledge');
+      return reply(request, { ...request.input, action: 'acknowledge', status: 'confirmed', confirmedAt: new Date().toISOString() });
+    });
+    await mock.remote.refresh();
+    mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'Keep my archive note' });
+    await mock.remote.archive(getRow(mock.workspace.state, 't:123')!);
+    expect(mock.workspace.state.threads[0]).toMatchObject({
+      notification: 'done', archive: { at: '2026-09-11T18:00:00Z', notificationUpdatedAt: thread().updatedAt },
+    });
+    if (placement === 'restored') mock.workspace.dispatch({ type: 'restore-thread', threadId: '123' });
+    const newer = { ...evidence('new-review-request'), at: '2026-09-11T18:01:00Z' };
+    source = { ...thread([evidence(), newer]), notification, updatedAt: '2026-09-11T16:59:00Z' };
+    setSystemTime(new Date('2026-09-11T18:02:00Z'));
+    await mock.remote.refresh();
+    expect(getRows(mock.workspace.state, 'inbox')).toHaveLength(1);
+    expect(getRow(mock.workspace.state, 't:123')!.events.map(event => event.id)).toEqual([newer.id]);
+    expect(mock.workspace.state.threads[0]).toMatchObject({ notification, notificationUpdatedAt: thread().updatedAt });
+    expect(mock.workspace.state.handled).toEqual(['request-1']);
+    await mock.workspace.flush();
+    const relaunched = new DesktopWorkspace(mock.platform);
+    await relaunched.load(); await relaunched.flush();
+    expect(getRows(relaunched.state, 'inbox')).toHaveLength(1);
+    expect(getRow(relaunched.state, 't:123')!.events.map(event => event.id)).toEqual([newer.id]);
+    expect(relaunched.state.notes[0]!.text).toBe('Keep my archive note');
+    const remote = new ServiceWorkspace(relaunched, mock.client);
+    await remote.refresh();
+    await remote.archive(getRow(relaunched.state, 't:123')!);
+    expect(mock.requests.filter(request => request.op === 'github.acknowledge').map(request => request.input)).toMatchObject([
+      { displayedEvidenceIds: ['request-1'], notificationUpdatedAt: thread().updatedAt },
+      { displayedEvidenceIds: [newer.id], notificationUpdatedAt: thread().updatedAt },
+    ]);
+    const archivedAgain = new DesktopWorkspace(mock.platform);
+    await archivedAgain.load();
+    expect(getRows(archivedAgain.state, 'archive')).toHaveLength(1);
+    expect(getRow(archivedAgain.state, 't:123')!.events).toEqual([]);
+    expect(archivedAgain.state.handled).toEqual(['request-1', newer.id]);
+    expect(archivedAgain.state.notes[0]!.text).toBe('Keep my archive note');
+  } finally { setSystemTime(); }
 });
 
 test('offline Archive persists locally, never replays on relaunch and retries only its original source boundary', async () => {

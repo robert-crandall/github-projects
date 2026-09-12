@@ -95,6 +95,28 @@ test('new source evidence must be newer than archive and not an old ID or a chan
   expect(getRows(merge(retained, thread(old, [event('known-future', newer)])), 'inbox')).toEqual([]);
 });
 
+test('stale metadata and old hydrated evidence cannot reopen confirmed activity or change read/unread', () => {
+  const original = archived();
+  const acknowledged = finishOperation(beginOperation(original, {
+    id: 'ack', threadId: '123', action: 'done', eventIds: ['original'], notificationUpdatedAt: old,
+  }), 'ack', { confirmedAt: archivedAt });
+  for (const notification of ['done', 'read', 'unread'] as const) {
+    for (const restored of [false, true]) {
+      let state = structuredClone(notification === 'done' ? acknowledged : original);
+      state.threads[0]!.notification = notification;
+      if (restored) state = transition(state, { type: 'restore-thread', threadId: '123' });
+      const incoming = { ...thread('2026-09-11T16:59:00Z', [
+        { ...event('original'), summary: 'Hydrated text' }, event('old-history', '2026-09-11T17:59:00Z'),
+      ]), notification: notification === 'unread' ? 'read' as const : 'unread' as const };
+      const refreshed = restoreDesktop(merge(merge(state, incoming), incoming), newer);
+      expect(getRows(refreshed, 'inbox')).toHaveLength(restored ? 1 : 0);
+      expect(refreshed.threads[0]).toMatchObject({ notification, notificationUpdatedAt: old, archive: state.threads[0]!.archive });
+      expect(refreshed.handled).toEqual(state.handled);
+      if (notification === 'done') expect(getRow(refreshed, 't:123')!.events).toEqual([]);
+    }
+  }
+});
+
 test('an in-flight snapshot with activity newer than the captured source boundary survives archive before response', () => {
   const state = archived();
   const response = thread('2026-09-11T17:59:59Z', [event('in-flight', '2026-09-11T17:59:59Z')]);
