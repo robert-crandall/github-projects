@@ -1,291 +1,295 @@
-import { expect, test, type Page } from '@playwright/test';
-import type { AppState, Scenario } from '../src/types.ts';
+import { expect, type Page } from '@playwright/test';
+import type { Scenario } from '../src/types.ts';
+import { assertMigration, capture, checkMigratedReader, checkRelaunchedThreadLink, detail, inbox, legacyFixture, row, saved, storageKey, tasks, test } from './workspace-fixtures.ts';
 
-const key = 'github-projects:greenfield-prototype:v1';
-const detail = (page: Page) => page.getByRole('article', { name: 'Selected item' });
-const work = (page: Page) => page.getByRole('region', { name: 'Working on' });
-async function saved(page: Page): Promise<AppState> {
-  return page.evaluate(storageKey => JSON.parse(localStorage.getItem(storageKey)!).state, key);
-}
 async function stage(page: Page, scenario: Scenario) {
   await page.getByRole('button', { name: /Demo scenarios/ }).click();
   await page.getByLabel('Activity scenario').selectOption(scenario);
   await page.getByRole('button', { name: 'Stage activity', exact: true }).click();
   await page.getByRole('button', { name: 'Back to workspace', exact: true }).click();
 }
-async function startReview(page: Page) {
-  await page.goto('/');
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  const state = await saved(page);
-  return { id: state.activeId!, threadId: state.actions.find(action => action.id === state.activeId)!.threadId! };
+async function configure(page: Page, failure: 'none' | 'partial' | 'error') {
+  await page.getByRole('button', { name: /Demo scenarios/ }).click();
+  await page.getByLabel('Next refresh').selectOption(failure);
+  await page.getByRole('button', { name: 'Back to workspace', exact: true }).click();
 }
 
-test('inspection, active work, notes, and reload remain separate', async ({ page }) => {
+test('selecting threads and typing the first character keeps focus and never creates Tasks', async ({ page }) => {
   await page.goto('/');
-  await expect(work(page)).toContainText('Choose an action');
-  await page.getByLabel('A note for when you return').fill('Check the retry window before approving.');
-  await expect(work(page)).toContainText('Choose an action');
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  const state = await saved(page);
-  const activeTitle = state.actions.find(action => action.id === state.activeId)!.title;
+  const before = await saved(page);
   await page.locator('.row-select').nth(1).click();
-  await expect(work(page)).toContainText(activeTitle);
-  expect((await saved(page)).activeId).toBe(state.activeId);
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('');
+  expect((await saved(page)).tasks).toEqual(before.tasks);
+  const selected = (await saved(page)).selectedKey;
+  const input = page.getByLabel('Thread notes', { exact: true });
+  await input.focus();
+  await page.keyboard.type('F');
+  await expect(input).toBeFocused();
+  await page.keyboard.type('irst note\nKeep private.');
+  await expect(input).toHaveValue('First note\nKeep private.');
+  await detail(page).getByRole('button', { name: 'Add note' }).click();
+  await page.getByLabel('Thread note 2').fill('Separate second annotation');
+  await input.fill('Edited first annotation');
+  const annotated = await saved(page);
+  expect(annotated.tasks).toEqual(before.tasks);
+  expect(annotated.notes.filter(note => `t:${note.threadId}` === selected).map(note => note.text))
+    .toEqual(['Edited first annotation', 'Separate second annotation']);
+  await tasks(page).click();
+  await expect(page.locator('.work-row')).toHaveCount(before.tasks.length);
+  await inbox(page).click();
+  await row(page, selected!).click();
   await page.reload();
-  expect((await saved(page)).selectedKey).not.toBe(`a:${state.activeId}`);
-  await work(page).getByRole('button').click();
-  await expect(page.getByLabel('A note for when you return')).toHaveValue('Check the retry window before approving.');
+  await expect(input).toHaveValue('Edited first annotation');
+  await expect(page.getByLabel('Thread note 2')).toHaveValue('Separate second annotation');
+  expect((await saved(page)).tasks).toEqual(before.tasks);
 });
 
-test('source activity is staged until manual refresh and never replaces current work', async ({ page }) => {
-  await startReview(page);
-  await page.getByLabel('A note for when you return').fill('Keep this context');
+for (const view of ['Inbox', 'Tasks'] as const) {
+  test(`capture from ${view} saves exact URL and daily text as standalone Tasks without interpretation`, async ({ page }) => {
+    await page.goto('/');
+    if (view === 'Tasks') await tasks(page).click();
+    const before = await saved(page);
+    const text = `  https://github.com/octo/project/pull/123\nEvery day at 10am, announce, then increase — from ${view}  `;
+    await capture(page, text);
+    const after = await saved(page);
+    expect(after.tasks).toHaveLength(before.tasks.length + 1);
+    expect(after.tasks.at(-1)).toEqual({
+      id: after.selectedKey!.slice(2), title: text, notes: '', status: 'open', createdAt: before.clock,
+    });
+    expect(after.threads).toEqual(before.threads);
+    expect(after.notes).toEqual(before.notes);
+    expect(after.draft).toBe('');
+    expect(after.view).toBe('tasks');
+    await page.reload();
+    expect((await saved(page)).tasks).toEqual(after.tasks);
+    await expect(detail(page).getByRole('heading')).toHaveText(text);
+  });
+}
+
+test('task text, notes and Done survive reload, new requests, source closure and sample reset', async ({ page }) => {
+  await page.goto('/');
+  await capture(page, 'A standalone follow-up');
+  await detail(page).getByRole('button', { name: 'Edit text' }).click();
+  await page.getByRole('textbox', { name: 'Task text', exact: true }).fill('  My revised task\nSecond line  ');
+  await page.getByRole('button', { name: 'Save text' }).click();
+  await page.getByLabel('Task notes').fill('Private task notes');
+  await page.getByRole('checkbox', { name: 'Done', exact: true }).check();
   const before = await saved(page);
-  const rowKeys = await page.locator('[data-row-key]').evaluateAll(rows => rows.map(row => row.getAttribute('data-row-key')));
-  await stage(page, 'new-review');
-  expect((await saved(page)).refresh.lastSuccessAt).toBe(before.refresh.lastSuccessAt);
-  expect(await page.locator('[data-row-key]').evaluateAll(rows => rows.map(row => row.getAttribute('data-row-key')))).toEqual(rowKeys);
+  const task = before.tasks.at(-1)!;
+  expect(task).toMatchObject({ title: '  My revised task\nSecond line  ', notes: 'Private task notes', status: 'done', completedAt: before.clock });
   await page.reload();
-  expect((await saved(page)).staged.length).toBeGreaterThan(0);
+  await expect(page.getByRole('checkbox', { name: 'Done', exact: true })).toBeChecked();
+  await expect(page.getByLabel('Task notes')).toHaveValue(task.notes);
+  await expect(page.getByRole('region', { name: 'Completed tasks' })).toContainText('My revised task');
+  await inbox(page).click();
+  await row(page, 't:demo-relay-101').click();
+  for (const scenario of ['merge-queue', 're-request', 'comment', 'closed'] as const) {
+    await stage(page, scenario);
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+    expect((await saved(page)).tasks).toEqual(before.tasks);
+  }
+  await page.getByRole('button', { name: /Demo scenarios/ }).click();
+  await page.getByRole('button', { name: 'Reset samples, keep notes and tasks' }).click();
+  await page.getByRole('button', { name: 'Back to workspace' }).click();
+  expect((await saved(page)).tasks).toEqual(before.tasks);
+  await tasks(page).click();
+  await row(page, `a:${task.id}`).click();
+  await expect(page.getByRole('checkbox', { name: 'Done', exact: true })).toBeChecked();
+  await page.getByRole('checkbox', { name: 'Done', exact: true }).uncheck();
+  expect((await saved(page)).tasks.at(-1)?.status).toBe('open');
+});
+
+test('staged activity requires explicit Refresh and preserves row order, selection and notes', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Keep this thread context');
+  const before = await saved(page);
+  const keys = await page.locator('.queue .work-row:visible').evaluateAll(rows => rows.map(row => row.getAttribute('data-row-key')));
+  await stage(page, 'new-review');
+  await page.evaluate(() => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+  await page.reload();
+  expect((await saved(page)).refresh).toEqual(before.refresh);
+  expect((await saved(page)).staged).toHaveLength(1);
+  expect(await page.locator('.queue .work-row:visible').evaluateAll(rows => rows.map(row => row.getAttribute('data-row-key')))).toEqual(keys);
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   const after = await saved(page);
-  expect(after.activeId).toBe(before.activeId);
+  expect(after.staged).toEqual([]);
   expect(after.selectedKey).toBe(before.selectedKey);
-  expect(after.actions.find(action => action.id === before.activeId)?.notes).toBe('Keep this context');
-  const afterKeys = await page.locator('[data-row-key]').evaluateAll(rows => rows.map(row => row.getAttribute('data-row-key')));
-  expect(afterKeys.slice(0, rowKeys.length)).toEqual(rowKeys);
+  expect(after.notes).toEqual(before.notes);
+  expect(after.tasks).toEqual(before.tasks);
+  expect(after.order.slice(0, before.order.length)).toEqual(before.order);
+  await expect(page.locator('.new-updates')).toContainText('Add delivery timeout diagnostics');
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeFocused();
 });
 
-test('finished review survives merge queue activity; new request is a new action', async ({ page }) => {
-  const started = await startReview(page);
-  await detail(page).getByRole('button', { name: 'Done', exact: true }).click();
-  expect((await saved(page)).actions.find(action => action.id === started.id)?.status).toBe('done');
-  await stage(page, 'merge-queue');
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  const queued = await saved(page);
-  expect(queued.actions.find(action => action.id === started.id)?.status).toBe('done');
-  expect(queued.activeId).toBeNull();
-  expect(queued.actions.filter(action => action.threadId === started.threadId && action.status === 'available')).toHaveLength(0);
-  await stage(page, 're-request');
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await page.locator(`[data-row-key="t:${started.threadId}"] .row-select`).click();
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  const requested = await saved(page);
-  expect(requested.activeId).not.toBe(started.id);
-  expect(requested.actions.find(action => action.id === started.id)?.status).toBe('done');
-});
-
-test('Copilot cancellation, failure, and simulated return never finish an action', async ({ page }) => {
-  const started = await startReview(page);
-  await detail(page).getByRole('button', { name: 'Review in Copilot' }).click();
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
-  expect((await saved(page)).activeId).toBe(started.id);
-  await detail(page).getByRole('button', { name: 'Review in Copilot' }).click();
-  await page.getByLabel('Simulate an unavailable app').check();
-  await page.getByRole('button', { name: 'Simulate launch' }).click();
-  await expect(page.getByRole('dialog')).toContainText('could not be opened');
-  await page.getByLabel('Simulate an unavailable app').uncheck();
-  await page.getByRole('button', { name: 'Retry simulation' }).click();
-  await expect(page.getByRole('dialog')).toContainText('Launch requested, not completed');
-  await page.getByRole('button', { name: 'Return to workspace' }).click();
-  expect((await saved(page)).actions.find(action => action.id === started.id)?.status).toBe('available');
-  expect((await saved(page)).activeId).toBe(started.id);
-});
-
-test('every GitHub row exposes both destinations at rest', async ({ page }) => {
-  await page.goto('/');
-  const githubRows = page.locator('.work-row').filter({ has: page.getByRole('button', { name: 'Open on GitHub', exact: true }) });
-  expect(await githubRows.count()).toBeGreaterThan(2);
-  for (const row of await githubRows.all()) {
-    await expect(row.getByRole('button', { name: 'Open on GitHub', exact: true })).toBeVisible();
-    await expect(row.getByRole('button', { name: /Review in Copilot|Open in Copilot/ })).toBeVisible();
-  }
-});
-
-test('notification acknowledgement and unsubscribe leave the local action intact', async ({ page }) => {
-  const started = await startReview(page);
-  await page.getByLabel('A note for when you return').fill('I still owe a follow-up');
-  for (const label of ['Mark notification done on GitHub', 'Unsubscribe on GitHub']) {
-    await detail(page).getByRole('button', { name: label, exact: true }).click();
+for (const action of ['Mark notification done on GitHub', 'Unsubscribe on GitHub']) {
+  test(`${action} retains notes under Earlier threads without changing Tasks`, async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Thread notes', { exact: true }).fill('I still need this annotation');
+    await detail(page).getByRole('button', { name: 'Add note' }).click();
+    await page.getByLabel('Thread note 2').fill('Independent annotation');
+    const before = await saved(page);
+    await detail(page).getByRole('button', { name: action, exact: true }).click();
+    await page.getByLabel('Simulate a failed GitHub write').check();
     await page.getByRole('button', { name: 'Simulate success' }).click();
+    await expect(page.getByRole('dialog')).toContainText('Nothing was acknowledged or unsubscribed');
+    expect((await saved(page)).threads).toEqual(before.threads);
+    await page.getByLabel('Simulate a failed GitHub write').uncheck();
+    await page.getByRole('button', { name: 'Retry simulation' }).click();
     await page.getByRole('button', { name: 'Return to workspace' }).click();
-  }
-  const state = await saved(page);
-  expect(state.actions.find(action => action.id === started.id)?.status).toBe('available');
-  expect(state.actions.find(action => action.id === started.id)?.notes).toBe('I still owe a follow-up');
-  expect(state.threads.find(thread => thread.id === started.threadId)?.subscribed).toBe(false);
-  expect(state.threads.find(thread => thread.id === started.threadId)?.notification).toBe('done');
-});
+    const after = await saved(page);
+    expect(after.tasks).toEqual(before.tasks);
+    expect(after.notes).toEqual(before.notes);
+    const thread = after.threads.find(thread => `t:${thread.id}` === before.selectedKey)!;
+    expect(action.startsWith('Mark') ? thread.notification : thread.subscribed).toBe(action.startsWith('Mark') ? 'done' : false);
+    await inbox(page).click();
+    await page.locator('.earlier-threads > summary').click();
+    await page.locator('.earlier-threads').locator(`[data-row-key="${before.selectedKey}"] .row-select`).click();
+    await page.reload();
+    await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('I still need this annotation');
+    await expect(page.getByLabel('Thread note 2')).toHaveValue('Independent annotation');
+  });
+}
 
-test('capture is saved before simulated interpretation and survives reset', async ({ page }) => {
+test('external handoff cancellation, failure and requested launch leave tasks and notes unchanged', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: /Capture/ }).first().click();
-  await page.getByLabel('What do you want to remember?').fill('Send the rollout plan to the team');
-  await page.getByRole('button', { name: 'Save capture' }).click();
-  await expect(detail(page)).toContainText('Send the rollout plan to the team');
-  let state = await saved(page);
-  const captured = state.actions.find(action => action.captures.includes('Send the rollout plan to the team'))!;
-  expect(captured.interpretation).toBe('pending');
-  await page.getByRole('button', { name: 'Try simulated interpretation' }).click();
-  await page.getByLabel('A note for when you return').fill('Mention the staged deployment');
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByRole('button', { name: 'Reset samples, keep captures' }).click();
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await page.reload();
-  state = await saved(page);
-  const retained = state.actions.find(action => action.captures.includes('Send the rollout plan to the team'))!;
-  expect(retained.notes).toBe('Mention the staged deployment');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Never send this private annotation');
+  const before = await saved(page);
+  for (const destination of ['Open on GitHub', 'Review in Copilot']) {
+    const button = detail(page).getByRole('button', { name: destination, exact: true });
+    await button.click();
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(button).toBeFocused();
+    await button.click();
+    await page.getByLabel('Simulate an unavailable app').check();
+    await page.getByRole('button', { name: 'Simulate launch' }).click();
+    await expect(page.getByRole('dialog')).toContainText('could not be opened');
+    await page.getByLabel('Simulate an unavailable app').uncheck();
+    await page.getByRole('button', { name: 'Retry simulation' }).click();
+    await expect(page.getByRole('dialog')).toContainText('Launch requested, not completed');
+    await page.getByRole('button', { name: 'Return to workspace' }).click();
+    expect(await saved(page)).toEqual(before);
+  }
 });
 
-test('storage failure is explicit and retry saves pending notes', async ({ page }) => {
-  await startReview(page);
+test('failed and partial Refresh preserve saved context and recover only on explicit retry', async ({ page }) => {
+  await page.goto('/');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Retained through failed refresh');
+  const before = await saved(page);
+  await stage(page, 'comment');
+  await stage(page, 're-request');
+  await configure(page, 'error');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByText('Refresh failed; showing saved work')).toBeVisible();
+  expect((await saved(page)).threads).toEqual(before.threads);
+  expect((await saved(page)).staged).toHaveLength(2);
+  await configure(page, 'partial');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByText('Some activity could not be refreshed')).toBeVisible();
+  expect((await saved(page)).staged).toHaveLength(1);
+  expect((await saved(page)).refresh.lastSuccessAt).toBe(before.refresh.lastSuccessAt);
+  await configure(page, 'none');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  expect((await saved(page)).refresh.status).toBe('ok');
+  expect((await saved(page)).notes).toEqual(before.notes);
+  expect((await saved(page)).tasks).toEqual(before.tasks);
+  await stage(page, 'empty');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByText('No threads in this saved inbox')).toBeVisible();
+  expect((await saved(page)).notes).toEqual(before.notes);
+  expect((await saved(page)).threads).toHaveLength(before.threads.length);
+});
+
+test('storage failure keeps pending notes and Retry storage saves the latest edit', async ({ page }) => {
+  await page.goto('/');
   await page.getByRole('button', { name: /Demo scenarios/ }).click();
   await page.getByLabel('Local storage fails').check();
   await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await page.getByLabel('A note for when you return').fill('Preserve this pending note');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Pending version one');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Pending latest version');
   await expect(page.getByRole('alert')).toContainText('Your changes are not saved');
-  expect((await saved(page)).actions.some(action => action.notes === 'Preserve this pending note')).toBe(false);
+  expect((await saved(page)).notes.some(note => note.text.startsWith('Pending'))).toBe(false);
   await page.getByRole('button', { name: 'Retry storage', exact: true }).click();
   await page.reload();
-  await expect(page.getByLabel('A note for when you return')).toHaveValue('Preserve this pending note');
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Pending latest version');
 });
 
-test('Later retains context and a routine reminder does not steal active work', async ({ page }) => {
-  const started = await startReview(page);
-  await detail(page).getByRole('button', { name: 'Later', exact: true }).click();
-  await page.getByLabel('A note for later').fill('Waiting for a response');
-  await page.getByRole('button', { name: 'Keep for later', exact: true }).click();
-  expect((await saved(page)).actions.find(action => action.id === started.id)?.status).toBe('later');
-  await page.getByRole('button', { name: /^Later/ }).first().click();
-  await expect(page.locator('.queue')).toContainText('Waiting for a response');
-  await page.getByRole('button', { name: /Needs attention/ }).first().click();
-  await page.locator('.row-select').first().click();
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  const before = await saved(page);
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByRole('button', { name: 'Advance 30 minutes' }).click();
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await expect(page.getByRole('region', { name: 'Local reminders' })).toBeVisible();
-  expect((await saved(page)).activeId).toBe(before.activeId);
-  expect((await saved(page)).selectedKey).toBe(before.selectedKey);
+test('corrupt browser copy is never overwritten without explicit backup and replacement', async ({ page }) => {
+  await page.addInitScript(key => {
+    if (!sessionStorage.getItem('seeded')) {
+      localStorage.setItem(key, '{"damaged":');
+      localStorage.setItem('unrelated-previous-app', 'untouched');
+      sessionStorage.setItem('seeded', 'yes');
+    }
+  }, storageKey);
+  await page.goto('/');
+  await expect(page.getByRole('alert')).toContainText('Your changes are not saved');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Pending recovery annotation');
+  await page.getByRole('button', { name: 'Retry storage', exact: true }).click();
+  expect(await page.evaluate(key => localStorage.getItem(key), storageKey)).toBe('{"damaged":');
+  await page.getByRole('button', { name: 'Back up saved copy & use this one' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  const copies = await page.evaluate(key => ({
+    unrelated: localStorage.getItem('unrelated-previous-app'),
+    backups: Object.keys(localStorage).filter(name => name.startsWith(`${key}:recovery:`)).map(name => localStorage.getItem(name)),
+  }), storageKey);
+  expect(copies).toEqual({ unrelated: 'untouched', backups: ['{"damaged":'] });
+  await page.reload();
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Pending recovery annotation');
 });
 
-test('narrow navigation and keyboard dialog dismissal stay usable without horizontal overflow', async ({ page }) => {
+test('v2 browser migration backs up before v3 writes and preserves distinct annotations and retired routine history', async ({ page }) => {
+  const legacy = legacyFixture();
+  const original = JSON.stringify({ state: legacy, scroll: {} });
+  await page.addInitScript(({ key, original }) => {
+    if (!sessionStorage.getItem('seeded')) {
+      localStorage.setItem(key, original);
+      sessionStorage.setItem('seeded', 'yes');
+    }
+    const write = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (name, value) {
+      if (name === key && JSON.parse(value).state.version === 3 && localStorage.getItem(key) === original) {
+        const backedUp = Object.keys(localStorage).some(name => name.startsWith(`${key}:recovery:`) && localStorage.getItem(name) === original);
+        if (!backedUp) throw new Error('Migration tried to write v3 before preserving v2');
+      }
+      write.call(this, name, value);
+    };
+  }, { key: storageKey, original });
+  await page.goto('/');
+  assertMigration(await saved(page), legacy);
+  await checkMigratedReader(page);
+  const beforeReload = await saved(page);
+  await page.reload();
+  expect((await saved(page)).notes).toEqual(beforeReload.notes);
+  expect((await saved(page)).tasks).toEqual(beforeReload.tasks);
+  await checkRelaunchedThreadLink(page);
+  expect((await saved(page)).selectedKey).toBe('t:123');
+  await stage(page, 're-request');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  expect((await saved(page)).tasks).toEqual(beforeReload.tasks);
+  expect((await saved(page)).notes).toEqual(beforeReload.notes);
+  expect(await page.evaluate(key => Object.keys(localStorage).filter(name => name.startsWith(`${key}:recovery:`)).map(name => localStorage.getItem(name)), storageKey)).toEqual([original]);
+});
+
+test('390px navigation, first-note typing and keyboard capture retain focus without overflow', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');
-  await expect(page.getByRole('button', { name: 'Back to list' })).toBeVisible();
   await page.getByRole('button', { name: 'Back to list' }).click();
   await expect(page.locator('.queue')).toBeVisible();
   const first = page.locator('.row-select').first();
   await first.focus();
   await page.keyboard.press('Enter');
-  await expect(detail(page)).toBeVisible();
+  const notes = page.getByLabel('Thread notes', { exact: true });
+  await notes.focus();
+  await page.keyboard.type('N');
+  await expect(notes).toBeFocused();
+  await page.keyboard.type('arrow note');
+  await expect(notes).toHaveValue('Narrow note');
+  await page.keyboard.press('Control+k');
+  await expect(page.getByLabel('What do you want to remember?')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(notes).toBeFocused();
   await detail(page).getByRole('button', { name: 'Review in Copilot' }).click();
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
   await expect(detail(page).getByRole('button', { name: 'Review in Copilot' })).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-});
-
-test('a corrupt saved copy is retained until explicit backup and replacement', async ({ page }) => {
-  await page.addInitScript(storageKey => {
-    localStorage.setItem(storageKey, '{"damaged":');
-    localStorage.setItem('unrelated-previous-app', 'untouched');
-  }, key);
-  await page.goto('/');
-  await expect(page.getByRole('alert')).toContainText('Your changes are not saved');
-  expect(await page.evaluate(storageKey => localStorage.getItem(storageKey), key)).toBe('{"damaged":');
-  await page.getByRole('button', { name: 'Back up saved copy & use this one' }).click();
-  await expect(page.getByRole('alert')).toHaveCount(0);
-  const result = await page.evaluate(storageKey => ({
-    unrelated: localStorage.getItem('unrelated-previous-app'),
-    backups: Object.keys(localStorage).filter(name => name.startsWith(`${storageKey}:recovery:`)).map(name => localStorage.getItem(name)),
-  }), key);
-  expect(result.unrelated).toBe('untouched');
-  expect(result.backups).toContain('{"damaged":');
-});
-
-test('partial and failed refreshes retain context and can recover explicitly', async ({ page }) => {
-  const started = await startReview(page);
-  await stage(page, 'new-review');
-  const before = await saved(page);
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByLabel('Next refresh').selectOption('error');
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await expect(page.getByText('Refresh failed; showing saved work')).toBeVisible();
-  expect((await saved(page)).refresh.lastSuccessAt).toBe(before.refresh.lastSuccessAt);
-  expect((await saved(page)).staged.length).toBeGreaterThan(0);
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByLabel('Next refresh').selectOption('partial');
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await expect(page.getByText('Some activity could not be refreshed')).toBeVisible();
-  expect((await saved(page)).activeId).toBe(started.id);
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByLabel('Next refresh').selectOption('none');
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  expect((await saved(page)).refresh.status).toBe('ok');
-});
-
-test('routine steps keep their original timestamps after missed days', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Routines', exact: true }).click();
-  await page.locator('.row-select').first().click();
-  await expect(detail(page).getByRole('button', { name: 'Finish occurrence' })).toBeDisabled();
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByRole('button', { name: 'Advance 30 minutes' }).click();
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  const steps = detail(page).getByRole('checkbox');
-  await expect(steps.nth(1)).toBeDisabled();
-  await steps.first().check();
-  const original = (await saved(page)).actions.find(action => action.routine)?.steps[0].doneAt;
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByRole('button', { name: 'Advance 3 days' }).click();
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await expect(detail(page)).toContainText('Recorded steps have not been repeated');
-  expect((await saved(page)).actions.find(action => action.routine)?.steps[0].doneAt).toBe(original);
-  await steps.nth(1).check();
-  await detail(page).getByRole('button', { name: 'Finish occurrence' }).click();
-  const routine = (await saved(page)).actions.find(action => action.routine)?.routine;
-  expect(routine?.history.some(occurrence => occurrence.status === 'done' && occurrence.steps[0].doneAt === original)).toBe(true);
-});
-
-test('interpretation failure keeps the original and provides a retry', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByLabel('Capture interpretation fails').check();
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await page.getByRole('button', { name: /Capture/ }).first().click();
-  const original = 'Every day at 10am, announce the change, then increase the feature flag';
-  await page.getByLabel('What do you want to remember?').fill(original);
-  await page.getByRole('button', { name: 'Save capture' }).click();
-  await detail(page).getByRole('button', { name: 'Try simulated interpretation' }).click();
-  expect((await saved(page)).actions.find(action => action.captures.includes(original))?.interpretation).toBe('error');
-  await expect(detail(page).getByRole('button', { name: 'Retry interpretation' })).toBeVisible();
-  await page.getByRole('button', { name: /Demo scenarios/ }).click();
-  await page.getByLabel('Capture interpretation fails').uncheck();
-  await page.getByRole('button', { name: 'Back to workspace' }).click();
-  await detail(page).getByRole('button', { name: 'Retry interpretation' }).click();
-  expect((await saved(page)).actions.find(action => action.captures.includes(original))?.routine).toBeDefined();
-});
-
-test('Copilot triage previews suggestions before changing order and never makes local decisions', async ({ page }) => {
-  const started = await startReview(page);
-  const before = await saved(page);
-  await page.getByRole('button', { name: 'Triage with Copilot', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('Deterministic sample rules');
-  expect((await saved(page)).order).toEqual(before.order);
-  await page.getByRole('button', { name: 'Keep current order' }).click();
-  expect((await saved(page)).order).toEqual(before.order);
-  await page.getByRole('button', { name: 'Triage with Copilot', exact: true }).click();
-  await page.getByRole('button', { name: 'Apply suggested order' }).click();
-  const after = await saved(page);
-  expect(after.activeId).toBe(started.id);
-  expect(after.selectedKey).toBe(before.selectedKey);
-  expect(after.actions).toEqual(before.actions);
-  expect(after.threads).toEqual(before.threads);
-  expect(after.handled).toEqual(before.handled);
 });

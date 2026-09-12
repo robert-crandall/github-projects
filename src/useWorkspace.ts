@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getRow, initialState, transition } from './domain/engine.ts';
+import { initialState, transition } from './domain/engine.ts';
 import type { Command } from './types.ts';
 import { decodeWorkspace, downloadBackup, errorMessage, replaceWithBackup, saveWorkspace, STORAGE_KEY, withStorageEnabled, type SavedWorkspace } from './storage.ts';
 
@@ -41,11 +41,7 @@ export function useWorkspace() {
 
   function dispatch(command: Command, message = ''): boolean {
     try {
-      let nextState = transition(current.current.state, command);
-      if ('key' in command && command.type !== 'select' && command.key === current.current.state.selectedKey) {
-        const retained = getRow(nextState, command.key)?.action;
-        if (retained) nextState = transition(nextState, { type: 'select', key: `a:${retained.id}` });
-      }
+      const nextState = transition(current.current.state, command);
       const next = { ...current.current, state: nextState };
       current.current = next;
       setSaved(next);
@@ -92,7 +88,7 @@ export function useWorkspace() {
   }
 
   useEffect(() => {
-    if (initial.raw === null && !initial.error) persist(current.current);
+    if (!initial.error) persist(current.current);
     const onStorage = (event: StorageEvent) => {
       if (event.key === STORAGE_KEY && event.newValue !== expected.current) {
         blocked.current = true;

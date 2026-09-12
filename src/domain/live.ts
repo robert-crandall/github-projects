@@ -1,40 +1,24 @@
-import { stateSchema, threadSchema, type AppState, type ExternalOperation, type Thread } from '../types.ts';
-import { capturedReference, getRow, getRows, isRequest, priorityRank, transition } from './engine.ts';
+import { threadSchema, type AppState, type ExternalOperation, type Thread } from '../types.ts';
+import { transition } from './engine.ts';
 import { instant } from './clock.ts';
+import { migrateWorkspace } from './migration.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
   new Intl.DateTimeFormat('en-US', { timeZone });
   return {
-    version: 2, runtime: 'desktop', clock: instant(now), timeZone,
-    threads: [], actions: [], staged: [], handled: [], seen: [], order: [], newKeys: [],
-    selectedKey: null, activeId: null, view: 'attention', draft: '', operations: [],
-    refresh: { lastSuccessAt: null, status: 'saved', message: 'Refresh loads GitHub activity. Local work is available without a connection.' },
-    failures: { refresh: 'none', storage: false, interpretation: false, external: false },
-    undo: [], sequence: 0,
+    version: 3, runtime: 'desktop', clock: instant(now), timeZone,
+    threads: [], tasks: [], notes: [], staged: [], handled: [], seen: [], order: [], newKeys: [],
+    selectedKey: null, view: 'inbox', draft: '', operations: [],
+    refresh: { lastSuccessAt: null, status: 'saved', message: 'Refresh loads GitHub activity. Notes and tasks are available without a connection.' },
+    failures: { refresh: 'none', storage: false, external: false }, undo: [], sequence: 0,
   };
 }
 
 export function restoreDesktop(value: unknown, now: string): AppState {
-  const state = stateSchema.parse(value);
-  if (state.runtime !== 'desktop' || state.actions.some(action => action.origin === 'fixture')
-    || state.threads.some(thread => thread.source !== 'github')) {
+  const state = migrateWorkspace(value);
+  if (state.runtime !== 'desktop' || state.tasks.some(task => task.history?.origin === 'fixture')
+    || state.notes.some(note => note.history?.origin === 'fixture') || state.threads.some(thread => thread.source !== 'github')) {
     throw new Error('This is not a live desktop workspace. The saved copy has not been changed.');
-  }
-  const actions = new Set(state.actions.map(action => action.id));
-  const threads = new Set(state.threads.map(thread => thread.id));
-  if (actions.size !== state.actions.length || threads.size !== state.threads.length
-    || (state.activeId !== null && !actions.has(state.activeId))
-    || state.actions.some(action => {
-      const thread = state.threads.find(thread => thread.id === action.threadId);
-      return action.threadId ? !thread || action.eventIds.some(id => !thread.events.some(event => event.id === id))
-        : action.eventIds.length > 0;
-    })
-    || state.operations.some(operation => !threads.has(operation.threadId))
-    || (state.selectedKey !== null && !getRow(state, state.selectedKey))) {
-    throw new Error('Saved work has inconsistent references. Export it before explicit recovery.');
-  }
-  for (const zone of [state.timeZone, ...state.actions.flatMap(action => action.routine ? [action.routine.timeZone] : [])]) {
-    new Intl.DateTimeFormat('en-US', { timeZone: zone });
   }
   for (const operation of state.operations) {
     if (operation.status === 'pending') {
@@ -69,9 +53,12 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
         && thread.repo.toLowerCase() === fetched.repo.toLowerCase() && thread.number === fetched.number && thread.kind === fetched.kind);
       if (previous) {
         const previousId = previous.id;
-        for (const action of next.actions) if (action.threadId === previousId) action.threadId = fetched.id;
+        for (const note of next.notes) if (note.threadId === previousId) note.threadId = fetched.id;
+        for (const task of next.tasks) if (task.threadId === previousId) task.threadId = fetched.id;
+        for (const operation of next.operations) if (operation.threadId === previousId) operation.threadId = fetched.id;
         if (next.selectedKey === `t:${previousId}`) next.selectedKey = `t:${fetched.id}`;
         next.order = next.order.map(key => key === `t:${previousId}` ? `t:${fetched.id}` : key);
+        previous.events = previous.events.map(event => ({ ...event, threadId: fetched.id }));
         previous.id = fetched.id;
       }
     }
@@ -93,8 +80,7 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
     fetched.events = [...merged.values()].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.id.localeCompare(b.id));
     const confirmed = next.operations.filter(operation => operation.threadId === fetched.id && operation.status === 'confirmed');
     const authoritativeSubscription = fetched.subscription === 'subscribed' || fetched.subscription === 'unsubscribed';
-    if (authoritativeSubscription
-      && (!previous?.subscriptionObservedAt || Date.parse(startedAt) > Date.parse(previous.subscriptionObservedAt))) {
+    if (authoritativeSubscription && (!previous?.subscriptionObservedAt || Date.parse(startedAt) > Date.parse(previous.subscriptionObservedAt))) {
       fetched.subscribed = fetched.subscription === 'subscribed';
       fetched.subscriptionObservedAt = startedAt;
     } else if (previous) {
@@ -113,7 +99,7 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
     lastSuccessAt: batch.status === 'complete' ? instant(batch.fetchedAt) : next.refresh.lastSuccessAt,
     status: batch.status === 'complete' ? 'ok' : 'partial',
     message: batch.diagnostics.join(' ') || (batch.status === 'complete'
-      ? `Refresh complete. Received ${batch.threads.length} GitHub threads. Retained work is unchanged.`
+      ? `Refresh complete. Received ${batch.threads.length} GitHub threads. Notes and tasks are unchanged.`
       : 'Some GitHub activity could not be loaded. Saved work is retained.'),
   };
   return transition(next, { type: 'clock', now: next.clock });
@@ -144,7 +130,7 @@ export function finishOperation(state: AppState, id: string, result: { confirmed
   }
   operation.status = 'confirmed';
   operation.finishedAt = instant(result.confirmedAt);
-  operation.message = 'GitHub confirmed this operation. Your local action is unchanged.';
+  operation.message = 'GitHub confirmed this operation. Your notes and tasks are unchanged.';
   next.handled = [...new Set([...next.handled, ...operation.eventIds])];
   const thread = next.threads.find(thread => thread.id === operation.threadId)!;
   if (operation.action === 'unsubscribe'
@@ -156,128 +142,4 @@ export function finishOperation(state: AppState, id: string, result: { confirmed
     thread.notification = 'done';
   }
   return next;
-}
-
-export type DerivedReminder = {
-  id: string; occurrenceId: string; dueAt: string; timeZone: string; snoozedUntil?: string;
-  daily?: { time: string; timeZone: string };
-};
-
-export function reminderSchedules(state: AppState): DerivedReminder[] {
-  return state.actions.flatMap(action => {
-    if (action.id === state.activeId || action.status === 'done' || action.status === 'removed' || action.reminderDismissed) return [];
-    const routine = action.routine;
-    const dueAt = routine?.dueAt ?? routine?.nextDueAt
-      ?? (action.status === 'later' ? action.reminderDueAt ?? action.remindAt : undefined);
-    if (!dueAt) return [];
-    const original = instant(dueAt);
-    return [{
-      id: action.id, occurrenceId: `${action.id}:${original}`, dueAt: original,
-      timeZone: routine?.timeZone ?? state.timeZone,
-      ...(routine ? { daily: { time: routine.time, timeZone: routine.timeZone }, snoozedUntil: routine.snoozedUntil }
-        : { snoozedUntil: action.remindAt && instant(action.remindAt) !== original ? action.remindAt : undefined }),
-    }];
-  });
-}
-
-// Keep the private fingerprint local. Only bounded evidence is sent to the SDK.
-export function orderFingerprint(state: AppState): string {
-  return JSON.stringify({
-    rows: getRows(state, 'attention').map(row => ({
-      key: row.key, title: row.title, kind: row.kind, events: row.events,
-      action: row.action, thread: row.thread,
-    })),
-    activeId: state.activeId, order: state.order, handled: state.handled,
-  });
-}
-
-export function applySuggestedOrder(state: AppState, fingerprint: string, orderedKeys: string[]): AppState {
-  if (orderFingerprint(state) !== fingerprint) throw new Error('Work or evidence changed. Request a fresh preview before applying.');
-  const candidates = getRows(state, 'attention').map(row => row.key);
-  if (new Set(orderedKeys).size !== orderedKeys.length || orderedKeys.length !== candidates.length
-    || orderedKeys.some(key => !candidates.includes(key))) {
-    throw new Error('Copilot did not return every candidate exactly once. No order was applied.');
-  }
-
-  return { ...state, order: [...orderedKeys, ...state.order.filter(key => !candidates.includes(key))], newKeys: [] };
-}
-
-export function applyScopedSuggestedOrder(state: AppState, fingerprint: string, selectedKeys: string[], orderedKeys: string[]): AppState {
-  if (orderFingerprint(state) !== fingerprint) throw new Error('Work or evidence changed. Request a fresh preview before applying.');
-  const rows = getRows(state, 'attention');
-  if (!selectedKeys.length || new Set(selectedKeys).size !== selectedKeys.length
-    || selectedKeys.some(key => !rows.some(row => row.key === key))
-    || new Set(orderedKeys).size !== orderedKeys.length || orderedKeys.length !== selectedKeys.length
-    || orderedKeys.some(key => !selectedKeys.includes(key))) {
-    throw new Error('Copilot must return each selected candidate exactly once. No order was applied.');
-  }
-  const ranks = [...new Set(rows.map(priorityRank))].sort((a, b) => a - b);
-  const fullOrder = ranks.flatMap(rank => {
-    const tier = rows.filter(row => priorityRank(row) === rank);
-    const suggestions = orderedKeys.filter(key => tier.some(row => row.key === key));
-    let index = 0;
-    return tier.map(row => selectedKeys.includes(row.key) ? suggestions[index++]! : row.key);
-  });
-  return applySuggestedOrder(state, fingerprint, fullOrder);
-}
-
-export function captureFingerprint(state: AppState, key: string): string {
-  const action = getRow(state, key)?.action;
-  if (!action || !action.captures.length) throw new Error('Select a saved capture first.');
-  return JSON.stringify({ action, threads: state.threads, actions: state.actions, handled: state.handled, activeId: state.activeId });
-}
-
-export type CaptureProposal = {
-  kind: 'action' | 'routine' | 'unsupported'; title: string; steps: string[];
-  dailyAt: string | null; timeZone: string; uncertainty: string;
-};
-
-export function applyCaptureProposal(state: AppState, key: string, fingerprint: string, proposal: CaptureProposal): AppState {
-  if (captureFingerprint(state, key) !== fingerprint) throw new Error('The capture or related work changed. Request a fresh interpretation.');
-  let next = structuredClone(state);
-  const item = getRow(next, key)!.action!;
-  if (item.status === 'done' || item.status === 'removed') throw new Error('Restore the capture before applying an interpretation.');
-  if (!proposal.title.trim()) throw new Error('Give the proposed action a title.');
-  if (proposal.kind === 'routine') {
-    if (!proposal.dailyAt) throw new Error('Choose a daily time before applying the routine.');
-    next = transition(next, { type: 'routine', key, time: proposal.dailyAt, timeZone: proposal.timeZone, steps: proposal.steps });
-    getRow(next, key)!.action!.title = proposal.title;
-    return next;
-  }
-  if (item.routine || item.steps.some(step => step.doneAt)) throw new Error('An interpretation cannot replace recorded progress.');
-  item.title = proposal.title;
-  item.steps = proposal.steps.map((title, index) => ({ id: `${item.id}-step-${index + 1}`, title }));
-  item.interpretation = proposal.kind === 'unsupported' ? 'unsupported' : 'supported';
-  item.interpretationMessage = proposal.uncertainty || 'Interpretation applied. Original words are retained.';
-  const original = item.captures.at(-1)!;
-  const reference = original.includes('demo://') ? undefined : capturedReference(original);
-  if (proposal.kind === 'action' && reference) {
-    let thread = next.threads.find(thread => thread.repo.toLowerCase() === reference.repo.toLowerCase()
-      && thread.number === reference.number && thread.kind === 'pr');
-    if (!thread) {
-      thread = {
-        id: `capture:${reference.repo}:${reference.number}`, ...reference, kind: 'pr', source: 'github',
-        title: item.title, reason: 'subscribed', notification: 'done', subscribed: false, state: 'open', events: [],
-        diagnostics: ['Linked from your original capture. Source state has not been fetched.'],
-      };
-      next.threads.push(thread);
-    }
-    const existing = next.actions.find(action => action.id !== item.id && action.threadId === thread.id
-      && (action.status === 'available' || action.status === 'later') && !action.routine
-      && (action.interpretation === 'supported' || action.eventIds.some(id => thread.events.some(event => event.id === id && ['review-request', 'team-request'].includes(event.kind)))));
-    if (existing) {
-      existing.captures.push(...item.captures);
-      if (item.notes && item.notes !== existing.notes) existing.notes = [existing.notes, item.notes].filter(Boolean).join('\n\n');
-      existing.project ||= item.project;
-      existing.nextStep ||= item.nextStep;
-      existing.origin = 'capture';
-      next.actions = next.actions.filter(action => action.id !== item.id);
-      if (next.selectedKey === key) next.selectedKey = `a:${existing.id}`;
-      if (next.activeId === item.id) next.activeId = existing.id;
-    } else {
-      item.threadId = thread.id;
-      item.eventIds = thread.events.filter(event => isRequest(event) && !next.handled.includes(event.id)).map(event => event.id);
-    }
-  }
-  return transition(next, { type: 'clock', now: next.clock });
 }

@@ -1,351 +1,568 @@
-import { expect, test, type Page } from '@playwright/test';
-import { requestSchema, type Evidence, type Request, type Thread } from '../service/src/schema.ts';
-import { snapshotSchema, type NativeSnapshot, type NativeWorkspace } from '../src/platform/native.ts';
-import { desktopEnvelopeSchema } from '../src/runtime/desktop-workspace.ts';
+import { expect } from '@playwright/test';
+import { snapshotSchema } from '../src/platform/native.ts';
+import { assertMigration, at, capture, checkMigratedReader, checkRelaunchedThreadLink, detail, inbox, legacyFixture, row, tasks } from './workspace-fixtures.ts';
+import { evidence, gate, persisted, refresh, test, thread } from './native-fixture.ts';
 
-const at = '2026-09-11T17:00:00Z';
-function evidence(id = 'request-1', kind: Evidence['kind'] = 'review-request'): Evidence {
-  return { id, kind, at, actor: 'octocat', text: 'Review the requested changes.',
-    recipient: { kind: 'user', login: 'viewer', isViewer: true },
-    requestState: kind === 'review-request' ? 'current' : 'not-request', textTruncated: false };
-}
-function thread(events = [evidence()], id = '123'): Thread {
-  return { id, reference: { repo: 'octo/project', number: Number(id), kind: 'pr' }, title: `Requested review ${id}`,
-    reason: 'review_requested', notification: 'unread', updatedAt: at, lastReadAt: null, state: 'open',
-    size: { additions: 20, deletions: 2, changedFiles: 1 }, subscription: 'subscribed', evidence: events,
-    coverage: { timeline: 'complete', newestPage: 1, fetchedPages: [1], observedAt: at } };
-}
-function batch(threads: Thread[], partial = false) {
-  return { batchId: crypto.randomUUID(), fetchedAt: new Date().toISOString(), viewer: 'viewer',
-    status: partial ? 'partial' : 'complete', threads,
-    diagnostics: partial ? [{ scope: 'timeline', code: 'access', threadId: '123', message: 'Some timeline evidence is unavailable.' }] : [],
-    coverage: { notifications: partial ? 'partial' : 'complete', pages: 1, received: threads.length, returned: threads.length, missingMeansDone: false } };
-}
-function gate() {
-  let release!: () => void;
-  const promise = new Promise<void>(resolve => { release = resolve; });
-  return { promise, release };
-}
-class NativeMock {
-  saved: NativeWorkspace = { revision: crypto.randomUUID(), snapshot: null, savedAt: null };
-  calls: string[] = [];
-  requests: Request[] = [];
-  now = at;
-  threads = [thread()];
-  partial = false;
-  corrupt = false;
-  failWrite = false;
-  failSdk = false;
-  holdRead?: ReturnType<typeof gate>;
-  holdRefresh?: ReturnType<typeof gate>;
-  holdWrite?: ReturnType<typeof gate>;
-  holdSdk?: ReturnType<typeof gate>;
-  permission = 'not-determined';
-  get state() { return desktopEnvelopeSchema.parse(this.saved.snapshot!.workspace).state; }
-  private async invoke(command: string, args: Record<string, unknown>) {
-    this.calls.push(command);
-    if (command === 'workspace_read') {
-      if (this.holdRead) await this.holdRead.promise;
-      if (this.corrupt) throw new Error('Saved workspace is damaged. Recover explicitly.');
-      return structuredClone(this.saved);
-    }
-    if (command === 'clock_now') return { now: this.now, timeZone: 'UTC', error: null };
-    if (command === 'workspace_save') {
-      if (this.corrupt) throw new Error('Saved workspace is damaged.');
-      expect(args.expectedRevision).toBe(this.saved.revision);
-      this.saved = { revision: crypto.randomUUID(), snapshot: snapshotSchema.parse(args.snapshot), savedAt: this.now };
-      return structuredClone(this.saved);
-    }
-    if (command === 'reminders_status') return { revision: this.saved.revision, permission: { state: this.permission, alertsEnabled: this.permission === 'granted' },
-      deliveries: [], limitations: 'Closing keeps reminders running. Quit stops them. Sleep and Focus may delay delivery.' };
-    if (command === 'reminders_request_permission') { this.permission = 'granted'; return { state: this.permission, alertsEnabled: true }; }
-    if (command === 'workspace_list_backups') return [];
-    if (command === 'workspace_export_raw') return { id: crypto.randomUUID(), directory: 'isolated-test-export' };
-    if (command === 'launch_github' || command === 'launch_copilot') return { status: 'dispatch-requested', url: 'https://github.com/octo/project/pull/123' };
-    if (command !== 'service_request') throw new Error(`Unexpected command ${command}`);
-    const request = requestSchema.parse(args.request);
-    this.requests.push(request);
-    let result: unknown;
-    switch (request.op) {
-      case 'connection.check':
-        result = { github: { available: true, viewer: 'viewer', scopes: ['repo'] }, copilot: { available: true } };
-        break;
-      case 'github.refresh':
-        if (this.holdRefresh) await this.holdRefresh.promise;
-        result = batch(this.threads, this.partial);
-        break;
-      case 'github.acknowledge':
-      case 'github.unsubscribe':
-        expect(this.state.operations.find(operation => operation.id === request.input.operationId)?.status).toBe('pending');
-        if (this.holdWrite) await this.holdWrite.promise;
-        if (this.failWrite) throw new Error('GitHub write unavailable; no success was confirmed.');
-        result = { ...request.input, action: request.op === 'github.acknowledge' ? 'acknowledge' : 'unsubscribe', status: 'confirmed', confirmedAt: new Date().toISOString() };
-        break;
-      case 'copilot.triage':
-        if (this.holdSdk) await this.holdSdk.promise;
-        if (this.failSdk) throw new Error('Copilot structured output failed. Retry explicitly.');
-        result = { previewOnly: true, suggestedOrder: request.input.items.map(item => item.itemId).reverse(),
-          suggestions: request.input.items.map(item => ({ itemId: item.itemId, evidenceIds: [item.evidence[0]!.id], summary: 'A bounded evidence preview.', uncertainty: 'Inspect the source.', nextAction: 'inspect' })) };
-        break;
-      case 'copilot.reconsider':
-        result = { previewOnly: true, suggestedOrder: request.input.items.map(item => item.itemId).reverse(),
-          reasons: request.input.items.map(item => ({ itemId: item.itemId, reason: 'Consider this available work.' })) };
-        break;
-      case 'copilot.interpretCapture':
-        expect(this.state.actions.some(action => action.id === request.input.captureId && action.captures.includes(request.input.text))).toBe(true);
-        if (this.failSdk) throw new Error('Copilot structured output failed. Retry explicitly.');
-        result = { previewOnly: true, captureId: request.input.captureId, proposal: { kind: 'action', title: 'Editable interpreted action',
-          steps: ['Inspect the source'], dailyAt: null, timeZone: request.input.timeZone, uncertainty: 'Confirm the proposed scope.' } };
-        break;
-      case 'cancel': result = { requestId: request.input.requestId, cancelled: true }; break;
-    }
-    return { v: 1, id: request.id, ok: true, result };
-  }
-  async install(page: Page) {
-    await page.exposeFunction('nativeInvoke', async (command: string, args: Record<string, unknown>) => {
-      try { return { value: await this.invoke(command, args) }; }
-      catch (error) { return { failure: { code: 'io', message: error instanceof Error ? error.message : 'Native test failure', retryable: true } }; }
-    });
-    await page.addInitScript(() => {
-      const callbacks = new Map<number, (event: unknown) => void>();
-      let callbackId = 0;
-      let listener = 0;
-      const target = window as unknown as {
-        isTauri: boolean; __TAURI_INTERNALS__: object; __TAURI_EVENT_PLUGIN_INTERNALS__: object;
-        nativeInvoke(command: string, args: Record<string, unknown>): Promise<{ value?: unknown; failure?: unknown }>;
-        emitNativeTick(payload: unknown): void;
-      };
-      target.isTauri = true;
-      target.__TAURI_INTERNALS__ = {
-        transformCallback(callback: (event: unknown) => void) { callbacks.set(++callbackId, callback); return callbackId; },
-        unregisterCallback(id: number) { callbacks.delete(id); },
-        async invoke(command: string, args: Record<string, unknown> = {}) {
-          if (command === 'plugin:event|listen') { listener = Number(args.handler); return 1; }
-          if (command === 'plugin:event|unlisten') return null;
-          const reply = await target.nativeInvoke(command, args);
-          if (reply.failure) throw reply.failure;
-          return reply.value;
-        },
-      };
-      target.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
-      target.emitNativeTick = payload => callbacks.get(listener)?.({ event: 'workspace://tick', id: 1, payload });
-      Object.defineProperty(window, 'localStorage', { get() { throw new Error('Desktop must never access browser localStorage'); } });
-    });
-  }
-  async tick(page: Page, now: string) {
-    this.now = now;
-    await page.evaluate(now => {
-      (window as unknown as { emitNativeTick(payload: unknown): void }).emitNativeTick({ clock: { now, timeZone: 'UTC', error: null }, reminders: null, error: null });
-    }, now);
-  }
-}
-const detail = (page: Page) => page.getByRole('article', { name: 'Selected item' });
-async function refresh(page: Page) {
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
-}
-async function capture(page: Page, text: string) {
-  await page.getByRole('button', { name: /^Capture/ }).first().click();
-  await page.getByLabel('What do you want to remember?').fill(text);
-  await page.getByRole('button', { name: 'Save capture' }).click();
-}
-
-test('empty native load waits for SQLite, avoids demo/storage/network, and persists capture/notes/relaunch', async ({ page }, testInfo) => {
-  const native = new NativeMock(); native.holdRead = gate(); await native.install(page);
+test('empty native load waits for SQLite and capture, notes and Done persist without demo or startup requests', async ({ page, native }) => {
+  native.holdRead = gate();
   await page.goto('/');
   await expect(page.getByText('Reading saved work...')).toBeVisible();
   await expect(page.getByRole('button', { name: /^Capture/ })).toHaveCount(0);
+  expect(native.calls).not.toContain('workspace_save');
+  expect(native.requests).toEqual([]);
   native.holdRead.release();
-  await expect(page.getByRole('region', { name: 'Working on' })).toContainText('Choose an action');
-  await expect(page.getByRole('button', { name: /Demo scenarios/ })).toHaveCount(0);
-  expect(native.requests).toEqual([]);
-  await capture(page, 'Persistent desktop capture');
-  await page.getByLabel('A note for when you return').fill('Private note survives relaunch');
-  await expect(page.getByLabel('A note for when you return')).toBeFocused();
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  await expect.poll(() => native.state.actions[0]?.notes).toBe('Private note survives relaunch');
-  const active = native.state.activeId;
+  await expect(page.getByText('No threads in this saved inbox')).toBeVisible();
+  await persisted(page);
+  expect(native.state.tasks).toEqual([]);
+  expect(native.state.threads).toEqual([]);
+  expect(native.state.notes).toEqual([]);
+  await expect(page.getByRole('button', { name: /Demo scenarios|Working on|Routines|Triage|Interpret/ })).toHaveCount(0);
+  await capture(page, 'Persistent desktop task');
+  await page.getByLabel('Task notes').fill('Private note survives relaunch');
+  await page.getByRole('checkbox', { name: 'Done', exact: true }).check();
+  await persisted(page);
+  const before = structuredClone(native.state.tasks);
+  expect(before).toEqual([{ id: native.state.selectedKey!.slice(2), title: 'Persistent desktop task',
+    notes: 'Private note survives relaunch', status: 'done', createdAt: at, completedAt: at }]);
   await page.reload();
-  await expect(page.getByLabel('A note for when you return')).toHaveValue('Private note survives relaunch');
-  expect(native.state.activeId).toBe(active);
+  await expect(page.getByLabel('Task notes')).toHaveValue('Private note survives relaunch');
+  await expect(page.getByRole('checkbox', { name: 'Done', exact: true })).toBeChecked();
+  expect(native.state.tasks).toEqual(before);
   expect(native.requests).toEqual([]);
-  expect(native.calls).not.toContain('reminders_request_permission');
-  await page.screenshot({ path: testInfo.outputPath('desktop.png') });
+  expect(native.saved.snapshot?.reminders).toEqual([]);
 });
 
-test('in-flight refresh preserves typing, Done and selection; queue/sticky updates do not reopen reviews', async ({ page }) => {
-  const native = new NativeMock(); await native.install(page); await page.goto('/'); await refresh(page);
-  await page.locator('.row-select').first().click();
+test('selecting threads and typing the first character keeps focus and never creates Tasks', async ({ page, native }) => {
+  native.threads.push(thread([evidence('request-2')], '456'));
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await persisted(page);
+  expect(native.state.tasks).toEqual([]);
+  const notes = page.getByLabel('Thread notes', { exact: true });
+  await notes.focus();
+  await page.keyboard.type('F');
+  await expect(notes).toBeFocused();
+  await page.keyboard.type('irst annotation');
+  await expect(notes).toHaveValue('First annotation');
+  await detail(page).getByRole('button', { name: 'Add note' }).click();
+  await page.getByLabel('Thread note 2').fill('Second annotation');
+  await notes.fill('First independently edited');
+  await page.getByLabel('Thread note 2').fill('Second independently edited');
+  await row(page, 't:456').click();
+  await expect(notes).toHaveValue('');
+  await row(page, 't:123').click();
+  await persisted(page);
+  expect(native.state.tasks).toEqual([]);
+  expect(native.state.notes.map(note => ({ threadId: note.threadId, text: note.text }))).toEqual([
+    { threadId: '123', text: 'First independently edited' }, { threadId: '123', text: 'Second independently edited' },
+  ]);
+  await tasks(page).click();
+  await expect(page.getByText('No open tasks')).toBeVisible();
+  await inbox(page).click();
+  await row(page, 't:123').click();
+  await persisted(page);
+  await page.reload();
+  await expect(notes).toHaveValue('First independently edited');
+  await expect(page.getByLabel('Thread note 2')).toHaveValue('Second independently edited');
+  expect(native.requests.map(request => request.op)).toEqual(['github.refresh']);
+});
+
+for (const view of ['Inbox', 'Tasks'] as const) {
+  test(`capture from ${view} saves exact URL and daily text as standalone Tasks without interpretation`, async ({ page, native }) => {
+    await page.goto('/');
+    await persisted(page);
+    if (view === 'Tasks') await tasks(page).click();
+    const text = `  https://github.com/octo/project/pull/123\nEvery day at 10am, announce, then increase — from ${view}  `;
+    await capture(page, text);
+    await persisted(page);
+    expect(native.state.tasks).toEqual([{ id: native.state.selectedKey!.slice(2), title: text, notes: '', status: 'open', createdAt: at }]);
+    expect(native.state.threads).toEqual([]);
+    expect(native.state.notes).toEqual([]);
+    expect(native.state.draft).toBe('');
+    expect(native.requests).toEqual([]);
+    expect(native.launches).toEqual([]);
+    const captured = structuredClone(native.state.tasks);
+    await page.reload();
+    await expect(detail(page).getByRole('heading')).toHaveText(text);
+    expect(native.state.tasks).toEqual(captured);
+    expect(native.saved.snapshot?.reminders).toEqual([]);
+  });
+}
+
+test('in-flight Refresh preserves newer task text, notes, Done and selection without reopening on new evidence', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Private thread context');
+  await capture(page, 'Task before refresh');
   native.holdRefresh = gate();
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await page.getByLabel('A note for when you return').fill('Typed while refreshing');
-  await expect(page.getByLabel('A note for when you return')).toBeFocused();
-  await detail(page).getByRole('button', { name: 'Done', exact: true }).click();
-  await expect.poll(() => native.state.actions[0]?.status).toBe('done');
-  const selected = native.state.selectedKey;
+  await expect(page.getByRole('button', { name: 'Refreshing...' })).toBeDisabled();
+  await detail(page).getByRole('button', { name: 'Edit text' }).click();
+  await page.getByRole('textbox', { name: 'Task text', exact: true }).fill('Edited during refresh\nKeep exact text');
+  await page.getByRole('button', { name: 'Save text' }).click();
+  await page.getByLabel('Task notes').fill('Typed while refreshing');
+  await expect(page.getByLabel('Task notes')).toBeFocused();
+  await page.getByRole('checkbox', { name: 'Done', exact: true }).check();
+  await persisted(page);
+  const before = structuredClone(native.state);
   native.threads = [thread([evidence(), evidence('queue', 'merge-queue')])];
-  native.holdRefresh.release(); native.holdRefresh = undefined;
+  native.holdRefresh.release();
+  native.holdRefresh = undefined;
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeEnabled();
-  expect(native.state.actions[0]!.notes).toBe('Typed while refreshing');
-  expect(native.state.selectedKey).toBe(selected);
-  expect(native.state.actions[0]!.status).toBe('done');
-  await expect(page.locator('.work-row')).toContainText('informational update');
-  native.threads = [{ ...thread([evidence(), evidence('comment', 'comment')]), reason: 'mention' }];
-  await refresh(page);
-  expect(native.state.actions[0]!.status).toBe('done');
-  native.threads = [thread([evidence(), evidence('new-request')])];
-  await refresh(page);
-  await page.locator('.row-select').first().click();
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  await expect.poll(() => native.state.actions.length).toBe(2);
-  expect(native.state.actions[0]!.status).toBe('done');
+  await persisted(page);
+  expect(native.state.tasks).toEqual(before.tasks);
+  expect(native.state.notes).toEqual(before.notes);
+  expect(native.state.selectedKey).toBe(before.selectedKey);
+  expect(native.state.threads[0]?.state).toBe('queued');
+  for (const event of [evidence('comment', 'comment'), evidence('new-request'), evidence('source-closed', 'closed')]) {
+    native.threads = [thread([evidence(), event])];
+    await refresh(page);
+    expect(native.state.tasks).toEqual(before.tasks);
+    expect(native.state.notes).toEqual(before.notes);
+    expect(native.state.selectedKey).toBe(before.selectedKey);
+  }
+  await page.reload();
+  await expect(page.getByRole('checkbox', { name: 'Done', exact: true })).toBeChecked();
+  await expect(page.getByLabel('Task notes')).toHaveValue('Typed while refreshing');
+  await expect(detail(page).getByRole('heading')).toHaveText('Edited during refresh\nKeep exact text');
 });
 
-test('acknowledgement persists before dispatch and concurrent newer evidence survives completion', async ({ page }) => {
-  const native = new NativeMock(); await native.install(page); await page.goto('/'); await refresh(page);
-  await page.locator('.row-select').first().click();
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
+test('serialized saves keep the newest note while Refresh appends evidence and never show premature saved feedback', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Original saved note');
+  await persisted(page);
+  const original = structuredClone(native.state);
+  native.holdSave = gate();
+  native.holdRefresh = gate();
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('First pending note');
+  await expect(page.locator('.workspace-footer')).toContainText('Saving...');
+  await expect(detail(page)).toContainText('Not saved yet');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Latest note typed during save');
+  expect(native.state.notes).toEqual(original.notes);
+  native.threads.push(thread([evidence('second-request')], '456'));
+  native.holdRefresh.release();
+  native.holdRefresh = undefined;
+  await expect(page.locator('.new-updates')).toContainText('Requested review 456');
+  await expect(page.getByLabel('Thread notes', { exact: true })).toBeFocused();
+  native.holdSave.release();
+  native.holdSave = undefined;
+  await persisted(page);
+  expect(native.maxActiveSaves).toBe(1);
+  expect(native.state.notes).toEqual([{ ...original.notes[0], text: 'Latest note typed during save' }]);
+  expect(native.state.tasks).toEqual([]);
+  expect(native.state.selectedKey).toBe('t:123');
+  expect(native.state.order).toEqual(['t:123', 't:456']);
+  await page.reload();
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Latest note typed during save');
+});
+
+test('acknowledgement waits for persisted intent and leaves concurrently refreshed newer evidence pending', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await capture(page, 'An unrelated task');
+  await inbox(page).click();
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Private note kept through operation');
+  await persisted(page);
+  const before = structuredClone(native.state);
   native.holdRefresh = gate();
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await detail(page).getByRole('button', { name: 'Mark notification done on GitHub' }).click();
+  native.holdSave = gate();
   native.holdWrite = gate();
   await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
+  await expect(page.getByText('Saving intent, then waiting for GitHub confirmation...')).toBeVisible();
+  await expect.poll(() => native.activeSaves).toBe(1);
+  expect(native.requests.filter(request => request.op === 'github.acknowledge')).toEqual([]);
+  native.holdSave.release();
+  native.holdSave = undefined;
   await expect.poll(() => native.requests.filter(request => request.op === 'github.acknowledge').length).toBe(1);
+  const intent = structuredClone(native.state.operations[0]!);
+  expect(intent.eventIds).toEqual(['request-1']);
+  expect(intent.status).toBe('pending');
   native.threads = [thread([evidence(), evidence('later-request')])];
-  native.holdRefresh.release(); native.holdRefresh = undefined;
+  native.holdRefresh.release();
+  native.holdRefresh = undefined;
   await expect.poll(() => native.state.threads[0]!.events.length).toBe(2);
-  native.holdWrite.release(); native.holdWrite = undefined;
+  native.holdWrite.release();
+  native.holdWrite = undefined;
   await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
   await page.getByRole('button', { name: 'Return to workspace' }).click();
-  expect(native.state.handled).toContain('request-1');
-  expect(native.state.handled).not.toContain('later-request');
-  expect(native.state.actions[0]!.status).toBe('available');
+  expect(native.state.handled).toEqual(['request-1']);
+  expect(native.state.threads[0]?.notification).toBe('unread');
+  expect(native.state.operations[0]).toMatchObject({ id: intent.id, status: 'confirmed', eventIds: ['request-1'] });
+  expect(native.state.notes).toEqual(before.notes);
+  expect(native.state.tasks).toEqual(before.tasks);
+  await expect(page.locator('.queue')).toContainText('Requested review 123');
+  expect(JSON.stringify(native.requests)).not.toContain('Private note');
 });
 
-test('failed writes survive relaunch and retry is explicit with original operation context', async ({ page }) => {
-  const native = new NativeMock(); await native.install(page); await page.goto('/'); await refresh(page);
-  await page.locator('.row-select').first().click();
+for (const action of ['Mark notification done on GitHub', 'Unsubscribe on GitHub']) {
+  test(`${action} retains separately editable notes under Earlier threads after relaunch`, async ({ page, native }) => {
+    await page.goto('/');
+    await refresh(page);
+    await capture(page, 'Separate task stays open');
+    await inbox(page).click();
+    await row(page, 't:123').click();
+    await page.getByLabel('Thread notes', { exact: true }).fill('First retained annotation');
+    await detail(page).getByRole('button', { name: 'Add note' }).click();
+    await page.getByLabel('Thread note 2').fill('Second retained annotation');
+    await persisted(page);
+    const before = structuredClone(native.state);
+    await detail(page).getByRole('button', { name: action, exact: true }).click();
+    await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
+    await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
+    await page.getByRole('button', { name: 'Return to workspace' }).click();
+    expect(native.state.tasks).toEqual(before.tasks);
+    expect(native.state.notes).toEqual(before.notes);
+    expect(action.startsWith('Mark') ? native.state.threads[0]?.notification : native.state.threads[0]?.subscription)
+      .toBe(action.startsWith('Mark') ? 'done' : 'unsubscribed');
+    await inbox(page).click();
+    await page.locator('.earlier-threads > summary').click();
+    await page.locator('.earlier-threads').locator('[data-row-key="t:123"] .row-select').click();
+    await page.getByLabel('Thread note 2').fill('Second edited after acknowledgement');
+    await persisted(page);
+    await page.reload();
+    await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('First retained annotation');
+    await expect(page.getByLabel('Thread note 2')).toHaveValue('Second edited after acknowledgement');
+    expect(native.state.tasks).toEqual(before.tasks);
+    expect(native.requests.map(request => request.op)).toEqual(['github.refresh', action.startsWith('Mark') ? 'github.acknowledge' : 'github.unsubscribe']);
+  });
+}
+
+test('failed writes survive relaunch and retry only with the original operation context', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Retain on failed write');
+  await persisted(page);
+  const notes = structuredClone(native.state.notes);
   native.failWrite = true;
   await detail(page).getByRole('button', { name: 'Unsubscribe on GitHub' }).click();
   await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
   await expect(page.getByRole('dialog')).toContainText('write unavailable');
-  await expect.poll(() => native.state.operations[0]?.status).toBe('failed');
-  const id = native.state.operations[0]!.id;
+  expect(native.state.operations[0]?.status).toBe('failed');
+  const operation = structuredClone(native.state.operations[0]!);
+  expect(native.state.notes).toEqual(notes);
+  expect(native.state.threads[0]?.subscription).toBe('subscribed');
   await page.reload();
   await expect(page.getByRole('button', { name: 'Connections', exact: true })).toBeVisible();
   expect(native.requests.filter(request => request.op === 'github.unsubscribe')).toHaveLength(1);
+  native.threads = [thread([evidence(), evidence('later-request')])];
+  await refresh(page);
   native.failWrite = false;
   await page.getByRole('button', { name: 'Connections', exact: true }).click();
   await page.getByRole('button', { name: 'Review and retry' }).click();
   await page.getByRole('button', { name: 'Confirm GitHub change' }).click();
   await expect(page.getByText('GitHub confirmed the change')).toBeVisible();
-  expect(native.state.operations[0]!.id).toBe(id);
-  expect(native.state.threads[0]!.subscription).toBe('unsubscribed');
+  expect(native.state.operations[0]).toMatchObject({ id: operation.id, status: 'confirmed', eventIds: ['request-1'] });
+  expect(native.state.handled).toEqual(['request-1']);
+  expect(native.state.notes).toEqual(notes);
+  expect(native.state.tasks).toEqual([]);
+  const writes = native.requests.filter(request => request.op === 'github.unsubscribe');
+  expect(writes).toHaveLength(2);
+  expect(writes[1]!.input).toEqual(writes[0]!.input);
 });
 
-test('real SDK preview UI handles errors, rejects stale order and excludes private notes', async ({ page }) => {
-  const native = new NativeMock(); await native.install(page); await page.goto('/'); await refresh(page);
-  await page.locator('.row-select').first().click();
-  await page.getByLabel('A note for when you return').fill('Never send this private note');
-  native.failSdk = true;
-  await page.getByRole('button', { name: 'Triage with Copilot', exact: true }).click();
-  await expect(page.getByRole('dialog')).toContainText('structured output failed');
-  native.failSdk = false;
-  await page.getByRole('button', { name: 'Retry Copilot preview' }).click();
-  await expect(page.getByRole('dialog')).toContainText('Copilot considered 1 notifications');
-  await page.getByRole('button', { name: 'Keep current order' }).click();
-  native.holdRefresh = gate();
-  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await page.getByRole('button', { name: 'Triage with Copilot', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Apply suggested order' })).toBeEnabled();
-  native.threads.push(thread([evidence('second-request')], '456'));
-  native.holdRefresh.release(); native.holdRefresh = undefined;
-  await expect.poll(() => native.state.threads.length).toBe(2);
-  await page.getByRole('button', { name: 'Apply suggested order' }).click();
-  await expect(page.getByRole('dialog')).toContainText('Work or evidence changed');
-  expect(JSON.stringify(native.requests.filter(request => request.op.startsWith('copilot.')))).not.toContain('Never send');
+test('external handoff cancel, failure and launch send only identity and never mutate tasks or notes', async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await capture(page, 'Personal task not sent externally');
+  await inbox(page).click();
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Private annotation never sent');
+  await persisted(page);
+  const before = structuredClone(native.state);
+  for (const destination of ['Open on GitHub', 'Review in Copilot']) {
+    const button = detail(page).getByRole('button', { name: destination, exact: true });
+    const count = native.launches.length;
+    await button.click();
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(button).toBeFocused();
+    expect(native.launches).toHaveLength(count);
+    await button.click();
+    native.failLaunch = true;
+    await page.getByRole('button', { name: 'Request launch' }).click();
+    await expect(page.getByRole('dialog')).toContainText('destination app is unavailable');
+    native.failLaunch = false;
+    await page.getByRole('button', { name: 'Retry', exact: true }).click();
+    await expect(page.getByText('Launch requested, not completed')).toBeVisible();
+    await page.getByRole('button', { name: 'Return to workspace' }).click();
+    expect(native.state).toEqual(before);
+    expect(native.launches.slice(count)).toEqual([0, 1].map(() => ({
+      command: destination === 'Open on GitHub' ? 'launch_github' : 'launch_copilot',
+      args: { identity: { source: 'github', owner: 'octo', repo: 'project', kind: 'pr', number: 123 } },
+    })));
+  }
 });
 
-test('capture interpretation previews editable proposal without losing original or notes', async ({ page }) => {
-  const native = new NativeMock(); await native.install(page); await page.goto('/');
-  await capture(page, 'Original capture stays verbatim');
-  await page.getByLabel('A note for when you return').fill('Keep my edits');
-  await page.getByRole('button', { name: 'Interpret with Copilot' }).click();
-  await expect(page.getByLabel('Proposed action')).toHaveValue('Editable interpreted action');
-  await page.getByLabel('Proposed action').fill('My edited proposal');
-  await page.getByRole('button', { name: 'Apply proposal' }).click();
-  await expect(detail(page).getByRole('heading', { name: 'My edited proposal' })).toBeVisible();
-  expect(native.state.actions[0]!.captures).toEqual(['Original capture stays verbatim']);
-  expect(native.state.actions[0]!.notes).toBe('Keep my edits');
-});
-
-test('manual routine native clock, snooze and missed days preserve current work and original timestamps', async ({ page }) => {
-  const native = new NativeMock(); await native.install(page); await page.goto('/');
-  await capture(page, 'Daily commitment');
-  await page.getByRole('button', { name: 'Set up daily routine manually' }).click();
-  await page.getByLabel('Daily time').fill('17:10');
-  await page.getByLabel('Ordered steps').fill('Announce\nIncrease');
-  await page.getByRole('button', { name: 'Save routine' }).click();
-  await expect.poll(() => native.saved.snapshot?.reminders.length).toBe(1);
-  const occurrence = native.saved.snapshot!.reminders[0]!.occurrenceId;
-  await capture(page, 'Chosen current work');
-  await detail(page).getByRole('button', { name: 'Work on this', exact: true }).click();
-  await expect.poll(() => native.state.activeId).not.toBeNull();
-  const active = native.state.activeId;
-  await native.tick(page, '2026-09-11T17:10:00Z');
-  await expect(page.getByRole('region', { name: 'Local reminders' })).toBeVisible();
-  await page.getByRole('button', { name: 'Snooze 30m' }).click();
-  await expect(page.getByRole('region', { name: 'Local reminders' })).toHaveCount(0);
-  await expect.poll(() => native.saved.snapshot!.reminders[0]!.snoozedUntil).toBe('2026-09-11T17:40:00Z');
-  expect(native.saved.snapshot!.reminders[0]!.occurrenceId).toBe(occurrence);
-  await native.tick(page, '2026-09-11T17:40:00Z');
-  await page.getByRole('button', { name: 'Routines', exact: true }).click();
-  await page.locator('.row-select').first().click();
-  await detail(page).getByRole('checkbox').first().check();
-  await expect.poll(() => native.state.actions[0]!.steps[0]!.doneAt).toBeTruthy();
-  const timestamp = native.state.actions[0]!.steps[0]!.doneAt;
-  await native.tick(page, '2026-09-14T17:40:00Z');
-  await expect(detail(page)).toContainText('Recorded steps have not been repeated');
-  expect(native.state.actions[0]!.steps[0]!.doneAt).toBe(timestamp);
-  expect(native.state.activeId).toBe(active);
+test('startup, focus, elapsed time, edits and navigation never fetch; failed, partial and missing source responses retain history', async ({ page, native }) => {
+  await page.goto('/');
+  await persisted(page);
+  await capture(page, 'Offline task');
+  await page.getByLabel('Task notes').fill('Offline note');
+  await inbox(page).click();
+  await persisted(page);
+  const beforeTime = structuredClone(native.saved);
+  native.now = '2026-09-14T17:00:00Z';
+  await page.clock.setFixedTime(new Date(native.now));
+  await page.clock.fastForward(3 * 24 * 60 * 60 * 1000);
+  await page.evaluate(() => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+  expect(native.saved).toEqual(beforeTime);
   expect(native.requests).toEqual([]);
-});
-
-test('actual team context and partial timeline errors remain explicit without inventing requests', async ({ page }) => {
-  const native = new NativeMock();
-  native.threads = [thread([{ ...evidence(), recipient: { kind: 'team', team: 'actual-org/actual-team', viewerMembership: 'member' } }])];
-  await native.install(page); await page.goto('/'); await refresh(page);
-  await expect(page.locator('.work-row')).toContainText('actual-org/actual-team');
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Inbox', exact: true })).toBeVisible();
+  expect(native.requests).toEqual([]);
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Remember saved evidence');
+  await persisted(page);
+  const before = structuredClone(native.state);
+  native.failRefresh = true;
+  await refresh(page);
+  await expect(page.getByText('Refresh failed; showing saved work')).toBeVisible();
+  expect(native.state.refresh.lastSuccessAt).toBe(before.refresh.lastSuccessAt);
+  expect(native.state.threads[0]!.events[0]!.summary).toBe('Review the requested changes.');
+  native.failRefresh = false;
   native.partial = true;
   native.threads = [{ ...thread([]), coverage: { timeline: 'unavailable', newestPage: 0, fetchedPages: [], observedAt: at } }];
   await refresh(page);
   await expect(page.getByText('Some activity could not be refreshed')).toBeVisible();
-  await expect(page.locator('.work-row')).toContainText('Incomplete request evidence');
+  await expect(detail(page)).toContainText('Some timeline evidence is unavailable.');
+  expect(native.state.threads[0]!.events.some(event => event.id === 'request-1')).toBe(true);
+  native.partial = false;
+  native.threads = [];
+  await refresh(page);
+  expect(native.state.refresh.status).toBe('ok');
+  expect(native.state.threads).toHaveLength(1);
+  expect(native.state.notes).toEqual(before.notes);
+  expect(native.state.tasks).toEqual(before.tasks);
+  expect(native.requests.map(request => request.op)).toEqual(Array(4).fill('github.refresh'));
 });
 
-test('corrupt SQLite never exposes fixtures or an editable fallback', async ({ page }) => {
-  const native = new NativeMock(); native.corrupt = true; await native.install(page); await page.goto('/');
-  await expect(page.getByRole('alert')).toContainText('damaged');
-  await expect(page.getByRole('button', { name: /^Capture/ })).toHaveCount(0);
-  expect(native.calls).not.toContain('workspace_save');
+test('save failure retains latest pending notes and explicit retry saves them before relaunch', async ({ page, native }) => {
+  await page.goto('/');
+  await capture(page, 'Persistent original task');
+  await persisted(page);
+  native.failSave = true;
+  await page.getByLabel('Task notes').fill('First pending edit');
+  await expect(page.getByRole('alert')).toContainText('Your changes are not saved');
+  await page.getByLabel('Task notes').fill('Latest pending edit');
+  expect(native.state.tasks[0]?.notes).toBe('');
+  await expect(page.getByLabel('Task notes')).toHaveValue('Latest pending edit');
+  native.failSave = false;
+  await page.getByRole('button', { name: 'Retry storage', exact: true }).click();
+  await persisted(page);
+  expect(native.state.tasks[0]?.notes).toBe('Latest pending edit');
+  await page.reload();
+  await expect(page.getByLabel('Task notes')).toHaveValue('Latest pending edit');
   expect(native.requests).toEqual([]);
 });
 
-test('native destinations and narrow list/back preserve work and keyboard focus', async ({ page }, testInfo) => {
-  const native = new NativeMock(); await native.install(page); await page.setViewportSize({ width: 480, height: 844 }); await page.goto('/'); await refresh(page);
-  await expect(page.locator('.work-row').getByRole('button', { name: 'Open on GitHub' })).toBeVisible();
-  await page.locator('.row-select').first().click();
-  await detail(page).getByRole('button', { name: 'Review in Copilot' }).click();
-  await page.keyboard.press('Escape');
-  await expect(detail(page).getByRole('button', { name: 'Review in Copilot' })).toBeFocused();
-  await detail(page).getByRole('button', { name: 'Review in Copilot' }).click();
+test('revision conflict keeps both copies and backs up the competing save before replacement', async ({ page, native }) => {
+  await page.goto('/');
+  await capture(page, 'Task before conflict');
+  await persisted(page);
+  const other = structuredClone(native.saved);
+  other.revision = crypto.randomUUID();
+  const otherState = other.snapshot!.workspace.state as unknown as { tasks: { notes: string }[] };
+  otherState.tasks[0]!.notes = 'Other window saved this';
+  native.saved = other;
+  await page.getByLabel('Task notes').fill('My pending copy');
+  await expect(page.getByRole('alert')).toContainText('Another writer changed');
+  expect(native.state.tasks[0]?.notes).toBe('Other window saved this');
+  await page.getByRole('button', { name: 'Back up saved copy & use this one' }).click();
+  await persisted(page);
+  expect([...native.backups.values()]).toEqual([other]);
+  expect(native.state.tasks[0]?.notes).toBe('My pending copy');
+  const backupCall = native.calls.lastIndexOf('workspace_create_backup');
+  expect(backupCall).toBeLessThan(native.calls.lastIndexOf('workspace_save'));
+});
+
+test('corrupt SQLite never exposes a fallback and restores only an explicitly selected backup', async ({ page, native }) => {
+  const legacy = legacyFixture(true);
+  const backupId = crypto.randomUUID();
+  native.backups.set(backupId, {
+    revision: crypto.randomUUID(), savedAt: at,
+    snapshot: snapshotSchema.parse({ formatVersion: 1, workspace: { version: 1, state: legacy, scroll: {} }, reminders: [] }),
+  });
+  native.corrupt = true;
+  const damaged = structuredClone(native.saved);
+  await page.goto('/');
+  await expect(page.getByRole('alert')).toContainText('damaged');
+  await expect(page.getByRole('button', { name: /^Capture/ })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Retry reading saved work' }).click();
+  await expect(page.getByRole('alert')).toContainText('damaged');
+  expect(native.calls).not.toContain('workspace_save');
+  expect(native.requests).toEqual([]);
+  await page.getByRole('button', { name: 'Backups & recovery' }).click();
+  await page.getByRole('button', { name: 'Preserve database files' }).click();
+  await expect(page.getByRole('dialog')).toContainText('Original database files preserved locally');
+  expect(native.rawExports).toEqual([damaged]);
+  await page.getByLabel('Saved backup').selectOption(backupId);
+  await expect(page.getByRole('button', { name: 'Restore selected backup' })).toBeDisabled();
+  expect(native.saved).toEqual(damaged);
+  await page.getByRole('checkbox', { name: /I exported any pending edits/ }).check();
+  await page.getByRole('button', { name: 'Restore selected backup' }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await persisted(page);
+  assertMigration(native.state, legacy);
+  expect(native.saved.snapshot?.reminders).toEqual([]);
+  expect(native.requests).toEqual([]);
+});
+
+test('v2 migration creates a durable original before writing v3 and relaunch does not duplicate annotations or schedule reminders', async ({ page, native }) => {
+  const legacy = legacyFixture(true);
+  native.saved.snapshot = snapshotSchema.parse({
+    formatVersion: 1, workspace: { version: 1, state: legacy, scroll: {} },
+    reminders: [{ id: 'routine', occurrenceId: 'old-occurrence', dueAt: at, timeZone: 'UTC',
+      daily: { time: '10:00', timeZone: 'UTC' } }],
+  });
+  const original = structuredClone(native.saved);
+  native.holdSave = gate();
+  await page.goto('/');
+  await expect.poll(() => native.writes.length).toBe(1);
+  expect([...native.backups.values()]).toEqual([original]);
+  expect(native.saved).toEqual(original);
+  expect(native.calls.indexOf('workspace_create_backup')).toBeLessThan(native.calls.indexOf('workspace_save'));
+  expect(native.writes[0]!.reminders).toEqual([]);
+  native.holdSave.release();
+  native.holdSave = undefined;
+  await persisted(page);
+  assertMigration(native.state, legacy);
+  await checkMigratedReader(page);
+  await persisted(page);
+  const beforeReload = structuredClone(native.state);
+  await page.reload();
+  await persisted(page);
+  expect(native.state.tasks).toEqual(beforeReload.tasks);
+  expect(native.state.notes).toEqual(beforeReload.notes);
+  expect([...native.backups.values()]).toEqual([original]);
+  await checkRelaunchedThreadLink(page);
+  await persisted(page);
+  expect(native.state.selectedKey).toBe('t:123');
+  native.now = '2026-09-15T17:00:00Z';
+  await page.clock.setFixedTime(new Date(native.now));
+  await page.clock.fastForward(4 * 24 * 60 * 60 * 1000);
+  expect(native.state.tasks).toEqual(beforeReload.tasks);
+  expect(native.saved.snapshot?.reminders).toEqual([]);
+  expect(native.requests).toEqual([]);
+  native.threads = [thread([evidence(), evidence('new-request-after-migration')])];
+  await refresh(page);
+  expect(native.state.refresh.status).toBe('ok');
+  expect(native.state.tasks).toEqual(beforeReload.tasks);
+  expect(native.state.notes).toEqual(beforeReload.notes);
+});
+
+test('migrated capture placeholders keep source links but hide notification writes until Refresh resolves them', async ({ page, native }) => {
+  const legacy = legacyFixture(true);
+  const placeholderId = 'capture:octo/project:123';
+  legacy.threads[0]!.id = placeholderId;
+  legacy.threads[0]!.events = [];
+  legacy.actions = legacy.actions.map(action => action.threadId
+    ? { ...action, threadId: placeholderId, eventIds: [], interpretation: 'supported' } : action);
+  native.saved.snapshot = snapshotSchema.parse({
+    formatVersion: 1, workspace: { version: 1, state: legacy, scroll: {} }, reminders: [],
+  });
+  await page.goto('/');
+  await persisted(page);
+  await tasks(page).click();
+  await row(page, 'a:captured').click();
+  await detail(page).getByRole('button', { name: 'Open thread notes' }).click();
+  await expect(page.getByLabel('Thread note 3')).toHaveValue('Captured thread annotation');
+  await expect(detail(page).getByRole('button', { name: 'Mark notification done on GitHub' })).toHaveCount(0);
+  await expect(detail(page).getByRole('button', { name: 'Unsubscribe on GitHub' })).toHaveCount(0);
+  await expect(detail(page)).toContainText('Refresh to look for a GitHub notification');
+  await expect(detail(page).getByRole('button', { name: 'Review in Copilot' })).toBeVisible();
+  await detail(page).getByRole('button', { name: 'Open on GitHub', exact: true }).click();
   await page.getByRole('button', { name: 'Request launch' }).click();
-  await expect(page.getByText('Launch requested, not completed')).toBeVisible();
+  await expect(page.getByRole('dialog')).toContainText('Launch requested, not completed');
+  expect(native.launches[0]!.args).toEqual({ identity: { source: 'github', owner: 'octo', repo: 'project', kind: 'pr', number: 123 } });
   await page.getByRole('button', { name: 'Return to workspace' }).click();
+  expect(native.requests).toEqual([]);
+  await refresh(page);
+  expect(native.state.operations).toEqual([]);
+  expect(native.state.selectedKey).toBe('t:123');
+  await expect(detail(page).getByRole('button', { name: 'Mark notification done on GitHub' })).toBeVisible();
+  await expect(detail(page).getByRole('button', { name: 'Unsubscribe on GitHub' })).toBeVisible();
+  await page.reload();
+  await persisted(page);
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('First distinct annotation');
+  await expect(page.getByLabel('Thread note 2')).toHaveValue('Second distinct annotation');
+  await expect(page.getByLabel('Thread note 3')).toHaveValue('Captured thread annotation');
+  await tasks(page).click();
+  await row(page, 'a:routine').click();
+  await expect(page.getByLabel('Task notes')).toHaveValue('Routine notes');
+  expect(native.requests.map(request => request.op)).toEqual(['github.refresh']);
+});
+
+test('failed migration backup blocks editing and writes until preserving the original succeeds', async ({ page, native }) => {
+  native.saved.snapshot = snapshotSchema.parse({
+    formatVersion: 1, workspace: { version: 1, state: legacyFixture(true), scroll: {} }, reminders: [],
+  });
+  const original = structuredClone(native.saved);
+  native.failBackup = true;
+  await page.goto('/');
+  await expect(page.getByRole('alert')).toContainText('Original backup could not be preserved');
+  await expect(page.getByRole('button', { name: /^Capture/ })).toHaveCount(0);
+  expect(native.writes).toEqual([]);
+  expect(native.saved).toEqual(original);
+  native.failBackup = false;
+  await page.getByRole('button', { name: 'Retry reading saved work' }).click();
+  await persisted(page);
+  expect([...native.backups.values()]).toEqual([original]);
+  expect(native.state.version).toBe(3);
+  expect(native.requests).toEqual([]);
+});
+
+test('desktop and 390px layout retain destinations, keyboard focus and bounded pane geometry', async ({ page, native }, testInfo) => {
+  native.threads.push({ ...thread([evidence('issue-comment', 'comment')], '456'),
+    reference: { repo: 'octo/project', number: 456, kind: 'issue' }, title: 'A long source title with context that must wrap without hiding GitHub and Copilot destinations' });
+  await page.goto('/');
+  await refresh(page);
+  for (const source of await page.locator('.work-row').all()) {
+    await expect(source.getByRole('button', { name: 'Open on GitHub', exact: true })).toBeVisible();
+    await expect(source.getByRole('button', { name: /Review in Copilot|Open in Copilot/ })).toBeVisible();
+  }
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Private notes stay beside this saved thread.');
+  await persisted(page);
+  await expect(page.locator('.sidebar')).toBeVisible();
+  await expect(page.locator('.queue')).toBeVisible();
+  await expect(detail(page)).toBeVisible();
+  const bounds = await Promise.all([page.locator('.sidebar'), page.locator('.queue'), detail(page)].map(locator => locator.boundingBox()));
+  expect(bounds[0]!.x + bounds[0]!.width).toBeLessThanOrEqual(bounds[1]!.x);
+  expect(bounds[1]!.x + bounds[1]!.width).toBeLessThanOrEqual(bounds[2]!.x);
+  expect(bounds[2]!.x + bounds[2]!.width).toBeLessThanOrEqual(1440);
+  await page.screenshot({ path: testInfo.outputPath('desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Back to list' }).click();
   await expect(page.locator('.queue')).toBeVisible();
-  expect(native.calls).toContain('launch_copilot');
-  expect(native.state.actions).toEqual([]);
+  await row(page, 't:456').focus();
+  await page.keyboard.press('Enter');
+  const notes = page.getByLabel('Thread notes', { exact: true });
+  await notes.focus();
+  await page.keyboard.type('N');
+  await expect(notes).toBeFocused();
+  await page.keyboard.type('arrow note stays focused');
+  await expect(notes).toHaveValue('Narrow note stays focused');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const narrow = await detail(page).boundingBox();
+  expect(narrow!.x).toBeGreaterThanOrEqual(0);
+  expect(narrow!.x + narrow!.width).toBeLessThanOrEqual(390);
+  await detail(page).evaluate(element => { element.scrollTop = 0; });
   await page.screenshot({ path: testInfo.outputPath('narrow.png') });
+  await page.keyboard.press('Control+k');
+  await expect(page.getByLabel('What do you want to remember?')).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(notes).toBeFocused();
+  await detail(page).getByRole('button', { name: 'Open in Copilot', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(detail(page).getByRole('button', { name: 'Open in Copilot', exact: true })).toBeFocused();
+  expect(native.state.tasks).toEqual([]);
 });

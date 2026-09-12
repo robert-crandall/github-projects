@@ -10,7 +10,6 @@ export type WorkspaceView = {
   desktop?: {
     saving: boolean; refreshing: boolean; refresh: () => void;
     open: (destination: Destination) => void;
-    triage: (kind: 'triage' | 'reconsider') => void;
-    interpret: (row: Row) => void; routine: (row: Row) => void; connections: () => void;
+    connections: () => void;
   };
 };

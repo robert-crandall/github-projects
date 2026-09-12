@@ -1,6 +1,6 @@
 > For a designer (human or LLM) working on this app. Read alongside [`PRODUCT.md`](../PRODUCT.md).
 
-> These reusable constraints apply to the greenfield replacement. `PRODUCT.md` owns its workflow: a stable Working on anchor, compact list/detail views, and manual GitHub refresh. "One primary thing" does not mean an automatically changing recommendation card.
+> These reusable constraints apply to the thread-first client. `PRODUCT.md` owns its workflow: Inbox and Tasks, a compact list and reader, and manual GitHub refresh. "One primary thing" does not mean an automatically changing recommendation card.
 
 > This is a set of **opinionated design constraints**, not a persona exercise or a diagnosis. It captures *how this user's mind works with software* so your hundred small decisions land right where the PRD is silent. Treat it as the generative ruleset; when in doubt, design toward these.
 

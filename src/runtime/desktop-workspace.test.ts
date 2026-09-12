@@ -1,66 +1,71 @@
 import { expect, test } from 'bun:test';
-import { createNativePlatform, type NativeSnapshot, type NativeWorkspace } from '../platform/native.ts';
+import { createNativePlatform, snapshotSchema, type NativeWorkspace } from '../platform/native.ts';
+import { legacyFixture } from '../domain/test-fixtures.ts';
 import { DesktopWorkspace } from './desktop-workspace.ts';
 
 const now = '2026-09-11T20:00:00Z';
-function fixture() {
-  let saved: NativeWorkspace = { revision: crypto.randomUUID(), snapshot: null, savedAt: null };
+function fixture(initial?: NativeWorkspace) {
+  let saved: NativeWorkspace = initial ?? { revision: crypto.randomUUID(), snapshot: null, savedAt: null };
   const commands: string[] = [];
+  const backups: NativeWorkspace[] = [];
   let fail = false;
-  let currentTime = now;
+  let failBackup = false;
   const platform = createNativePlatform(async (command, args) => {
     commands.push(command);
     if (command === 'workspace_read') return structuredClone(saved);
-    if (command === 'clock_now') return { now: currentTime, timeZone: 'UTC', error: null };
+    if (command === 'clock_now') return { now, timeZone: 'UTC', error: null };
+    if (command === 'workspace_create_backup') {
+      if (failBackup) throw { code: 'io', retryable: true, message: 'Backup failed' };
+      expect(args?.expectedRevision).toBe(saved.revision);
+      backups.push(structuredClone(saved));
+      return { id: crypto.randomUUID(), createdAt: now };
+    }
     if (command === 'workspace_save') {
       if (fail) throw { code: 'storage-unavailable', retryable: true, message: 'Storage unavailable; pending work is retained.' };
       if (args?.expectedRevision !== saved.revision) throw { code: 'revision-conflict', retryable: false, message: 'Saved copy changed.' };
-      saved = { revision: crypto.randomUUID(), snapshot: args?.snapshot as NativeSnapshot, savedAt: now };
+      saved = { revision: crypto.randomUUID(), snapshot: snapshotSchema.parse(args?.snapshot), savedAt: now };
       return structuredClone(saved);
     }
     throw new Error(`Unexpected command ${command}`);
   });
-  return { platform, commands, saved: () => saved, fail: (value: boolean) => { fail = value; }, clock: (value: string) => { currentTime = value; } };
+  return { platform, commands, backups, saved: () => saved, fail: (value: boolean) => { fail = value; }, failBackup: () => { failBackup = true; } };
 }
 
-test('native workspace starts empty and persisted captures, notes and chosen work survive a fresh controller', async () => {
+test('native captures, notes and Done survive a fresh controller without model calls or reminder schedules', async () => {
   const mock = fixture();
   const first = new DesktopWorkspace(mock.platform);
   expect(first.getSnapshot().workspace).toBeNull();
-  await first.load();
-  await first.flush();
-  expect(first.state.clock).toBe(now);
-  expect(first.state.actions).toEqual([]);
+  await first.load(); await first.flush();
+  expect(first.state.tasks).toEqual([]);
   expect(first.state.threads).toEqual([]);
   expect(mock.commands).toEqual(['workspace_read', 'clock_now', 'workspace_save']);
-  first.dispatch({ type: 'draft', text: 'Original capture' });
+  first.dispatch({ type: 'draft', text: 'Original capture\nMore text' });
   first.dispatch({ type: 'capture' });
   const key = first.state.selectedKey!;
   first.dispatch({ type: 'edit', key, notes: 'Private scratch note' });
-  first.dispatch({ type: 'start', key });
+  first.dispatch({ type: 'done', key });
   await first.flush();
-  expect(mock.saved().snapshot?.workspace.version).toBe(1);
   const second = new DesktopWorkspace(mock.platform);
-  await second.load();
-  expect(second.state.actions[0]!.captures).toEqual(['Original capture']);
-  expect(second.state.actions[0]!.notes).toBe('Private scratch note');
-  expect(second.state.activeId).toBe(first.state.activeId);
+  await second.load(); await second.flush();
+  expect(second.state.tasks[0]!.title).toBe('Original capture\nMore text');
+  expect(second.state.tasks[0]!.notes).toBe('Private scratch note');
+  expect(second.state.tasks[0]!.status).toBe('done');
   expect(second.state.selectedKey).toBe(key);
+  expect(second.state.view).toBe('tasks');
+  expect(mock.saved().snapshot?.reminders).toEqual([]);
 });
 
-test('native clock-only ticks do not produce a save/tick loop or change current work', async () => {
+test('local changes use current timestamps without relying on retired native clock ticks', async () => {
   const mock = fixture();
   const workspace = new DesktopWorkspace(mock.platform);
-  await workspace.load();
+  await workspace.load(); await workspace.flush();
+  const before = Date.now();
+  workspace.dispatch({ type: 'draft', text: 'Created now, not at launch' });
+  workspace.dispatch({ type: 'capture' });
   await workspace.flush();
-  const count = mock.commands.length;
-  for (const now of ['2026-09-11T20:00:15Z', '2026-09-11T20:00:30Z', '2026-09-11T20:00:45Z']) {
-    workspace.clock({ clock: { now, timeZone: 'UTC', error: null }, reminders: null, error: null });
-  }
-  await workspace.flush();
-  expect(mock.commands.length).toBe(count);
-  expect(workspace.state.clock).toBe('2026-09-11T20:00:45Z');
-  expect(workspace.state.activeId).toBeNull();
+  expect(Date.parse(workspace.state.tasks[0]!.createdAt)).toBeGreaterThanOrEqual(before);
+  expect(Date.parse(workspace.state.tasks[0]!.createdAt)).toBeLessThanOrEqual(Date.now());
+  expect(mock.commands.filter(command => command === 'clock_now')).toHaveLength(1);
 });
 
 test('corrupt native load never exposes a writable empty fallback or overwrites saved data', async () => {
@@ -82,56 +87,54 @@ test('corrupt native load never exposes a writable empty fallback or overwrites 
 test('storage failure retains pending work and only explicit retry reports saved', async () => {
   const mock = fixture();
   const workspace = new DesktopWorkspace(mock.platform);
-  await workspace.load();
-  await workspace.flush();
+  await workspace.load(); await workspace.flush();
   mock.fail(true);
   workspace.dispatch({ type: 'draft', text: 'Retain this' });
   await expect(workspace.flush()).rejects.toThrow('Storage unavailable');
   workspace.dispatch({ type: 'draft', text: 'Newest pending capture' });
   expect(workspace.getSnapshot().persistence.pending).toBe(true);
-  expect(workspace.getSnapshot().persistence.error).toContain('Storage unavailable');
   mock.fail(false);
   await workspace.retryStorage();
   expect(workspace.getSnapshot().persistence.pending).toBe(false);
   expect(workspace.getSnapshot().feedback).toContain('saved on this Mac');
 });
 
-test('clock-driven routine state persists once and relaunch saves missed-day reconciliation before Saved', async () => {
-  const mock = fixture();
+function legacySnapshot(): NativeWorkspace {
+  return {
+    revision: crypto.randomUUID(), savedAt: now,
+    snapshot: snapshotSchema.parse({ formatVersion: 1, workspace: { version: 1, state: legacyFixture(true), scroll: {} },
+      reminders: [{ id: 'routine', occurrenceId: 'routine:old', dueAt: now, timeZone: 'UTC', daily: { time: '10:00', timeZone: 'UTC' } }] }),
+  };
+}
+
+test('desktop migration backs up v2 before saving notes and Tasks with schedules cleared atomically', async () => {
+  const original = legacySnapshot();
+  const mock = fixture(original);
+  const workspace = new DesktopWorkspace(mock.platform);
+  await workspace.load(); await workspace.flush();
+  expect(mock.commands).toEqual(['workspace_read', 'clock_now', 'workspace_create_backup', 'workspace_save']);
+  expect(mock.backups).toEqual([original]);
+  expect(mock.saved().snapshot?.reminders).toEqual([]);
+  expect(workspace.state.notes.map(note => note.text)).toEqual(['First distinct annotation', 'Second distinct annotation', 'Captured thread annotation']);
+  expect(workspace.state.tasks.map(task => task.id)).toEqual(['captured', 'routine']);
+  workspace.dispatch({ type: 'note', threadId: workspace.state.notes[0]!.threadId, noteId: workspace.state.notes[0]!.id, text: 'Newest annotation' });
+  await workspace.flush();
+  const next = new DesktopWorkspace(mock.platform);
+  await next.load(); await next.flush();
+  expect(mock.backups).toEqual([original]);
+  expect(next.state.notes[0]!.text).toBe('Newest annotation');
+  expect(mock.saved().snapshot?.reminders).toEqual([]);
+  expect(mock.commands.some(command => command.startsWith('reminders_'))).toBe(false);
+});
+
+test('failed migration backup blocks conversion and leaves original workspace recoverable', async () => {
+  const original = legacySnapshot();
+  const mock = fixture(original);
+  mock.failBackup();
   const workspace = new DesktopWorkspace(mock.platform);
   await workspace.load();
-  workspace.dispatch({ type: 'draft', text: 'My scheduled routine' });
-  workspace.dispatch({ type: 'capture' });
-  const key = workspace.state.selectedKey!;
-  workspace.dispatch({ type: 'routine', key, time: '20:10', timeZone: 'UTC', steps: ['Announce', 'Increase'] });
-  await workspace.flush();
-  const original = mock.saved().snapshot!.reminders[0]!.occurrenceId;
-  const writes = () => mock.commands.filter(command => command === 'workspace_save').length;
-  const before = writes();
-  const tick = (now: string) => workspace.clock({ clock: { now, timeZone: 'UTC', error: null }, reminders: null, error: null });
-  tick('2026-09-11T20:10:00Z');
-  await workspace.flush();
-  expect(writes()).toBe(before + 1);
-  expect(workspace.state.actions[0]!.routine!.dueAt).toBe('2026-09-11T20:10:00Z');
-  expect(mock.saved().snapshot!.reminders[0]!.occurrenceId).toBe(original);
-  tick('2026-09-11T20:10:01Z');
-  await workspace.flush();
-  expect(writes()).toBe(before + 1);
-  workspace.dispatch({ type: 'step', key, stepId: workspace.state.actions[0]!.steps[0]!.id });
-  await workspace.flush();
-  const stepTime = workspace.state.actions[0]!.steps[0]!.doneAt;
-  mock.clock('2026-09-14T20:10:00Z');
-  const relaunched = new DesktopWorkspace(mock.platform);
-  await relaunched.load();
-  expect(relaunched.getSnapshot().persistence.pending).toBe(true);
-  await relaunched.flush();
-  expect(relaunched.getSnapshot().persistence.pending).toBe(false);
-  expect(relaunched.state.actions[0]!.routine!.history).toHaveLength(3);
-  expect(relaunched.state.actions[0]!.routine!.nextDueAt).toBe('2026-09-15T20:10:00Z');
-  expect(relaunched.state.actions[0]!.steps[0]!.doneAt).toBe(stepTime);
-  expect(mock.saved().snapshot!.reminders[0]!.occurrenceId).toBe(original);
-  const afterReconcile = writes();
-  relaunched.clock({ clock: { now: '2026-09-14T20:10:01Z', timeZone: 'UTC', error: null }, reminders: null, error: null });
-  await relaunched.flush();
-  expect(writes()).toBe(afterReconcile);
+  expect(workspace.getSnapshot().workspace).toBeNull();
+  expect(workspace.getSnapshot().loadError).toContain('Backup failed');
+  expect(mock.saved()).toEqual(original);
+  expect(mock.commands).not.toContain('workspace_save');
 });

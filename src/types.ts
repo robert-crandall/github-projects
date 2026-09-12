@@ -59,7 +59,7 @@ const undoSchema = z.object({
   activeBefore: z.string().nullable(), activeAfter: z.string().nullable(),
   handledAdded: z.array(z.string()),
 });
-export const stateSchema = z.object({
+export const legacyStateSchema = z.object({
   version: z.literal(2), clock: time, timeZone: z.string(),
   runtime: z.enum(['demo', 'desktop']).optional(),
   threads: z.array(threadSchema), actions: z.array(actionSchema), staged: z.array(eventSchema),
@@ -75,32 +75,52 @@ export const stateSchema = z.object({
   operations: z.array(externalOperationSchema).default([]),
 });
 
+export const historySchema = actionSchema.omit({ notes: true, title: true });
+export const taskSchema = z.object({
+  id: z.string(), title: z.string(), notes: z.string(), status: z.enum(['open', 'done']),
+  createdAt: time, completedAt: time.optional(), history: historySchema.optional(), threadId: z.string().optional(),
+});
+export const noteSchema = z.object({
+  id: z.string(), threadId: z.string(), text: z.string(),
+  sourceTitle: z.string().optional(), history: historySchema.optional(),
+});
+export const stateSchema = legacyStateSchema.omit({
+  version: true, actions: true, activeId: true, view: true, undo: true, failures: true,
+}).extend({
+  version: z.literal(3), tasks: z.array(taskSchema), notes: z.array(noteSchema),
+  view: z.enum(['inbox', 'tasks']),
+  failures: z.object({ refresh: z.enum(['none', 'partial', 'error']), storage: z.boolean(), external: z.boolean() }),
+  undo: z.array(z.object({ before: taskSchema, after: taskSchema })),
+});
+
 export type AppState = z.infer<typeof stateSchema>;
-export type WorkAction = z.infer<typeof actionSchema>;
+export type LegacyState = z.infer<typeof legacyStateSchema>;
+export type LegacyAction = z.infer<typeof actionSchema>;
+export type Task = z.infer<typeof taskSchema>;
+export type ThreadNote = z.infer<typeof noteSchema>;
+export type LocalHistory = z.infer<typeof historySchema>;
 export type Thread = z.infer<typeof threadSchema>;
 export type Activity = z.infer<typeof eventSchema>;
 export type ExternalOperation = z.infer<typeof externalOperationSchema>;
-export type View = z.infer<typeof viewSchema>;
+export type View = AppState['view'];
 export type Scenario = 'new-review' | 'comment' | 'merge-queue' | 're-request' | 'sticky-mention' | 'closed' | 'read' | 'acknowledged' | 'mention' | 'empty';
 export type Row = {
-  key: string; title: string; reason: string; kind: 'review' | 'update' | 'task' | 'routine';
-  thread?: Thread; action?: WorkAction; events: Activity[]; fresh: boolean; available: boolean;
+  key: string; title: string; reason: string; kind: 'review' | 'update' | 'task';
+  thread?: Thread; task?: Task; fresh: boolean; available: boolean;
+  // Pending evidence for writes; the reader retains the full history in thread.events.
+  events: Activity[];
 };
 export type Command =
   | { type: 'select'; key: string | null }
   | { type: 'view'; view: View }
   | { type: 'draft'; text: string }
   | { type: 'capture' }
-  | { type: 'interpret'; key: string }
-  | { type: 'edit'; key: string; title?: string; notes?: string; project?: string; nextStep?: string }
-  | { type: 'start' | 'done' | 'restore' | 'remove'; key: string }
-  | { type: 'later'; key: string; remindAt?: string; note?: string }
-  | { type: 'step'; key: string; stepId: string }
-  | { type: 'undo' | 'refresh' | 'reconsider' | 'reset' }
+  | { type: 'edit'; key: string; title?: string; notes?: string }
+  | { type: 'note'; threadId: string; noteId?: string; text: string }
+  | { type: 'done' | 'restore'; key: string }
+  | { type: 'undo' | 'refresh' | 'reset' }
   | { type: 'stage'; scenario: Scenario }
   | { type: 'advance'; minutes: number }
   | { type: 'clock'; now: string }
-  | { type: 'routine'; key: string; time: string; timeZone: string; steps: string[] }
-  | { type: 'reminder'; key: string; action: 'dismiss' | 'snooze' | 'skip' }
   | { type: 'notification'; threadId: string; action: 'read' | 'done' | 'unsubscribe' }
-  | { type: 'configure'; refreshFailure?: AppState['failures']['refresh']; storageFailure?: boolean; interpretationFailure?: boolean; externalFailure?: boolean };
+  | { type: 'configure'; refreshFailure?: AppState['failures']['refresh']; storageFailure?: boolean; externalFailure?: boolean };

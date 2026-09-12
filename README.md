@@ -1,8 +1,8 @@
 # GitHub Projects
 
-A local-first macOS workspace for GitHub notifications, local commitments, and a stable working context. Selecting an item inspects it; **Work on this** chooses it. New GitHub activity arrives only when you click **Refresh**.
+A local-first macOS GitHub notification client with separate **Inbox** and **Tasks**. Read threads and keep private thread notes; capture standalone tasks without a network round trip. GitHub activity arrives only when you click **Refresh**.
 
-The desktop uses the approved GitHub-dark interface, real GitHub evidence, restricted Copilot SDK previews, SQLite, and native reminders. The separate browser prototype remains runnable with synthetic data.
+The desktop keeps the GitHub-dark three-pane interface, real GitHub evidence, CLI authentication and SQLite. The separate browser prototype remains runnable with synthetic data.
 
 ## Run the desktop
 
@@ -25,13 +25,13 @@ open "src-tauri/target/release/bundle/macos/GitHub Projects Workspace.app"
 
 The build compiles a target-specific standalone service and includes it inside the app. The app does not require Bun, Node, `node_modules`, or the repository at runtime. Apple Silicon and Intel service targets are supported; actual bundle/authentication validation ran on Apple Silicon.
 
-The bundle is ad-hoc signed for local use, **not notarized for distribution**. Native permission checks require the bundle rather than the standalone development executable.
+The bundle is ad-hoc signed for local use, **not notarized for distribution**.
 
 ### Connections and authentication
 
-Local capture, notes, Later, routines, completion, and deterministic priority rules work without authentication.
+Local capture, thread notes, task notes and Done work without authentication.
 
-For GitHub and SDK features, install executable `gh` and `copilot`, sign in with `gh auth login --hostname github.com`, and use an account with Copilot access. The backend discovers these CLIs through absolute PATH entries and standard install directories, including `~/.local/bin`. It never exposes tokens to the renderer.
+For GitHub, install `gh` and sign in with `gh auth login --hostname github.com`. The backend discovers CLIs through absolute PATH entries and standard install directories, including `~/.local/bin`. It never exposes tokens to the renderer. Copilot App handoffs require Copilot App; checking the retained service's SDK connection additionally requires `copilot` and an account with access.
 
 GitHub notifications require classic `notifications` or `repo` scope. Private source evidence needs `repo`; confirmed team membership needs `read:org` or its parent scopes. Organization access may also require SSO authorization. Unsupported authentication, absent CLIs, missing scopes, SDK failures, and partial source coverage are explicit errors, not demo fallbacks.
 
@@ -39,17 +39,17 @@ Use **Connections → Check connections** to check prerequisites. It does not fe
 
 ### Daily use
 
-1. **Capture** preserves the original text locally. Optional interpretation waits for a successful save, then opens an editable SDK proposal.
-2. **Refresh** brings in one bounded batch without replacing notes, selection, Done, or Working on changed while the request was running.
-3. **Triage with Copilot** and **Reconsider order** show suggestions before applying anything. The preview names its bounded scope. Omitted rows survive; local rules keep due commitments and confirmed requests ahead of informational activity.
-4. **Done** completes only the local action. **Done on GitHub** and **Unsubscribe** require confirmation and a saved operation intent before dispatch.
-5. **Review in Copilot** or **Open in Copilot** requests a typed native handoff. Dispatch is not proof that a session was created or work finished.
+1. Select a thread in **Inbox** to read saved source summaries and edit its private notes. Selection never creates a task.
+2. **Capture** (Command/Ctrl+K) saves exact text directly into **Tasks**. Links and daily phrasing remain ordinary text.
+3. Edit task text or notes and check **Done**. GitHub activity never reopens completed tasks.
+4. **Refresh** loads a bounded batch while preserving current notes, selection, row order and task completion.
+5. **Mark notification done on GitHub** and **Unsubscribe** require confirmation and a saved intent. **Earlier threads** keeps notes reachable afterward.
 
-Only current, unhandled request evidence creates a new request candidate. Sticky notification reasons, new commits, comments, and merge-queue updates do not reopen a finished review. Partial or omitted history remains uncertain; missing notifications never delete retained work.
+**Open on GitHub** and **Review in Copilot** / **Open in Copilot** remain visible on threads. Dispatch is not proof that a session exists or a review finished. Private notes never enter those links or external writes.
 
-SDK triage sends bounded source evidence, not scratch notes or the workspace. Reconsider sends minimal titles/categories/evidence IDs. Capture interpretation sends the selected original text. No suggestion starts, completes, acknowledges, or unsubscribes work automatically. **Use local priority rules** remains an explicitly non-AI alternative.
+The initial reader shows bounded source summaries, not the full conversation. Full reading follows in #9, archive/resurface behavior in #10, and filtering/terminal suppression in #11. The existing service retains its restricted SDK endpoints, but the workspace no longer exposes capture interpretation or commitment ranking.
 
-## Local storage, recovery, and reminders
+## Local storage and recovery
 
 The desktop starts empty after reading SQLite. It never opens browser storage, fixtures, or the previous app's database. Its identifier and data namespace are `io.robertcrandall.github-projects-workspace`:
 
@@ -57,15 +57,15 @@ The desktop starts empty after reading SQLite. It never opens browser storage, f
 ~/Library/Application Support/io.robertcrandall.github-projects-workspace/
 ```
 
-SQLite saves workspace state and derived reminder schedules atomically. **Saved on this Mac** appears only after the newest queued changes persist. Conflicts and failed saves retain pending work rather than overwriting another revision. **Backups & recovery** provides pending-copy export, preservation of database files, and explicitly confirmed backup recovery. Recovery never silently resets corrupt data.
+SQLite saves the checksummed, revisioned workspace atomically. **Saved on this Mac** appears only after the newest queued changes persist. Conflicts and failed saves retain pending work rather than overwriting another revision. **Backups & recovery** provides pending-copy export, preservation of database files, and explicitly confirmed backup recovery. Recovery never silently resets corrupt data.
+
+Current version-2 data converts to version 3 after a durable immutable backup succeeds. Linked action notes become separate thread annotations with original titles/history. Explicit captured tasks stay Tasks even when linked; **Open thread notes** leads back to the moved annotation. Their new task notes start empty. Standalone actions/routines become Tasks with preserved notes and history. Completed/removed tasks stay Done. No unrelated older application storage is inspected.
+
+The migration retains capture text, progress, step timestamps, project/next-step text and routine history. The original backup also preserves the retired undo stack. Loading version 3 does not repeat the conversion.
 
 Unconfirmed GitHub writes remain visible and explicitly retryable after relaunch. They never replay automatically. A timeout or interrupted process may follow a successful remote write; check GitHub or retry explicitly rather than treating it as success.
 
-Closing hides the existing window and keeps the native clock and saved schedules running. **Show GitHub Projects** returns that window; **Quit GitHub Projects** stops scheduling and the owned service process group. No notification permission prompt appears until **Enable reminders** is clicked.
-
-Native reminder delivery does not depend on a hidden webview timer. Routines reconcile the actual clock, preserve completed step timestamps, and coalesce missed days into one outstanding occurrence. Snooze preserves the original occurrence identity. Active work is excluded from reminders.
-
-Sleep, Focus, denied permission, and macOS presentation settings can delay or suppress an alert. Uncertain delivery requires explicit retry, which may duplicate an alert. Reminders use generic text, never private notes or action titles.
+Routines and native reminder delivery are retired. New saves contain no schedules, and a legacy snapshot cannot notify while loading, after a failed migration, or after backup recovery. Closing still hides the existing window; **Show GitHub Projects** returns it and **Quit GitHub Projects** stops the owned service process group.
 
 ## Run the isolated browser prototype
 
@@ -73,7 +73,7 @@ Sleep, Focus, denied permission, and macOS presentation settings can delay or su
 bun run dev
 ```
 
-Open `http://127.0.0.1:5173`. This entry uses an isolated browser storage key, synthetic source events, simulated GitHub/Copilot destinations, and a demo clock. It never calls the native backend. **Demo scenarios** includes merge queue, re-request, Later, missed days, and simulated failures.
+Open `http://127.0.0.1:5173`. This entry uses the existing isolated browser storage key, synthetic source events, simulated GitHub/Copilot destinations, and a demo clock. It never calls the native backend. **Demo scenarios** includes comments, merge queue, re-requests, acknowledgement and simulated failures. Browser migration preserves a separate original before replacement.
 
 ## Validation
 
@@ -101,14 +101,14 @@ session=$(uuidgen)
 "$app" --native-ui-smoke-relaunch --integration-smoke-session "$session"
 ```
 
-These use generated TEST directories, not app data. They check SQLite, actual permission status, renderer capture/notes/Working on, hidden native ticks, Show, and a separate process relaunch. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself.
+These use generated TEST directories, not app data. They check SQLite, renderer capture/notes/Done, hiding and showing the window, and a separate process relaunch. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself.
 
 `--integration-service-smoke-check` explicitly performs a tiny synthetic SDK inference and a bounded read-only GitHub refresh through the packaged native host. It consumes Copilot service access and must not run as an automatic test. `--integration-read-smoke-check` performs only the read-only refresh. Both use private TEST directories and report counts/status, never source bodies or tokens.
 
 ## Architecture and limits
 
 - [PRODUCT.md](PRODUCT.md) defines behavior; [DESIGN.md](DESIGN.md) and [theme.md](docs/theme.md) define the approved interface.
-- [Native integration contract](src/platform/README.md) documents SQLite revisions, recovery, reminders, destinations, and owned process hosting.
+- [Native integration contract](src/platform/README.md) documents SQLite revisions, recovery, retired schedules, destinations, and owned process hosting.
 - [Service contract](service/README.md) documents auth, exact endpoints, source coverage, SDK isolation, and bounded JSONL transport.
 
 GitHub refresh is a bounded view of notifications and REST timeline evidence, not full repository synchronization. Inline review threads and all historical revisions are not fetched. The service is capability-restricted but not an operating-system sandbox. External Copilot App launching is separate from SDK previews.
