@@ -28,10 +28,16 @@ export const errorSchema = z.strictObject({
   code: errorCodeSchema, message: z.string().max(300), retryable: z.boolean(),
 });
 export const diagnosticSchema = z.strictObject({
-  scope: z.enum(['notifications', 'teams', 'thread', 'timeline', 'subscription']),
+  scope: z.enum(['notifications', 'teams', 'thread', 'timeline', 'subscription', 'source-state']),
   code: errorCodeSchema, threadId: threadIdSchema.optional(),
   message: z.string().max(300),
 });
+export const sourceStateSchema = z.strictObject({
+  state: z.enum(['open', 'closed', 'merged', 'queued', 'unknown']),
+  observedAt: time, updatedAt: time.nullable(),
+  error: errorSchema.nullable(),
+}).refine(value => (value.state === 'unknown') === (value.error !== null),
+  'Unknown source state requires an explicit error; confirmed state cannot include an error.');
 export const evidenceSchema = z.strictObject({
   id: idSchema, kind: z.enum([
     'review-request', 'review-request-removed', 'review', 'comment', 'mention',
@@ -51,6 +57,7 @@ export const threadSchema = z.strictObject({
   reason: z.string().max(100), notification: z.enum(['read', 'unread']),
   updatedAt: time, lastReadAt: time.nullable(),
   state: z.enum(['open', 'closed', 'merged']),
+  sourceState: sourceStateSchema,
   size: z.strictObject({
     additions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(),
     changedFiles: z.number().int().nonnegative(),

@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import {
   AlertCircle, Archive, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, Circle, ExternalLink,
-  GitPullRequest, Github, Inbox, MessageSquare, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
+  GitPullRequest, Github, Inbox, ListFilter, MessageSquare, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
 } from 'lucide-react';
 import { getRow, getRows } from './domain/engine.ts';
 import { conversationKey, threadIdSchema } from '../service/src/schema.ts';
@@ -9,9 +9,10 @@ import type { AppState, LocalHistory, Row, Scenario, Task, View } from './types.
 import { useWorkspace } from './useWorkspace.ts';
 import type { Destination, WorkspaceView } from './runtime/view.ts';
 import { ReaderPosition } from './runtime/ReaderPosition.tsx';
+import { placement, viewLabel } from './domain/filtering.ts';
+import { Rules } from './Rules.tsx';
 
 type Dispatch = WorkspaceView['dispatch'];
-const viewLabels: Record<View, string> = { inbox: 'Inbox', archive: 'Archive', tasks: 'Tasks' };
 export function stamp(value: string, zone: string, date = false) {
   return new Intl.DateTimeFormat('en-US', {
     timeZone: zone, hour: 'numeric', minute: '2-digit', ...(date ? { month: 'short', day: 'numeric' } as const : {}),
@@ -176,12 +177,14 @@ function Detail({ row, state, dispatch, open, back, unsaved, conversation, archi
   const task = row.task;
   const thread = row.thread;
   const notes = thread ? state.notes.filter(note => note.threadId === thread.id) : [];
+  const location = thread ? placement(state, thread) : undefined;
   const canWrite = state.runtime !== 'desktop' || (thread?.source === 'github' && threadIdSchema.safeParse(thread.id).success);
   return <>
     <header className="detail-toolbar">
       <button className="text-button back-control" onClick={back}><ArrowLeft size={15} />Back to list</button>
       <span className="detail-location">{thread ? <><Github size={14} />{thread.repo}<span className="separator">/</span>#{thread.number}</> : <><Circle size={14} />Task</>}</span>
-      <span className={`state-tag ${task?.status === 'done' ? 'complete' : ''}`}>{thread ? thread.state === 'queued' ? 'In merge queue' : thread.state === 'closed' ? 'Source closed' : 'Open' : task?.status === 'done' ? 'Done' : 'Open'}</span>
+      <span className={`state-tag ${task?.status === 'done' ? 'complete' : ''}`}>{thread ? !thread.sourceState || thread.sourceState.state === 'unknown' ? 'State unknown'
+        : thread.sourceState.state === 'merged' ? 'Merged' : thread.state === 'queued' ? 'In merge queue' : thread.state === 'closed' ? 'Source closed' : 'Open' : task?.status === 'done' ? 'Done' : 'Open'}</span>
     </header>
     <div className="detail-body">
       <h2 className="preserve-text" data-reader-anchor="title">{row.title}</h2>
@@ -194,19 +197,29 @@ function Detail({ row, state, dispatch, open, back, unsaved, conversation, archi
         </section>
         {task.threadId && <p className="field-help">Notes from the linked action are kept with its thread.
           <button className="text-button" onClick={() => {
-            dispatch({ type: 'view', view: state.threads.find(thread => thread.id === task.threadId)?.archive ? 'archive' : 'inbox' });
+            const linked = state.threads.find(thread => thread.id === task.threadId);
+            dispatch({ type: 'view', view: linked ? placement(state, linked).view : 'inbox' });
             dispatch({ type: 'select', key: `t:${task.threadId}` });
           }}>Open thread notes<ArrowRight size={14} /></button></p>}
         {task.history && <History history={task.history} state={state} />}
       </>}
       {thread && <>
+        <section className="thread-placement" aria-label="Thread location">
+          <p><strong>{viewLabel(state, location!.view)}</strong> · {location!.reason}</p>
+          {location!.matches.length > 1 && <p className="field-help">Enabled matches in order: {location!.matches.map(rule => rule.name).join(', ')}.</p>}
+          <p className="field-help">{thread.sourceState
+            ? `${thread.sourceState.state === 'unknown' ? 'Source state unavailable as of' : 'Source state checked'} ${stamp(thread.sourceState.observedAt, state.timeZone, true)}. Saved observation, not live.`
+            : 'No current source-state check is saved. Terminal suppression is off.'} Refresh is manual.</p>
+          {thread.sourceState?.error && <p className="notice-inline warning">{thread.sourceState.error.message}</p>}
+          {location!.view === 'filtered' && <p className="field-help">Kept in Filtered with notes and history. Filtering sends no GitHub writes.</p>}
+        </section>
         <div className="detail-actions archive-controls">
           <button className="secondary" onClick={() => thread.archive
-            ? dispatch({ type: 'restore-thread', threadId: thread.id }, 'Restored to Inbox here. GitHub Done and subscription are unchanged.')
+            ? dispatch({ type: 'restore-thread', threadId: thread.id }, 'Local Archive cleared; current filters apply. GitHub Done and subscription are unchanged.')
             : archive(row)}>
             {thread.archive ? <Inbox size={15} /> : <Archive size={15} />}{thread.archive ? 'Restore to Inbox' : 'Archive thread'}
           </button>
-          <span className="field-help">{thread.archive ? 'In Archive. Restore is local only; it cannot undo GitHub Done or unsubscribe.'
+          <span className="field-help">{thread.archive ? 'In Archive. Restore is local only; current filters apply. It cannot undo GitHub Done or unsubscribe.'
             : !canWrite ? 'Archive locally. This source has no GitHub notification ID.'
               : 'Archive here and mark done on GitHub. Keeps notes and Tasks; works offline with explicit retry.'}</span>
         </div>
@@ -255,6 +268,7 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
   const live = workspace.desktop;
   const [capture, setCapture] = useState(false);
   const [demo, setDemo] = useState(false);
+  const [rules, setRules] = useState(false);
   const [destination, setDestination] = useState<Destination>();
   const openDestination = live?.open ?? setDestination;
   const archive = (row: Row) => {
@@ -289,10 +303,17 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
       <button className="capture-button secondary" onClick={() => setCapture(true)}><Plus size={16} />Capture<span className="shortcut">⌘ K</span></button>
       <nav aria-label="Inboxes">
         <button className={`nav-link ${state.view === 'inbox' ? 'current' : ''}`} aria-current={state.view === 'inbox' ? 'page' : undefined} onClick={() => dispatch({ type: 'view', view: 'inbox' })}><Inbox size={17} />Inbox<span className="count">{getRows(state, 'inbox').length}</span></button>
+        {state.inboxes.map(inbox => {
+          const view: View = `inbox:${inbox.id}`;
+          return <button key={inbox.id} className={`nav-link named-inbox ${state.view === view ? 'current' : ''}`} aria-current={state.view === view ? 'page' : undefined}
+            onClick={() => dispatch({ type: 'view', view })}><Inbox size={17} /><span>{inbox.name}</span><span className="count">{getRows(state, view).length}</span></button>;
+        })}
+        <button className={`nav-link ${state.view === 'filtered' ? 'current' : ''}`} aria-current={state.view === 'filtered' ? 'page' : undefined} onClick={() => dispatch({ type: 'view', view: 'filtered' })}><ListFilter size={17} />Filtered<span className="count">{getRows(state, 'filtered').length}</span></button>
         <button className={`nav-link ${state.view === 'archive' ? 'current' : ''}`} aria-current={state.view === 'archive' ? 'page' : undefined} onClick={() => dispatch({ type: 'view', view: 'archive' })}><Archive size={17} />Archive<span className="count">{getRows(state, 'archive').length}</span></button>
         <button className={`nav-link ${state.view === 'tasks' ? 'current' : ''}`} aria-current={state.view === 'tasks' ? 'page' : undefined} onClick={() => dispatch({ type: 'view', view: 'tasks' })}><CheckCheck size={17} />Tasks<span className="count">{state.tasks.filter(task => task.status === 'open').length}</span></button>
       </nav>
       <div className="sidebar-bottom">
+        <button className="nav-link" onClick={() => setRules(true)}><ListFilter size={16} />Filtering rules</button>
         <button className="nav-link" disabled={!state.undo.length} onClick={() => dispatch({ type: 'undo' }, 'Task change undone.')}><RotateCcw size={15} />Undo task change</button>
         {live ? <button className="nav-link" aria-label="Connections" aria-description={`${unconfirmed} unconfirmed GitHub writes`} onClick={live.connections}><Settings2 size={16} />Connections
           {!!unconfirmed && <span className="count warning" title="Unconfirmed GitHub writes">{unconfirmed}</span>}</button>
@@ -301,7 +322,10 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
       </div>
     </aside>
     <main id="workspace" className="workspace">
-      <header className="workspace-heading"><div><h1>{viewLabels[state.view]}</h1><p>{state.view === 'inbox' ? 'GitHub conversations, with your notes alongside.' : state.view === 'archive' ? 'Kept here until new activity. Notes and history stay with each thread.' : 'Your tasks. Separate from GitHub activity.'}</p></div>
+      <header className="workspace-heading"><div><h1>{viewLabel(state, state.view)}</h1><p>{state.view === 'tasks' ? 'Your tasks. Separate from GitHub activity.'
+        : state.view === 'archive' ? 'Kept here until new activity. Notes and history stay with each thread.'
+          : state.view === 'filtered' ? 'Kept out of Inbox locally. Notes and history remain here.'
+            : 'GitHub conversations, with your notes alongside.'}</p></div>
         <div className="refresh-area"><button className="secondary refresh-button" disabled={live?.refreshing} aria-busy={live?.refreshing} onClick={() => live ? live.refresh() : dispatch({ type: 'refresh' })}><RefreshCw size={15} />{live?.refreshing ? 'Refreshing...' : 'Refresh'}</button>
           <span>{state.refresh.lastSuccessAt ? `Updated ${stamp(state.refresh.lastSuccessAt, state.timeZone)}` : live ? 'Refresh to load GitHub activity' : 'Sample snapshot · not yet refreshed'}</span></div>
       </header>
@@ -310,12 +334,15 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
       </div></section>}
       {(state.refresh.status === 'error' || state.refresh.status === 'partial') && <section className="error-banner" role="status"><AlertCircle size={18} /><div><strong>{state.refresh.status === 'partial' ? 'Some activity could not be refreshed' : 'Refresh failed; showing saved work'}</strong><p>{state.refresh.message}</p></div></section>}
       <div className="workspace-grid">
-        <section className="queue" aria-label={viewLabels[state.view]}>
+        <section className="queue" aria-label={viewLabel(state, state.view)}>
           <div className="queue-heading"><h2>{state.view === 'tasks' ? 'Open tasks' : 'Threads'}<span>{open.length}</span></h2></div>
           <div className="queue-scroll" ref={listRef} onScroll={event => workspace.saveScroll(state.view, event.currentTarget.scrollTop)}>
             {rowList(open.filter(row => !row.fresh))}
             {open.some(row => row.fresh) && <section className="new-updates"><h3>New since refresh</h3>{rowList(open.filter(row => row.fresh))}</section>}
-            {!open.length && <div className="empty-list"><Inbox size={27} /><h3>{state.view === 'inbox' ? 'No threads in this saved inbox' : state.view === 'archive' ? 'No archived threads' : 'No open tasks'}</h3><p>{state.view === 'inbox' ? 'Refresh to check GitHub. Kept threads and notes are in Archive.' : state.view === 'archive' ? 'Archive a thread to clear Inbox without losing its notes or history.' : 'Capture a task from anywhere in the app.'}</p></div>}
+            {!open.length && <div className="empty-list"><Inbox size={27} /><h3>{state.view === 'tasks' ? 'No open tasks' : state.view === 'archive' ? 'No archived threads' : state.view === 'filtered' ? 'No filtered threads' : 'No threads in this saved inbox'}</h3><p>{state.view === 'tasks' ? 'Capture a task from anywhere in the app.'
+              : state.view === 'archive' ? 'Archive a thread to clear Inbox without losing its notes or history.'
+                : state.view === 'filtered' ? 'Rules and confirmed terminal state keep threads here without changing GitHub.'
+                  : 'Refresh to check GitHub. Kept threads and notes remain in their saved locations.'}</p></div>}
             {!!done.length && <section className="completed-tasks" aria-label="Completed tasks"><h3>Done <span>{done.length}</span></h3>{rowList(done)}</section>}
           </div>
           <footer className="queue-footer">{state.view === 'tasks' ? 'GitHub activity never reopens a task.' : 'GitHub refresh is manual.'}</footer>
@@ -332,6 +359,7 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
     {workspace.feedback && <div className="feedback" role="status">{workspace.storageError ? <AlertCircle size={16} className="danger" /> : <Check size={16} />}<span>{workspace.feedback}</span><button className="icon-button" aria-label="Dismiss feedback" onClick={workspace.clearFeedback}><X size={14} /></button></div>}
     {capture && <Capture state={state} dispatch={dispatch} close={() => setCapture(false)} />}
     {demo && <Demo state={state} dispatch={dispatch} close={() => setDemo(false)} />}
+    {rules && <Rules state={state} dispatch={dispatch} error={workspace.operationError || ''} close={() => setRules(false)} />}
     {destination && <Handoff destination={destination} state={state} dispatch={dispatch} close={() => setDestination(undefined)} />}
     {children}
   </div>;

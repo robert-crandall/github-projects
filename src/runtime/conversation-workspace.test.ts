@@ -75,6 +75,7 @@ test('service -> client -> native cache -> runtime keeps complete content separa
   const source = sourceThread({
     id: '123', reference, title: 'Source', reason: 'subscribed', notification: 'unread', updatedAt: new Date().toISOString(), lastReadAt: null,
     state: 'open', size: null, subscription: 'subscribed', evidence: [],
+    sourceState: { state: 'open', observedAt: new Date().toISOString(), updatedAt: null, error: null },
     coverage: { timeline: 'complete', newestPage: 1, fetchedPages: [1], observedAt: new Date().toISOString() },
   }, []);
   mock.workspace.update(state => mergeRefresh(state, { threads: [source], status: 'complete', startedAt: state.clock, fetchedAt: state.clock, diagnostics: [] }));

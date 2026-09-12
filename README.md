@@ -55,7 +55,17 @@ GitHub marks a whole notification done, not individual messages. The app refuses
 
 The reader shows real issue/PR descriptions, comments, reviews and grouped inline replies, with author, source time and source links. Markdown renders without executing HTML or automatically fetching images/embeds. Long bodies are not clipped. **Pages, freshness and older history** exposes page timestamps, partial errors, **Load older** and explicit page reloads for older edits. Each missing range has an explicit action that loads one page, including gaps left when newest messages jump ahead. Comments, reviews and inline discussions track their pages independently; failed or partial pages retain a reload action.
 
-Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns archived threads to Inbox. Filtering/terminal suppression follows in #11.
+Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns archived/terminal threads to Inbox.
+
+### Filtering threads
+
+Open **Filtering rules** to create named inboxes and saved rules. Match exact repository, PR/issue type, and/or literal title text; supplied criteria combine with AND, with case-insensitive repository/title matching. Preview matches before saving. The first enabled rule wins; use up/down to change order. Preview also explains when manual Archive or terminal state takes precedence.
+
+Route matches to a named inbox or choose **Keep out of Inbox**, which leaves them reachable in **Filtered** with notes/history. Disable/delete rules to remove their effect. Inbox renaming preserves its identity; deletion is blocked until all referencing rules are edited or deleted. Built-in/duplicate/blank names and invalid criteria produce errors. Limits are 50 named inboxes and 100 rules.
+
+Confirmed closed/merged sources and PRs currently in GitHub's merge queue stay in Filtered even when comments arrive. Queue membership uses GitHub's current GraphQL field, not an old queue event. Once open/out of queue, new activity resumes ordinary routing; old history does not. Missing/denied state checks fail open with a visible warning and retain their prior boundary for later reconciliation. The reader labels every saved observation with its check time; nothing polls.
+
+**Filtering is local only.** It never invokes manual Archive's GitHub Done operation, unsubscribes or completes Tasks. Manual Archive stays in Archive through rule edits. Restore clears Archive locally; current filters still apply. Rules, inboxes and terminal checkpoints survive relaunch through the existing SQLite save.
 
 ## Local storage and recovery
 
@@ -114,7 +124,7 @@ session=$(uuidgen)
 "$app" --native-ui-smoke-relaunch --integration-smoke-session "$session"
 ```
 
-These use generated TEST directories, not app data. They check SQLite, renderer capture/notes/Done, full cached conversation rendering through real native IPC, Archive plus acknowledgement, identical refresh, loading old pages, new activity returning the same thread, cache-only discard, hiding/showing and a separate process relaunch. An explicit smoke-only native service fixture supplies source responses; unexpected service/model operations fail instead of reaching GitHub. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself. Smoke failures exit nonzero.
+These use generated TEST directories, not app data. They check SQLite, renderer capture/notes/Done, full cached conversation rendering through real native IPC, Archive plus acknowledgement, identical refresh, loading old pages, new activity returning the same thread, rule preview and named routing, queue entry/exit without additional writes, cache-only discard, hiding/showing and a separate process relaunch retaining the rule/inbox. An explicit smoke-only native service fixture supplies source responses; unexpected service/model operations fail instead of reaching GitHub. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself. Smoke failures exit nonzero.
 
 `--integration-service-smoke-check` explicitly performs a tiny synthetic SDK inference and a bounded read-only GitHub refresh through the packaged native host. It consumes Copilot service access and must not run as an automatic test. `--integration-read-smoke-check` performs only the read-only refresh. Both use private TEST directories and report counts/status, never source bodies or tokens.
 

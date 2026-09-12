@@ -1,7 +1,9 @@
-import type { Activity, AppState, Command, Row, Scenario, Thread, View } from '../types.ts';
+import { inboxSchema, ruleSchema, type Activity, type AppState, type Command, type Row, type Scenario, type Thread, type View } from '../types.ts';
 import { addMinutes, initialClock, instant } from './clock.ts';
 import { archiveBoundary } from './archive.ts';
 import { LIMITS } from '../../service/src/schema.ts';
+import { placement, validateFilters } from './filtering.ts';
+import { reconcileTerminal } from './terminal.ts';
 
 const PRIMARY = 'demo-relay-101';
 const TEAM = 'demo-provider-202';
@@ -29,10 +31,12 @@ export function pendingEvidence(state: AppState, thread: Thread): Activity[] {
 function threadRow(state: AppState, thread: Thread): Row {
   const events = pendingEvidence(state, thread);
   const latest = thread.events.at(-1);
+  const location = placement(state, thread);
+  const available = location.view !== 'archive' && location.view !== 'filtered';
   return {
     key: `t:${thread.id}`, title: thread.title, kind: thread.kind === 'pr' ? 'review' : 'update',
-    reason: latest?.summary ?? 'No source activity saved yet.', thread, events,
-    fresh: !thread.archive && state.newKeys.includes(`t:${thread.id}`), available: !thread.archive,
+    reason: available ? latest?.summary ?? 'No source activity saved yet.' : location.reason, thread, events,
+    fresh: available && state.newKeys.includes(`t:${thread.id}`), available,
   };
 }
 
@@ -51,13 +55,13 @@ export function getRow(state: AppState, key: string): Row | undefined {
 
 export function getRows(state: AppState, view: View = state.view): Row[] {
   const rows = view === 'tasks' ? state.tasks.map(task => getRow(state, `a:${task.id}`)!)
-    : state.threads.map(thread => threadRow(state, thread)).filter(row => view === 'inbox' ? row.available : !row.available);
+    : state.threads.filter(thread => placement(state, thread).view === view).map(thread => threadRow(state, thread));
   const positions = new Map(state.order.map((key, index) => [key, index]));
   return rows.sort((a, b) => (positions.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.key) ?? Number.MAX_SAFE_INTEGER));
 }
 
 function appendOrder(state: AppState): void {
-  const keys = [...getRows(state, 'inbox'), ...getRows(state, 'archive'), ...getRows(state, 'tasks')].map(row => row.key);
+  const keys = [...state.threads.map(thread => `t:${thread.id}`), ...state.tasks.map(task => `a:${task.id}`)];
   const added = keys.filter(key => !state.order.includes(key));
   state.order.push(...added);
   state.newKeys = unique([...state.newKeys, ...added.filter(key => key.startsWith('t:'))]);
@@ -100,7 +104,13 @@ export function initialState(timeZone = 'UTC'): AppState {
   ];
   return {
     version: 3, runtime: 'demo', clock, timeZone,
-    threads: threads.map(thread => ({ ...thread, archive: thread.id === CLOSED ? archiveBoundary(thread, clock) : null })),
+    threads: threads.map(thread => {
+      thread.archive = thread.id === CLOSED ? archiveBoundary(thread, clock) : null;
+      thread.sourceState = { state: thread.state, observedAt: clock, updatedAt: null, error: null };
+      reconcileTerminal(undefined, thread);
+      return thread;
+    }),
+    inboxes: [], rules: [],
     tasks: [{ id: 'demo-local-task', title: 'Write a short rollout checklist', notes: 'Synthetic local task. No GitHub reference required.',
       status: 'open', createdAt: clock }],
     notes: [{ id: 'demo-review-note', threadId: PREVIOUS, text: 'Review finished. No need to wait for merge.' },
@@ -151,6 +161,7 @@ function applyEvent(state: AppState, event: Activity): void {
   const thread = state.threads.find(entry => entry.id === event.threadId);
   if (!thread) throw new Error(`Staged activity refers to an unknown thread: ${event.threadId}`);
   if (thread.events.some(entry => entry.id === event.id)) return;
+  const previous = structuredClone(thread);
   thread.events.push(structuredClone(event));
   if (event.kind === 'read') { thread.notification = 'read'; return; }
   if (event.kind === 'acknowledged') {
@@ -165,6 +176,8 @@ function applyEvent(state: AppState, event: Activity): void {
   }
   if (event.kind === 'merge-queue') thread.state = 'queued';
   if (event.kind === 'merged') thread.state = 'closed';
+  thread.sourceState = { state: thread.state, observedAt: state.clock, updatedAt: null, error: null };
+  reconcileTerminal(previous, thread);
   if (event.id.startsWith('sticky-mention-')) thread.reason = 'mention';
   if (isRequest(event) || event.kind === 'mention') {
     thread.subscribed = true;
@@ -204,7 +217,46 @@ export function transition(state: AppState, command: Command): AppState {
       }
       next.selectedKey = command.key;
       break;
-    case 'view': next.view = command.view; next.selectedKey = null; break;
+    case 'view':
+      validateFilters({ ...next, view: command.view });
+      next.view = command.view; next.selectedKey = null; break;
+    case 'save-inbox': {
+      const inbox = inboxSchema.parse(command.inbox);
+      const index = next.inboxes.findIndex(value => value.id === inbox.id);
+      if (index < 0) next.inboxes.push(inbox); else next.inboxes[index] = inbox;
+      validateFilters(next);
+      break;
+    }
+    case 'delete-inbox': {
+      if (!next.inboxes.some(inbox => inbox.id === command.id)) throw new Error('This inbox no longer exists.');
+      if (next.rules.some(rule => rule.action.type === 'inbox' && rule.action.inboxId === command.id)) {
+        throw new Error('Edit or delete rules targeting this inbox before deleting it, including disabled rules.');
+      }
+      next.inboxes = next.inboxes.filter(inbox => inbox.id !== command.id);
+      if (next.view === `inbox:${command.id}`) next.view = 'inbox';
+      break;
+    }
+    case 'save-rule': {
+      const rule = ruleSchema.parse(command.rule);
+      const index = next.rules.findIndex(value => value.id === rule.id);
+      if (index < 0) next.rules.push(rule); else next.rules[index] = rule;
+      validateFilters(next);
+      break;
+    }
+    case 'enable-rule':
+    case 'move-rule':
+    case 'delete-rule': {
+      const index = next.rules.findIndex(rule => rule.id === command.id);
+      if (index < 0) throw new Error('This rule no longer exists.');
+      if (command.type === 'enable-rule') next.rules[index]!.enabled = command.enabled;
+      else if (command.type === 'delete-rule') next.rules.splice(index, 1);
+      else {
+        const target = index + (command.direction === 'up' ? -1 : 1);
+        if (target < 0 || target >= next.rules.length) throw new Error('This rule is already at the end of the list.');
+        [next.rules[index], next.rules[target]] = [next.rules[target]!, next.rules[index]!];
+      }
+      break;
+    }
     case 'draft': next.draft = command.text; break;
     case 'capture': {
       if (!next.draft.trim()) throw new Error('Write something to capture first.');
@@ -228,6 +280,7 @@ export function transition(state: AppState, command: Command): AppState {
       const thread = next.threads.find(thread => thread.id === command.threadId);
       if (!thread) throw new Error('This thread no longer exists.');
       thread.archive = command.type === 'archive' ? archiveBoundary(thread, next.clock) : null;
+      if (command.type === 'restore-thread' && thread.sourceState?.state === 'open') thread.terminal = null;
       if (command.type === 'archive' && next.runtime !== 'desktop') {
         const eventIds = pendingEvidence(next, thread).slice(-LIMITS.events).map(event => event.id);
         const failed = next.failures.external;

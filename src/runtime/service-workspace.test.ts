@@ -18,6 +18,7 @@ const thread = (events = [evidence()]): SourceThread => ({
   id: '123', reference: { repo: 'octo/project', number: 1, kind: 'pr' }, title: 'Review source',
   reason: 'review_requested', notification: 'unread', updatedAt: '2026-09-11T17:00:00Z', lastReadAt: null,
   state: 'open', size: { additions: 20, deletions: 2, changedFiles: 1 }, subscription: 'subscribed',
+  sourceState: { state: 'open', observedAt: new Date().toISOString(), updatedAt: '2026-09-11T17:00:00Z', error: null },
   evidence: events, coverage: { timeline: 'complete', newestPage: 1, fetchedPages: [1], observedAt: '2026-09-11T17:00:00Z' },
 });
 const batch = (threads = [thread()]) => ({
@@ -422,6 +423,53 @@ test('manual refresh uses latest notes and Done; capture, edits, load and clocks
   expect(mock.workspace.state.selectedKey).toBe(key);
   expect(mock.requests.map(request => request.op)).toEqual(['github.refresh']);
   expect(JSON.stringify(mock.requests)).not.toContain('Typed during refresh');
+});
+
+test('rules edited during Refresh apply to its one batch; automatic terminal and rule suppression never dispatch writes', async () => {
+  const held = deferred<ReturnType<typeof batch>>();
+  let incoming = batch();
+  let pause = false;
+  const mock = await harness(async request => {
+    expect(request.op).toBe('github.refresh');
+    const result = pause ? await held.promise : incoming;
+    return reply(request, { ...result, fetchedAt: new Date().toISOString() });
+  });
+  await mock.remote.refresh();
+  mock.workspace.dispatch({ type: 'select', key: 't:123' });
+  mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'Saved reader context' });
+  mock.workspace.saveScroll('reader:octo/project:pr:1', 417);
+  pause = true;
+  const refreshing = mock.remote.refresh();
+  mock.workspace.dispatch({ type: 'save-inbox', inbox: { id: 'work', name: 'Work' } });
+  mock.workspace.dispatch({ type: 'save-rule', rule: {
+    id: 'first', name: 'PRs', enabled: true, criteria: { kind: 'pr' }, action: { type: 'inbox', inboxId: 'work' },
+  } });
+  held.resolve(incoming);
+  await refreshing;
+  expect(getRows(mock.workspace.state, 'inbox:work')).toHaveLength(1);
+  const queued = thread([evidence(), evidence('historical-queue', 'merge-queue'), evidence('later-comment', 'comment')]);
+  queued.sourceState = { state: 'queued', observedAt: new Date().toISOString(), updatedAt: queued.updatedAt, error: null };
+  incoming = batch([queued]); pause = false;
+  await mock.remote.refresh(); await mock.workspace.flush();
+  expect(getRows(mock.workspace.state, 'filtered')).toHaveLength(1);
+  expect(mock.workspace.state.operations).toEqual([]);
+  expect(mock.workspace.state.handled).toEqual([]);
+  expect(mock.requests.every(request => request.op === 'github.refresh')).toBe(true);
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load(); await relaunched.flush();
+  expect(getRows(relaunched.state, 'filtered')).toHaveLength(1);
+  expect(relaunched.state.selectedKey).toBe('t:123');
+  expect(relaunched.state.notes[0]!.text).toBe('Saved reader context');
+  expect(relaunched.getSnapshot().workspace!.scroll['reader:octo/project:pr:1']).toBe(417);
+  expect(relaunched.state.rules).toEqual(mock.workspace.state.rules);
+});
+
+test('source mapping never guesses queue membership from timeline order, reason or REST mergeability', () => {
+  const source = thread([evidence('old-queue', 'merge-queue')]);
+  expect(sourceThread(source, []).state).toBe('open');
+  source.sourceState = { ...source.sourceState, state: 'unknown', error: { code: 'access', message: 'Denied', retryable: false } };
+  expect(sourceThread(source, []).state).toBe('open');
+  expect(sourceThread(source, []).sourceState?.state).toBe('unknown');
 });
 
 test('write intent persists before dispatch and confirmation handles only captured evidence, never private notes', async () => {

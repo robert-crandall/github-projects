@@ -31,12 +31,12 @@ export function sourceThread(thread: SourceThread, diagnostics: ServiceOutput<'g
     at: thread.updatedAt, actor: 'GitHub', summary: 'GitHub updated this notification. The saved timeline may not include the activity; inspect the source for context.',
     requestState: 'uncertain',
   });
-  const queued = thread.state === 'open' && evidence.at(-1)?.kind === 'merge-queue';
   return {
     id: thread.id, ...thread.reference, source: 'github', title: thread.title,
     reason: thread.reason === 'review_requested' ? 'review_requested' : thread.reason.includes('mention') ? 'mention' : 'subscribed',
     rawReason: thread.reason, notification: thread.notification, notificationUpdatedAt: thread.updatedAt,
-    state: queued ? 'queued' : thread.state === 'open' ? 'open' : 'closed',
+    state: thread.sourceState.state === 'queued' ? 'queued' : thread.sourceState.state === 'closed' || thread.sourceState.state === 'merged' ? 'closed' : 'open',
+    sourceState: thread.sourceState,
     subscribed: thread.subscription === 'subscribed', subscription: thread.subscription,
     lines: thread.size ? thread.size.additions + thread.size.deletions : undefined,
     events, sourceMetadata: metadata,

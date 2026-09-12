@@ -378,6 +378,8 @@ pub fn run() {
                 serde_json::json!({
                     "ok":true,"readOnlyRefresh":true,
                     "threads":refresh["result"]["threads"].as_array().map(Vec::len),
+                    "confirmedSourceStates":refresh["result"]["threads"].as_array().map(|threads| threads.iter().filter(|thread| matches!(thread["sourceState"]["state"].as_str(), Some("open" | "queued" | "closed" | "merged"))).count()),
+                    "unknownSourceStates":refresh["result"]["threads"].as_array().map(|threads| threads.iter().filter(|thread| thread["sourceState"]["state"] == "unknown").count()),
                     "coverage":refresh["result"]["status"],"githubWrites":0,"permissionRequested":false
                 })
             );

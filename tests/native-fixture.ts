@@ -17,6 +17,7 @@ export function thread(events = [evidence()], id = '123'): Thread {
   return {
     id, reference: { repo: 'octo/project', number: Number(id), kind: 'pr' }, title: `Requested review ${id}`,
     reason: 'review_requested', notification: 'unread', updatedAt: at, lastReadAt: null, state: 'open',
+    sourceState: { state: 'open', observedAt: at, updatedAt: at, error: null },
     size: { additions: 20, deletions: 2, changedFiles: 1 }, subscription: 'subscribed', evidence: events,
     coverage: { timeline: 'complete', newestPage: 1, fetchedPages: [1], observedAt: at },
   };

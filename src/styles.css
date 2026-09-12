@@ -43,10 +43,13 @@ p { line-height: 1.65; }
 .brand-icon { display: flex; color: var(--text); }
 .capture-button { margin: 26px 2px 0; justify-content: flex-start; gap: 8px; }
 .shortcut { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 400; }
-.sidebar nav { display: flex; flex-direction: column; gap: 3px; margin-top: 24px; }
+.sidebar nav { display: flex; flex-direction: column; gap: 3px; margin-top: 24px; overflow-y: auto; min-height: 0; }
 .nav-link { width: 100%; justify-content: flex-start; min-height: 35px; padding: 8px 10px; gap: 10px; font-size: 12px; color: var(--secondary); white-space: nowrap; }
 .nav-link.current { color: var(--text); font-weight: 550; background: var(--selected); }
 .nav-link.current svg { color: var(--accent); }
+.named-inbox { white-space: normal; text-align: left; }
+.named-inbox > span:not(.count) { overflow-wrap: anywhere; min-width: 0; }
+.named-inbox .count { flex-shrink: 0; }
 .count { margin-left: auto; color: var(--secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
 .sidebar-bottom { margin-top: auto; padding-top: 22px; }
 .sidebar-bottom .nav-link { font-size: 12px; }
@@ -98,6 +101,16 @@ p { line-height: 1.65; }
 .detail-actions { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
 .archive-controls { margin-top: 18px; }
 .archive-controls .field-help { margin: 0; }
+.thread-placement { margin-top: 22px; font-size: 12px; overflow-wrap: anywhere; }
+.rules-modal { width: 680px; max-width: min(680px, calc(100% - 30px)); }
+.rule-list { list-style: none; padding: 0; margin: 16px 0; }
+.rule-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }
+.rule-list li > div { min-width: 0; max-width: 100%; }
+.rule-list .checkbox-label { margin: 0; }
+.rule-editor, .inbox-settings { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.inbox-settings summary { cursor: pointer; font-size: 13px; padding: 6px 0; }
+.inbox-settings .button-row { margin-top: 12px; }
+.rule-preview { margin-top: 24px; }
 .notes-section { margin-top: 30px; }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
 .section-heading label { font-size: 12px; font-weight: 550; }
@@ -243,9 +256,11 @@ blockquote { margin: 12px 0; font-size: 12px; white-space: pre-wrap; overflow-wr
   .capture-button { margin: 0; font-size: 12px; min-height: 30px; }
   .shortcut { display: none; }
   .sidebar nav { grid-column: 1 / -1; flex-direction: row; overflow-x: auto; gap: 3px; padding-bottom: 3px; margin-top: 0; }
+  .sidebar nav .nav-link { flex-shrink: 0; }
+  .named-inbox { max-width: 200px; }
   .nav-link { width: auto; min-height: 30px; padding: 6px 9px; font-size: 11px; gap: 6px; }
   .count { margin-left: 2px; font-size: 10px; }
-  .sidebar-bottom { grid-column: 1 / -1; margin: 0; padding: 0; display: flex; align-items: center; justify-content: space-between; }
+  .sidebar-bottom { grid-column: 1 / -1; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; }
   .sidebar-bottom .nav-link { font-size: 10px; min-height: 24px; padding: 3px; }
   .prototype-label { padding: 0; font-size: 9px; }
   .prototype-label > span:last-child { display: none; }

@@ -11,7 +11,7 @@ import {
 
 export type ApiResponse = { status: number; headers: Record<string, string>; body: unknown };
 export interface GitHubApi {
-  request(method: 'GET' | 'DELETE' | 'PUT', endpoint: string, signal: AbortSignal, body?: { ignored: true }): Promise<ApiResponse>;
+  request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: { ignored: true } | { query: string }): Promise<ApiResponse>;
 }
 const repoPath = '[A-Za-z0-9][A-Za-z0-9-]{0,99}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}';
 const getRoute = new RegExp(
@@ -21,12 +21,24 @@ const getRoute = new RegExp(
   + `|/repos/${repoPath}/(?:issues/[1-9]\\d{0,15}/comments|pulls/[1-9]\\d{0,15}/(?:reviews|comments))\\?per_page=5&page=[1-9]\\d{0,5}`
   + `|/repos/${repoPath}/issues/[1-9]\\d{0,15}/timeline\\?per_page=100&page=[1-9]\\d{0,5})$`,
 );
+const stateQuery = (owner: string, name: string, number: number) =>
+  `query { repository(owner:"${owner}",name:"${name}") { pullRequest(number:${number}) { state updatedAt mergeQueueEntry { id } } } }`;
+export function pullRequestStateQuery(reference: Reference): string {
+  const valid = parse(referenceSchema, reference);
+  const [owner, name] = valid.repo.split('/');
+  return stateQuery(owner!, name!, valid.number);
+}
+function allowedStateQuery(query: string): boolean {
+  const match = /^query \{ repository\(owner:"([A-Za-z0-9][A-Za-z0-9-]{0,99})",name:"([A-Za-z0-9_][A-Za-z0-9_.-]{0,99})"\) \{ pullRequest\(number:([1-9]\d{0,15})\) \{ state updatedAt mergeQueueEntry \{ id \} \} \} \}$/.exec(query);
+  return !!match && query === pullRequestStateQuery({ repo: `${match[1]}/${match[2]}`, number: Number(match[3]), kind: 'pr' });
+}
 export class GhApi implements GitHubApi {
   constructor(private readonly runner: Runner = run, private readonly resolve = executable) {}
-  async request(method: 'GET' | 'DELETE' | 'PUT', endpoint: string, signal: AbortSignal, body?: { ignored: true }): Promise<ApiResponse> {
+  async request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: { ignored: true } | { query: string }): Promise<ApiResponse> {
     const allowed = method === 'GET' ? getRoute.test(endpoint) && body === undefined
       : method === 'DELETE' ? /^\/notifications\/threads\/[1-9]\d{0,19}$/.test(endpoint) && body === undefined
-      : /^\/notifications\/threads\/[1-9]\d{0,19}\/subscription$/.test(endpoint) && body?.ignored === true;
+      : method === 'POST' ? endpoint === '/graphql' && body && Object.keys(body).length === 1 && 'query' in body && allowedStateQuery(body.query)
+      : /^\/notifications\/threads\/[1-9]\d{0,19}\/subscription$/.test(endpoint) && body && Object.keys(body).length === 1 && 'ignored' in body && body.ignored === true;
     if (!allowed) throw new ServiceError('invalid_input');
     const args = ['api', '--hostname', 'github.com', '--include', '--method', method,
       '-H', 'Accept: application/vnd.github+json', '-H', 'X-GitHub-Api-Version: 2022-11-28', endpoint];
@@ -81,6 +93,7 @@ const notificationSchema = z.object({
 type Notification = z.infer<typeof notificationSchema>;
 const sourceSchema = z.object({
   number: z.number().int().positive().safe(), title: z.string(), state: z.enum(['open', 'closed']),
+  updated_at: time.optional(),
   merged: z.boolean().optional(), additions: z.number().int().nonnegative().optional(),
   deletions: z.number().int().nonnegative().optional(), changed_files: z.number().int().nonnegative().optional(),
   requested_reviewers: z.array(actor).optional(), requested_teams: z.array(team).optional(),
@@ -358,11 +371,44 @@ export class GitHubService {
   ): Promise<Thread> {
     const reference = sourceReference(notification);
     const root = `/repos/${reference.repo}`;
+    const observedAt = new Date().toISOString();
     const response = await this.api.request('GET', `${root}/${reference.kind === 'pr' ? 'pulls' : 'issues'}/${reference.number}`, signal);
     requireStatus(response);
     const source = parse(sourceSchema, response.body);
     if (source.number !== reference.number) throw new ServiceError('invalid_output');
-    const observedAt = new Date().toISOString();
+    let sourceState: Thread['sourceState'] = {
+      state: source.merged ? 'merged' : source.state, observedAt, updatedAt: source.updated_at ?? null, error: null,
+    };
+    if (reference.kind === 'pr' && sourceState.state === 'open') {
+      const checkedAt = new Date().toISOString();
+      try {
+        checkAbort(signal);
+        const current = await this.api.request('POST', '/graphql', signal, { query: pullRequestStateQuery(reference) });
+        requireStatus(current);
+        const envelope = parse(z.object({ errors: z.array(z.object({
+          type: z.string().optional(), extensions: z.object({ code: z.string().optional() }).optional(),
+        })).optional(), data: z.unknown().optional() }), current.body);
+        if (envelope.errors?.length) {
+          const kinds = envelope.errors.map(error => error.type ?? error.extensions?.code);
+          throw new ServiceError(kinds.some(kind => kind === 'FORBIDDEN' || kind === 'NOT_FOUND') ? 'access'
+            : kinds.some(kind => kind === 'undefinedField' || kind === 'GRAPHQL_VALIDATION_FAILED') ? 'unsupported' : 'unavailable');
+        }
+        const data = parse(z.object({ repository: z.object({ pullRequest: z.object({
+          state: z.enum(['OPEN', 'CLOSED', 'MERGED']), updatedAt: time,
+          mergeQueueEntry: z.object({ id: z.string().min(1).max(200) }).nullable(),
+        }) }) }), envelope.data).repository.pullRequest;
+        sourceState = {
+          state: data.state === 'MERGED' ? 'merged' : data.state === 'CLOSED' ? 'closed' : data.mergeQueueEntry ? 'queued' : 'open',
+          updatedAt: data.updatedAt, observedAt: checkedAt, error: null,
+        };
+      } catch (error) {
+        checkAbort(callerSignal);
+        const failure = sanitized(error);
+        sourceState = { state: 'unknown', updatedAt: null, observedAt: checkedAt,
+          error: { ...failure, message: `Current PR state / merge queue is unknown. ${failure.message}`.slice(0, 300) } };
+        diagnostics.push({ scope: 'source-state', threadId: notification.id, code: failure.code, message: sourceState.error!.message });
+      }
+    }
     let coverage: Thread['coverage'] = { timeline: 'unavailable', newestPage: 0, fetchedPages: [], observedAt };
     let evidence: Evidence[] = [];
     try {
@@ -422,7 +468,7 @@ export class GitHubService {
       state: source.merged ? 'merged' : source.state,
       size: source.additions !== undefined && source.deletions !== undefined && source.changed_files !== undefined
         ? { additions: source.additions, deletions: source.deletions, changedFiles: source.changed_files } : null,
-      subscription, evidence, coverage,
+      subscription, evidence, coverage, sourceState,
     };
   }
   async write(action: 'acknowledge' | 'unsubscribe', input: z.infer<typeof writeInputSchema>, signal: AbortSignal) {

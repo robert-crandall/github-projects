@@ -86,6 +86,12 @@ All objects are strict: unknown keys fail validation. Thread IDs are positive de
 
 Each thread includes its notification ID, validated repository reference, current title/state/PR size, read/unread state, sticky reason, subscription observation, and evidence. Notification `updatedAt` is the actual notification's `updated_at`, not a reader-cache or enrichment time. The client uses it for archive boundaries and acknowledgement preflight; it never fabricates a review request from that timestamp or a sticky reason.
 
+`sourceState` is `{state: open | closed | merged | queued | unknown, observedAt, updatedAt, error}`. `observedAt` records the beginning of its current source read; `updatedAt` is the source object's timestamp, separate from notification time. Unknown requires an explicit error. Current REST issue/PR roots confirm closure/merge. An open PR additionally reads the fixed, service-owned GraphQL query for `PullRequest.state`, `updatedAt`, and `mergeQueueEntry { id }`. A successful non-null entry confirms current queue membership; successful null confirms not queued. Later GraphQL merged/closed state overrides the earlier REST open read.
+
+GitHub dotcom exposes `PullRequest.mergeQueueEntry` as a nullable `MergeQueueEntry` (verified by live read-only schema inspection). The existing repository token successfully read a merged PR with `state: MERGED` and `mergeQueueEntry: null`. Public access follows GitHub's token policy; private repositories need repository access and any required SSO. Permission denial, unsupported fields, malformed output and GraphQL partial errors yield unknown with a `source-state` diagnostic, not a fabricated null/queued result. Positive queue membership and denial shapes are exercised with representative fixtures, not live writes.
+
+The only added transport is `POST /graphql` with exactly `{query: fixedReadQuery}`, accepted only when the query reconstructs from a validated repository/number. GitHub's GET route returns schema introspection rather than executing this query; the POST read was verified through the real `GhApi` transport. No renderer-supplied query, general GraphQL endpoint or mutation is exposed. Timeline queue events, auto-merge, mergeability and CI do not determine current state. A terminal or rule decision is client-local and never calls the notification write APIs.
+
 Each evidence entry includes:
 
 | Field | Meaning |
@@ -102,7 +108,7 @@ Requests are recipient-specific. Another user/team's review or removal cannot su
 
 ### Coverage and limits
 
-The service explicitly requests `GET /notifications?all=true`, including read and unread outstanding threads. It fetches at most two 50-thread pages, then enriches at most 50 distinct threads using three workers. The result preserves notification order regardless of worker completion order; only one refresh can run at a time.
+The service explicitly requests `GET /notifications?all=true`, including read and unread outstanding threads. It fetches at most two 50-thread pages, then enriches at most 50 distinct threads using three workers. Each open PR adds at most one current-state GraphQL read within the same budget. The result preserves notification order regardless of worker completion order; only one refresh can run at a time.
 
 A 90-second collection budget stops remaining reads before the outer 120-second transport deadline. Completed threads are returned in one partial batch with explicit time-limit diagnostics for interrupted and unstarted evidence. If current source data was acquired before a timeline or subscription read timed out, that usable thread is retained with unavailable/unknown coverage. Explicit user cancellation still fails the operation and awaits worker cleanup; it is not partial success.
 
@@ -112,7 +118,7 @@ Timeline discovery reads page 1 and, when necessary, the last page (100 events e
 
 Timeline comments and review summaries are included as bounded notification evidence. The independent `github.conversation` operation reads full bodies; it never changes the timeline evidence contract or notification state. `timeline: complete` means the fetched REST timeline listing was complete, not that every possible GitHub source is available. The notification service itself has retention/settings limits. Neither complete coverage nor an absent notification finishes a local commitment.
 
-GitHub requests are not a transaction. Concurrent source changes may require a later manual refresh. This version does not search repositories, poll, auto-refresh, or asynchronously reorder after returning a batch.
+GitHub requests are not a transaction. Concurrent source changes may require a later manual refresh. Missing/failed source reads do not confirm terminal status; the client exposes saved coverage and fails open for suppression while preserving local checkpoints and manual Archive. This version does not search repositories, poll, auto-refresh, or asynchronously reorder after returning a batch.
 
 ### Conversation pages
 
@@ -167,6 +173,7 @@ The real arm64 smoke verified supported gh authentication, isolated SDK startup,
 ## Official references
 
 - [GitHub notification endpoints and read/done semantics](https://docs.github.com/en/rest/activity/notifications)
+- [GitHub GraphQL PullRequest fields, including mergeQueueEntry](https://docs.github.com/en/graphql/reference/objects#pullrequest)
 - [Copilot SDK 1.0.13 client/session types](https://github.com/github/copilot-sdk/blob/v1.0.13/nodejs/src/types.ts)
 - [SDK initialization, auth, empty-mode defaults, and transport](https://github.com/github/copilot-sdk/blob/v1.0.13/nodejs/src/client.ts)
 - [SDK completed-response and session lifecycle APIs](https://github.com/github/copilot-sdk/blob/v1.0.13/nodejs/src/session.ts)
