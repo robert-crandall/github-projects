@@ -1,3 +1,4 @@
+mod conversation;
 mod error;
 mod launch;
 mod model;
@@ -5,6 +6,7 @@ mod service;
 mod smoke;
 mod storage;
 
+use conversation::{ConversationCache, ConversationPage, ConversationReference, ConversationStore};
 use error::{NativeError, Result};
 use launch::{GitHubIdentity, LaunchResult};
 use model::{Snapshot, WorkspaceRead};
@@ -165,6 +167,57 @@ async fn launch_copilot(identity: GitHubIdentity) -> Result<LaunchResult> {
 }
 
 #[tauri::command]
+async fn launch_web_url(url: String) -> Result<LaunchResult> {
+    background(move || launch::dispatch_web(url)).await
+}
+
+async fn with_conversations<T: Send + 'static>(
+    state: State<'_, Arc<Mutex<ConversationStore>>>,
+    operation: impl FnOnce(&mut ConversationStore) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let store = state.inner().clone();
+    background(move || {
+        let mut store = store.lock().map_err(|_| {
+            NativeError::new(
+                "conversation-cache-unavailable",
+                "The conversation cache worker stopped. Restart before retrying. Your notes are safe.",
+            )
+        })?;
+        operation(&mut store)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn conversation_read(
+    state: State<'_, Arc<Mutex<ConversationStore>>>,
+    reference: ConversationReference,
+) -> Result<Option<ConversationCache>> {
+    with_conversations(state, move |store| store.read(reference)).await
+}
+
+#[tauri::command]
+async fn conversation_merge(
+    state: State<'_, Arc<Mutex<ConversationStore>>>,
+    page: ConversationPage,
+) -> Result<ConversationCache> {
+    with_conversations(state, move |store| store.merge(page)).await
+}
+
+#[tauri::command]
+async fn conversation_clear(
+    state: State<'_, Arc<Mutex<ConversationStore>>>,
+    reference: ConversationReference,
+) -> Result<()> {
+    with_conversations(state, move |store| store.clear(reference)).await
+}
+
+#[tauri::command]
+async fn conversation_reset(state: State<'_, Arc<Mutex<ConversationStore>>>) -> Result<()> {
+    with_conversations(state, |store| store.reset()).await
+}
+
+#[tauri::command]
 fn clock_now() -> Clock {
     clock()
 }
@@ -206,6 +259,9 @@ fn install_lifecycle(
     runtime_directory: std::path::PathBuf,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     app.manage(NativeState::new(store));
+    app.manage(Arc::new(Mutex::new(ConversationStore::new(
+        runtime_directory.clone(),
+    ))));
     app.manage(Arc::new(ServiceHost::new(
         runtime_directory.join("service-runtime"),
     )?));
@@ -370,6 +426,11 @@ pub fn run() {
             workspace_recover,
             launch_github,
             launch_copilot,
+            launch_web_url,
+            conversation_read,
+            conversation_merge,
+            conversation_clear,
+            conversation_reset,
             clock_now,
             service_request,
         ])

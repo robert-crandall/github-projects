@@ -16,6 +16,7 @@ export function createHandler(github = new GitHubService(), copilot = new Copilo
         };
       }
       case 'github.refresh': return github.refresh(signal);
+      case 'github.conversation': return github.conversation(request.input, signal);
       case 'github.acknowledge': return github.write('acknowledge', request.input, signal);
       case 'github.unsubscribe': return github.write('unsubscribe', request.input, signal);
       case 'copilot.triage': return copilot.triage(request.input, signal);

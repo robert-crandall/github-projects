@@ -1,4 +1,6 @@
 import type { AppState, Command, Row } from '../types.ts';
+import type { ReactNode } from 'react';
+import type { Reference } from '../../service/src/schema.ts';
 
 export type Destination = { row: Row; kind: 'github' | 'copilot' | 'notification'; action?: 'done' | 'unsubscribe'; retryId?: string };
 export type WorkspaceView = {
@@ -11,5 +13,7 @@ export type WorkspaceView = {
     saving: boolean; refreshing: boolean; refresh: () => void;
     open: (destination: Destination) => void;
     connections: () => void;
+    conversation: (reference: Reference) => ReactNode;
+    readerReady: (reference: Reference) => boolean;
   };
 };

@@ -70,6 +70,7 @@ The host must expose only these operation names through its native command, not 
 | --- | --- | --- |
 | `connection.check` | `{}` | Separate `github` and `copilot` availability, sanitized errors; GitHub viewer/scopes |
 | `github.refresh` | `{}` | One batch with source threads, evidence, current state, and coverage diagnostics |
+| `github.conversation` | `{reference, stream, page}` | One full-body message page, pagination metadata, fetched time and explicit partial/access error |
 | `github.acknowledge` | `writeInputSchema` | Echoed context, `action: "acknowledge"`, `status: "confirmed"`, `confirmedAt` |
 | `github.unsubscribe` | `writeInputSchema` | Echoed context, `action: "unsubscribe"`, `status: "confirmed"`, `confirmedAt` |
 | `copilot.triage` | `triageInputSchema` | Evidence-grounded summaries, uncertainty, next-action previews, and proposed order |
@@ -109,9 +110,19 @@ A genuinely successful empty notification listing is distinct from a failed/none
 
 Timeline discovery reads page 1 and, when necessary, the last page (100 events each). For exactly two pages, both are contiguous. With more pages, only the newest page is eligible evidence; disconnected page-1 history is discarded, and coverage remains partial. `coverage.newestPage`, `fetchedPages`, and `observedAt` describe the batch, not a durable server cursor. Malformed/identity-less events or incomplete newest coverage prevent definite promotion. Team membership is bounded to 200 teams; unavailable membership becomes unknown, never assumed membership.
 
-Timeline comments and review summaries are included. Inline diff comments, full review threads, all issue-body revisions, and complete historical event recovery are not fetched. `timeline: complete` means the fetched REST timeline listing was complete, not that every possible GitHub source is available. The notification service itself has retention/settings limits. Neither complete coverage nor an absent notification finishes a local commitment.
+Timeline comments and review summaries are included as bounded notification evidence. The independent `github.conversation` operation reads full bodies; it never changes the timeline evidence contract or notification state. `timeline: complete` means the fetched REST timeline listing was complete, not that every possible GitHub source is available. The notification service itself has retention/settings limits. Neither complete coverage nor an absent notification finishes a local commitment.
 
 GitHub requests are not a transaction. Concurrent source changes may require a later manual refresh. This version does not search repositories, poll, auto-refresh, or asynchronously reorder after returning a batch.
+
+### Conversation pages
+
+`stream` is `description`, `comments`, `reviews` or `inline`; issues support only the first two. `page: null` requests the newest page, and a positive page explicitly revisits history. Only these reconstructed GET routes are added: issue/PR roots, `/issues/{number}/comments`, `/pulls/{number}/reviews` and `/pulls/{number}/comments`. Lists use `per_page=5`. Newest discovery probes page 1 and optionally the last page: at most two reads per stream, or seven reads for a PR's initial/latest conversation (three for an issue). Older/reload actions read one page. They never request notification state or use a model.
+
+Messages include the untruncated body, author, created/edited times and a validated GitHub source URL. IDs contain repository, source type/number, message type and GitHub ID. Inline replies retain `in_reply_to_id` independently of the review ID, so replies from different reviews stay with their original discussion even across pages. Missing/deleted parent context remains unknown. File paths and line numbers provide context; this is not a file diff or resolved-thread mirror.
+
+The serialized UTF-8 page must fit below the 1 MiB response limit (4 KiB reserved for the envelope). An oversized page returns a limit error with no clipped bodies; it does not silently advance. Malformed messages preserve valid siblings with a partial-page error. Authentication, access, rate limits and offline errors remain explicit. Full lists are not transactional snapshots: page boundaries can shift after deletions, so cached deleted content can remain until explicit cache discard. Reloading an older page re-observes edits by stable identity.
+
+These DTOs live in a separate native cache, never in task/note snapshots, `Row.events`, or model payloads. Cache limits/recovery are documented in the [native contract](../src/platform/README.md). The reader refreshes only the selected cached source's newest pages; every saved older page exposes its own timestamp and explicit reload action.
 
 ### Explicit writes
 

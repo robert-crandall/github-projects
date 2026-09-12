@@ -49,6 +49,18 @@ Version-2 conversion first creates a durable immutable backup at the current rev
 
 Recovery still preserves historical reminder receipts and any history-loss cutoff for data integrity, but neither recovered schedules nor receipts can resume notification delivery. Original bytes remain in raw exports.
 
+## Independent conversation cache
+
+`conversationRead(reference)` reads saved messages only. `conversationMerge(page)` atomically merges a validated service page into the native cache. `conversationReset()` explicitly preserves and discards only the conversation cache; the reader asks for confirmation, and a subsequent load is a separate action. These commands cannot accept filesystem paths, endpoints, notification IDs or private workspace content.
+
+The cache uses a separate checksummed SQLite file in the existing private app directory. Identity is lowercased repository + source type (`pr`/`issue`) + number, so notification placeholder promotion cannot detach messages. Messages merge by stable identity and update timestamp; failed pages retain cached bodies and explicit failure metadata. Page identity is stream + page number, with its own observation time.
+
+Limits are 4 MiB per issue/PR source and 64 MiB total serialized UTF-8 content, at most 5,000 messages and 2,000 page records per source, and 1 MiB per incoming page. Limit failures preserve old cached content. Cache corruption cannot block reading/saving notes and Tasks; no automatic reset or eviction runs. Explicit discarded-cache recovery copies are retained separately and require manual cleanup.
+
+Conversation bodies are excluded from workspace snapshots, revisions, backup rotation and note edits. `ConversationWorkspace` holds only the selected source in renderer memory. Selection/startup/focus/reconnect read no network. An explicit notification Refresh waits for selected cached conversation reads before publishing, keeps successful notification results if the reader fails, and ignores selected-reader results from an older navigation generation. Old history never enters notification evidence.
+
+Markdown uses React Markdown and GFM without raw HTML execution. Image elements become inert text and optional explicit external links; rendering cannot fetch remote content. `launchWebUrl(url)` dispatches only validated HTTP(S) URLs through the fixed native opener; credentials, control characters and non-web protocols are rejected. The webview still denies external navigation/new windows.
+
 ## Clock and retired reminders
 
 `clockNow()` returns `{now,timeZone,error}` from the actual clock and detected local zone. If detection fails, `timeZone` is null and the error is explicit.

@@ -60,6 +60,7 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
             op,
             "connection.check"
                 | "github.refresh"
+                | "github.conversation"
                 | "github.acknowledge"
                 | "github.unsubscribe"
                 | "copilot.triage"
@@ -69,6 +70,11 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
         )
     {
         return Err(NativeError::invalid());
+    }
+    if op == "github.conversation" {
+        serde_json::from_value::<crate::conversation::ConversationInput>(request["input"].clone())
+            .map_err(|_| NativeError::invalid())?
+            .validate()?;
     }
     Ok((id, op))
 }
@@ -377,6 +383,166 @@ mod tests {
         ] {
             assert!(validate_request(&value).is_err());
         }
+    }
+
+    #[test]
+    fn conversation_requests_validate_before_starting_a_service() {
+        let input = json!({
+            "reference":{"repo":"octo/project","kind":"pr","number":12},
+            "stream":"comments","page":null
+        });
+        assert!(validate_request(
+            &json!({"v":1,"id":"reader","op":"github.conversation","input":input})
+        )
+        .is_ok());
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let host = ServiceHost::new(directory.path().join("never-started")).unwrap();
+        for input in [
+            json!({"reference":{"repo":"octo/project","kind":"pr","number":12},"stream":"comments"}),
+            json!({"reference":{"repo":"octo/project","kind":"pr","number":12},"stream":"comments","page":0}),
+            json!({"reference":{"repo":"octo/project","kind":"pr","number":12},"stream":"description","page":2}),
+            json!({"reference":{"repo":"octo/project","kind":"issue","number":12},"stream":"reviews","page":null}),
+            json!({"reference":{"repo":"../project","kind":"pr","number":12},"stream":"comments","page":null}),
+            json!({"reference":{"repo":"octo/project","kind":"pr","number":12},"stream":"comments","page":null,"url":"https://evil.invalid"}),
+        ] {
+            assert_eq!(
+                host.request(json!({"v":1,"id":"reader","op":"github.conversation","input":input}))
+                    .unwrap_err()
+                    .code,
+                "invalid-input"
+            );
+            assert!(host.process.lock().unwrap().is_none());
+            assert!(!host.directory.exists());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn conversation_roundtrips_through_the_actual_packaged_service_offline() {
+        let packaged = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!(
+                "github-projects-service-{}-apple-darwin",
+                std::env::consts::ARCH
+            ));
+        assert!(
+            packaged.is_file(),
+            "Build the packaged service before native tests."
+        );
+        let directory = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let gh = directory.path().join("gh");
+        let response = json!({
+            "id":100,"number":12,"body":"# Full description\n\nNative transport retains **Markdown**.",
+            "user":{"login":"octocat"},"created_at":"2026-09-10T01:00:00Z",
+            "updated_at":"2026-09-11T01:00:00Z",
+            "html_url":"https://github.com/octo/project/pull/12"
+        });
+        let mut comment = response.clone();
+        comment["id"] = json!(101);
+        comment["body"] = json!("Readable sibling from a partially malformed page.");
+        comment["html_url"] = json!("https://github.com/octo/project/pull/12#issuecomment-101");
+        let partial = json!([comment, {"id":99,"body":false}]);
+        let gh_script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *'/repos/octo/project/pulls/12'*) printf '%s\\n%s\\n\\n%s\\n' 'HTTP/2 200 OK' 'content-type: application/json' '{}' ;;\n  *'/repos/octo/project/issues/12/comments?per_page=5&page=1'*) printf '%s\\n%s\\n\\n%s\\n' 'HTTP/2 200 OK' 'content-type: application/json' '{}' ;;\n  *) exit 1 ;;\nesac\n",
+            response, partial
+        );
+        std::fs::write(&gh, gh_script).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fn quote(path: &std::path::Path) -> String {
+            format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
+        }
+        let wrapper = directory.path().join("service");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport PATH={}\nexec {}\n",
+                quote(directory.path()),
+                quote(&packaged)
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let host = ServiceHost {
+            binary: wrapper,
+            directory: directory.path().join("runtime"),
+            process: Mutex::new(None),
+            closed: AtomicBool::new(false),
+        };
+        let response = host
+            .request_with_timeout(
+                json!({
+                    "v":1,"id":"native-conversation","op":"github.conversation",
+                    "input":{"reference":{"repo":"octo/project","kind":"pr","number":12},"stream":"description","page":null}
+                }),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        let page: crate::conversation::ConversationPage =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        page.validate().unwrap();
+        assert!(page.error.is_none(), "{response}");
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(
+            page.messages[0].body,
+            "# Full description\n\nNative transport retains **Markdown**."
+        );
+        assert_eq!(
+            page.messages[0].id,
+            "github:octo/project:pr:12:description:100"
+        );
+        let mut cache = crate::conversation::ConversationStore::new(directory.path().join("cache"));
+        assert_eq!(cache.merge(page.clone()).unwrap().messages.len(), 1);
+        let mut cached_comment = page;
+        cached_comment.stream = crate::conversation::ConversationStream::Comments;
+        cached_comment.messages[0].kind = crate::conversation::ConversationStream::Comments;
+        cached_comment.messages[0].id = "github:octo/project:pr:12:comments:99".into();
+        cached_comment.messages[0].body = "Previously cached sibling stays readable.".into();
+        cached_comment.messages[0].url =
+            "https://github.com/octo/project/pull/12#issuecomment-99".into();
+        cache.merge(cached_comment).unwrap();
+        let response = host
+            .request_with_timeout(
+                json!({
+                    "v":1,"id":"native-partial-conversation","op":"github.conversation",
+                    "input":{"reference":{"repo":"octo/project","kind":"pr","number":12},"stream":"comments","page":1}
+                }),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        host.shutdown();
+        assert_eq!(response["ok"], true, "{response}");
+        let page: crate::conversation::ConversationPage =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        assert!(page.error.is_some(), "{response}");
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(
+            page.messages[0].id,
+            "github:octo/project:pr:12:comments:101"
+        );
+        let cached = cache.merge(page).unwrap();
+        assert_eq!(cached.messages.len(), 3);
+        assert!(cached.messages.iter().any(|message| {
+            message.id == "github:octo/project:pr:12:comments:99"
+                && message.body == "Previously cached sibling stays readable."
+        }));
+        assert!(cached.messages.iter().any(|message| {
+            message.id == "github:octo/project:pr:12:comments:101"
+                && message.body == "Readable sibling from a partially malformed page."
+        }));
+        assert!(cached.pages.iter().any(|page| {
+            page.stream == crate::conversation::ConversationStream::Comments && page.error.is_some()
+        }));
+        assert_eq!(
+            cache
+                .read(cached.reference)
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            3
+        );
+        assert!(host.process.lock().unwrap().is_none());
     }
 
     #[test]

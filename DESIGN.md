@@ -41,7 +41,9 @@ Use monospace only for raw preserved records or other machine output. Display us
 
 ## Reader and controls
 
-Thread detail starts with the source title and visible GitHub/Copilot destinations. Label the initial reader **Saved source summary**; do not imply that bounded summaries are the full conversation.
+Thread detail starts with the source title and visible GitHub/Copilot destinations. The desktop **Conversation** reader presents full Markdown messages in chronological groups, with author, time and source links. Inline replies stay with their discussion; missing opening context remains explicit. The isolated browser prototype retains its honestly labeled synthetic source summaries.
+
+Keep readable body type, wrapping code and independently scrolling tables. Do not clip messages, render raw source HTML or automatically fetch remote images. Put cache/loading errors and explicit Load/Reload controls near the reader; page freshness and older-history controls use a compact disclosure. Preserve the current visible message anchor as pages arrive.
 
 Thread notes are private, locally saved textareas. Migration may produce several separately labeled annotations. Preserve their source titles and inspectable original action history. Editing one must not overwrite another.
 
@@ -63,4 +65,4 @@ Prototype labels and synthetic-data notices remain factual. Legacy routine recor
 
 ## Boundaries
 
-No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status. Full conversation rendering, archive semantics and filters are separate follow-up issues.
+No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status. Archive semantics and filters remain separate follow-up issues.

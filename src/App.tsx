@@ -4,10 +4,11 @@ import {
   GitPullRequest, Github, Inbox, MessageSquare, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
 } from 'lucide-react';
 import { earlierThreads, getRow, getRows } from './domain/engine.ts';
-import { threadIdSchema } from '../service/src/schema.ts';
+import { conversationKey, threadIdSchema } from '../service/src/schema.ts';
 import type { AppState, LocalHistory, Row, Scenario, Task, View } from './types.ts';
 import { useWorkspace } from './useWorkspace.ts';
 import type { Destination, WorkspaceView } from './runtime/view.ts';
+import { ReaderPosition } from './runtime/ReaderPosition.tsx';
 
 type Dispatch = WorkspaceView['dispatch'];
 const viewLabels: Record<View, string> = { inbox: 'Inbox', tasks: 'Tasks' };
@@ -167,21 +168,22 @@ function TaskText({ task, dispatch }: { task: Task; dispatch: Dispatch }) {
     : <button className="text-button" onClick={() => { setText(task.title); setEditing(true); }}>Edit text</button>;
 }
 
-function Detail({ row, state, dispatch, open, back, unsaved }: {
+function Detail({ row, state, dispatch, open, back, unsaved, conversation }: {
   row: Row; state: AppState; dispatch: Dispatch; open: (destination: Destination) => void; back: () => void; unsaved: boolean;
+  conversation?: ReactNode;
 }) {
   const task = row.task;
   const thread = row.thread;
   const notes = thread ? state.notes.filter(note => note.threadId === thread.id) : [];
   const canWrite = state.runtime !== 'desktop' || (thread?.source === 'github' && threadIdSchema.safeParse(thread.id).success);
-  return <article className="detail" aria-label="Selected item">
+  return <>
     <header className="detail-toolbar">
       <button className="text-button back-control" onClick={back}><ArrowLeft size={15} />Back to list</button>
       <span className="detail-location">{thread ? <><Github size={14} />{thread.repo}<span className="separator">/</span>#{thread.number}</> : <><Circle size={14} />Task</>}</span>
       <span className={`state-tag ${task?.status === 'done' ? 'complete' : ''}`}>{thread ? thread.state === 'queued' ? 'In merge queue' : thread.state === 'closed' ? 'Source closed' : 'Open' : task?.status === 'done' ? 'Done' : 'Open'}</span>
     </header>
     <div className="detail-body">
-      <h2 className="preserve-text">{row.title}</h2>
+      <h2 className="preserve-text" data-reader-anchor="title">{row.title}</h2>
       <Destinations row={row} open={open} />
       {task && <>
         <div className="detail-actions task-controls"><label className="checkbox-label"><input type="checkbox" checked={task.status === 'done'}
@@ -197,12 +199,12 @@ function Detail({ row, state, dispatch, open, back, unsaved }: {
         {task.history && <History history={task.history} state={state} />}
       </>}
       {thread && <>
-        <section className="evidence" aria-label="Saved source summary"><h3>Saved source summary</h3>
+        {conversation ?? <section className="evidence" aria-label="Saved source summary"><h3>Saved source summary</h3>
           {thread.events.slice(-3).map(event => <div className="source-event" key={event.id}><p className="preserve-text">{event.summary}</p><small>{event.actor} · {stamp(event.at, state.timeZone, true)}</small></div>)}
           {!thread.events.length && <p>No source activity saved yet. Open on GitHub for the conversation.</p>}
           <p className="field-help">Bounded source summaries, not the full conversation.</p>
-        </section>
-        <section className="notes-section" aria-label="Private thread notes">
+        </section>}
+        <section className="notes-section" aria-label="Private thread notes" data-reader-anchor="thread-notes">
           {(notes.length ? notes : [undefined]).map((note, index) => <div className="thread-note" key={index}>
             <div className="section-heading"><label htmlFor={`thread-note-${index}`}>{index === 0 ? 'Thread notes' : `Thread note ${index + 1}`}</label><span>{unsaved ? 'Not saved yet' : 'Private · saved locally'}</span></div>
             {note?.sourceTitle !== undefined && <p className="note-source preserve-text">{note.sourceTitle}</p>}
@@ -223,7 +225,7 @@ function Detail({ row, state, dispatch, open, back, unsaved }: {
         {thread.diagnostics?.map(message => <p className="notice-inline warning" key={message}>{message}</p>)}
       </>}
     </div>
-  </article>;
+  </>;
 }
 
 export function App() { return <WorkspaceApp workspace={useWorkspace()} />; }
@@ -238,6 +240,7 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
   const listRef = useRef<HTMLDivElement>(null);
   const rows = getRows(state);
   const selected = state.selectedKey ? getRow(state, state.selectedKey) : undefined;
+  const positionKey = selected?.thread ? `reader:${conversationKey(selected.thread)}` : `reader:${selected?.key}`;
   const earlier = state.view === 'inbox' ? earlierThreads(state) : [];
   const open = rows.filter(row => row.task?.status !== 'done');
   const done = rows.filter(row => row.task?.status === 'done');
@@ -290,7 +293,11 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
           </div>
           <footer className="queue-footer">{state.view === 'inbox' ? 'GitHub refresh is manual.' : 'GitHub activity never reopens a task.'}</footer>
         </section>
-        {selected ? <Detail row={selected} state={state} dispatch={dispatch} open={openDestination} back={() => dispatch({ type: 'select', key: null })} unsaved={!!workspace.storageError || !!live?.saving} />
+        {selected ? <ReaderPosition positionKey={positionKey} offset={workspace.scroll[positionKey] ?? 0} save={workspace.saveScroll}
+          ready={!live || !selected.thread || selected.thread.source !== 'github' || live.readerReady(selected.thread)}>
+          <Detail row={selected} state={state} dispatch={dispatch} open={openDestination} back={() => dispatch({ type: 'select', key: null })} unsaved={!!workspace.storageError || !!live?.saving}
+            conversation={selected.thread?.source === 'github' ? live?.conversation({ repo: selected.thread.repo, kind: selected.thread.kind, number: selected.thread.number }) : undefined} />
+        </ReaderPosition>
           : <div className="empty-detail"><Inbox size={29} strokeWidth={1.25} /><h2>{state.view === 'inbox' ? 'Select a thread' : 'Select a task'}</h2><p>{state.view === 'inbox' ? 'Read saved activity and keep private notes.' : 'Edit its text, keep notes, or mark it Done.'}</p></div>}
       </div>
       <footer className="workspace-footer"><span><Circle size={11} />{live ? 'Workspace time' : 'Demo clock'}: {stamp(state.clock, state.timeZone, true)} · {state.timeZone}</span><span>{workspace.storageError ? <><AlertCircle size={12} />Pending changes not saved</> : live?.saving ? 'Saving...' : <><Check size={12} />{live ? 'Saved on this Mac' : 'Saved in this browser'}</>}</span></footer>

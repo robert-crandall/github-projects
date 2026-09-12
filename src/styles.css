@@ -83,7 +83,7 @@ p { line-height: 1.65; }
 .new-updates h3 > span:last-child { margin-left: auto; color: var(--muted); font-weight: 400; }
 .queue-footer { display: flex; align-items: center; gap: 7px; font-size: 10px; color: var(--muted); padding: 13px 18px; border-top: 1px solid var(--border); }
 .quiet-dot { background: var(--muted); height: 4px; width: 4px; }
-.detail { overflow-y: auto; min-width: 0; background: var(--surface); scrollbar-gutter: stable; }
+.detail { overflow-y: auto; min-width: 0; background: var(--surface); scrollbar-gutter: stable; overflow-anchor: none; }
 .detail-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); min-height: 55px; padding: 12px 25px; }
 .detail-location { display: flex; gap: 8px; align-items: center; font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
 .separator { color: var(--muted); opacity: .6; }
@@ -162,6 +162,41 @@ blockquote { margin: 12px 0; font-size: 12px; white-space: pre-wrap; overflow-wr
 .task-controls { margin-top: 20px; justify-content: space-between; }
 .task-controls .checkbox-label { display: flex; gap: 8px; align-items: center; }
 .preserve-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.conversation { margin-top: 30px; }
+.conversation > .section-heading { margin-bottom: 6px; }
+.conversation-actions { margin-top: 16px; }
+.conversation-pages { margin-top: 20px; color: var(--secondary); font-size: 12px; }
+.conversation-pages > summary { cursor: pointer; padding: 8px 0; }
+.conversation-pages h4 { margin: 18px 0 8px; font-size: 13px; }
+.conversation-page { border-top: 1px solid var(--border); padding: 10px 0; }
+.conversation-page > span { display: block; line-height: 1.6; }
+.conversation-page .inline-error { margin: 6px 0; }
+.conversation-messages { margin-top: 24px; }
+.conversation-message { border-top: 1px solid var(--border); padding: 20px 0; overflow-wrap: anywhere; }
+.conversation-message > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; color: var(--secondary); font-size: 12px; }
+.conversation-message > header strong { color: var(--text); font-weight: 600; }
+.conversation-message a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.message-edited { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.message-markdown { font-size: 14px; line-height: 1.7; margin-top: 14px; }
+.message-markdown > :first-child { margin-top: 0; }
+.message-markdown p, .message-markdown ul, .message-markdown ol, .message-markdown blockquote { margin: 12px 0; }
+.message-markdown h1, .message-markdown h2, .message-markdown h3, .message-markdown h4, .message-markdown h5, .message-markdown h6 { margin: 24px 0 10px; font-size: 16px; line-height: 1.4; letter-spacing: 0; }
+.message-markdown h1, .message-markdown h2 { font-size: 18px; }
+.message-markdown pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--subtle); padding: 12px; border: 1px solid var(--border); border-radius: 6px; line-height: 1.6; }
+.message-markdown code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.message-markdown :not(pre) > code { background: var(--subtle); padding: 1px 3px; border-radius: 3px; }
+.message-markdown blockquote { border-left: 1px solid var(--border); padding-left: 14px; font-style: normal; font-size: inherit; white-space: normal; }
+.message-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+.message-markdown th, .message-markdown td { padding: 6px 10px; border: 1px solid var(--border); }
+.message-markdown .task-list-item { list-style: none; }
+.message-markdown input[type="checkbox"] { margin-right: 6px; }
+.blocked-embed { color: var(--muted); font-size: 12px; }
+.review-discussion { margin: 20px 0; padding-left: 14px; border-left: 1px solid var(--border); }
+.review-discussion > h4 { margin: 0 0 10px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.review-discussion .conversation-message { padding: 16px 0; }
+.cache-confirm { padding: 16px 0; margin-top: 16px; border-top: 1px solid var(--border); }
+.cache-confirm p { font-size: 13px; margin-bottom: 12px; }
+.cache-limits { margin-top: 20px; }
 .history-record { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; color: var(--secondary); }
 .thread-note + .thread-note { margin-top: 24px; }
 .note-source { font-size: 12px; color: var(--secondary); margin-bottom: 8px; }

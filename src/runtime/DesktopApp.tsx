@@ -8,6 +8,8 @@ import { DesktopWorkspace } from './desktop-workspace.ts';
 import { ConnectionsPanel, RecoveryPanel } from './NativePanels.tsx';
 import type { RemoteWorkspace } from './remote-view.ts';
 import type { Destination, WorkspaceView } from './view.ts';
+import { ConversationReader } from './ConversationReader.tsx';
+import { conversationKey } from '../../service/src/schema.ts';
 
 function DestinationPanel({ destination, controller, remote, close }: {
   destination: Destination; controller: DesktopWorkspace; remote: RemoteWorkspace; close: () => void;
@@ -56,12 +58,17 @@ function DestinationPanel({ destination, controller, remote, close }: {
 export function DesktopApp({ controller, remote }: { controller: DesktopWorkspace; remote: RemoteWorkspace }) {
   const status = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const network = useSyncExternalStore(remote.subscribe, remote.getSnapshot);
+  const conversation = useSyncExternalStore(remote.conversation.subscribe, remote.conversation.getSnapshot);
   const [connections, setConnections] = useState(false);
   const [recovery, setRecovery] = useState(false);
   const [destination, setDestination] = useState<Destination>();
   useEffect(() => {
     void controller.load();
   }, [controller]);
+  const selection = status.workspace?.state.selectedKey;
+  useEffect(() => {
+    if (!selection?.startsWith('t:')) void remote.conversation.select(null);
+  }, [remote, selection]);
   const run = (operation: () => Promise<void>) => { void operation().catch(error => controller.report(error)); };
   if (!status.workspace) return <main className="desktop-loading">
     <h1>GitHub Projects</h1><h2>{status.loading ? 'Reading saved work...' : 'Saved work could not load'}</h2>
@@ -70,6 +77,7 @@ export function DesktopApp({ controller, remote }: { controller: DesktopWorkspac
     {!status.loading && <div className="button-row"><button className="secondary" onClick={() => run(() => controller.reload())}><RefreshCw size={15} />Retry reading saved work</button><button className="secondary" onClick={() => setRecovery(true)}>Backups & recovery</button></div>}
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
   </main>;
+  const timeZone = status.workspace.state.timeZone;
   const workspace: WorkspaceView = {
     state: status.workspace.state, scroll: status.workspace.scroll, dispatch: controller.dispatch,
     storageError: status.persistence.error, operationError: status.operationError,
@@ -79,6 +87,10 @@ export function DesktopApp({ controller, remote }: { controller: DesktopWorkspac
     desktop: {
       saving: status.persistence.pending, refreshing: network.refreshing, refresh: () => run(() => remote.refresh()),
       open: setDestination, connections: () => setConnections(true),
+      conversation: reference => <ConversationReader reference={reference} controller={remote.conversation}
+        platform={controller.platform} refreshing={network.refreshing} timeZone={timeZone} />,
+      readerReady: reference => !conversation.reading && !!conversation.reference
+        && conversationKey(reference) === conversationKey(conversation.reference),
     },
   };
   return <WorkspaceApp workspace={workspace}>
