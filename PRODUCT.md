@@ -2,290 +2,66 @@
 
 <!-- impeccable:product-schema 1 -->
 
-**Status:** On September 11, 2026, I approved a greenfield replacement. These requirements describe the new app, not the existing implementation.
-
-**Identity:** Keep the GitHub Projects name and supplied purple GitHub logo. Replace Dusk: my preferred visual references are the **Fox** and **GitHub** themes in Copilot App / GitHub App.
-
 ## Purpose
 
-I want one trusted place to see what needs my attention, choose work, and keep my place. GitHub notifications tell me what changed. My commitments record what I intend to do. Neither incoming activity nor a recommendation gets to replace my chosen work.
+A local-first, email-like GitHub notification client with standalone task capture. The left pane holds inboxes, the middle lists threads or tasks, and the right reads the selection.
 
-The app helps me respond and follow through. It does not turn every notification into a task or make me maintain another inbox.
+Keep the existing GitHub-dark interface, native Tauri shell, CLI authentication and current SQLite namespace. This is an evolution of the current app, not another greenfield rewrite.
 
-I also need freeform capture for requests outside GitHub and scheduled routines. Notifications are an input, not a complete record of my commitments.
+## Inbox and Tasks
 
-## Platform and delivery
+**Inbox** contains GitHub threads, grouped by issue or PR. Selecting a thread reads it; it never creates, chooses, or completes a task. Source activity does not imply a personal commitment. Keep request evidence and uncertainty visible without turning the reader into a task-management form.
 
-web
+Notes belong to their thread. They save locally on edit and survive navigation, refresh and relaunch. Multiple annotations stay separate and editable; one must never overwrite another. Notes and local history never enter a GitHub write, Copilot handoff, or model payload.
 
-This identifies the interface platform. The first deliverable is a clickable browser prototype. The finished product is a local-first macOS desktop app.
+**Tasks** contains standalone captures. Capture is available from either inbox, including with Command/Ctrl+K. Save arbitrary text immediately, without a network or model round trip. Links and daily phrasing remain text; they do not automatically link a task, interpret a routine, or schedule anything.
 
-- Use a fresh application model and fresh storage. There is no requirement to migrate or support the previous schema.
-- Never open, overwrite, clear, or seed the previous app's storage. Use a distinct browser storage namespace and a distinct desktop data location.
-- Retain Tauri, React, SQLite, and the GitHub Copilot SDK as the desktop baseline. Reusing suitable tooling does not require preserving old behavior.
-- Evaluate the interaction with synthetic data before implementing live integrations. A prototype is not evidence of working GitHub sync, Copilot handoff, or native reminders.
-- Keep credentials outside the renderer. Reuse supported existing CLI sign-ins where possible; surface missing authentication or scopes explicitly.
+Tasks have text, notes and Done. Completed tasks remain visible in a Done section. Only an explicit user change reopens a task. Comments, review requests, merges, closure and merge-queue activity cannot do so.
 
-## Product principles
+Working on, Later, routines, mandatory steps, project grouping and commitment ranking are no longer core controls. Retired routines cannot deliver invisible native reminders.
 
-- **My choice wins.** Refresh, ranking, reminders, and incoming activity never replace work I chose.
-- **Changes are not obligations.** Show what changed and distinguish an explicit request from an inference.
-- **Finishing is final for that action.** A PR remaining open does not mean my review remains unfinished.
-- **Capture first.** Save original text before interpretation or network work. Notes and progress autosave.
-- **No maintenance ritual.** No mandatory projects, inbox clearing, weekly reviews, review quotas, or sorting chores.
+## Reading and external operations
 
-## Workspace
+The first Inbox release retains bounded source summaries and a saved history disclosure. It labels them honestly, rather than claiming to contain the full conversation. Full issue/PR conversation reading follows in [#9](https://github.com/robert-crandall/github-projects/issues/9).
 
-Use a compact list and a persistent detail pane, not a large recommendation card or a dashboard of unrelated panels.
+Keep **Open on GitHub** and **Review in Copilot** / **Open in Copilot** visible on eligible thread rows and in the reader. Native launches accept validated GitHub identities, not arbitrary URLs or private notes. A successful launch request does not prove a session exists or a review finished.
 
-| Area | Meaning |
+Existing **Mark notification done on GitHub** and **Unsubscribe on GitHub** remain explicit, confirmed operations. Save the operation intent before dispatch. Verify the response against that intent; handle only its displayed evidence, not newer events that arrived concurrently. Failed or interrupted operations remain visible and explicitly retryable after relaunch, never automatically replayed.
+
+A compact **Earlier threads** disclosure keeps retained acknowledged or unsubscribed conversations and notes reachable. These are retained conversations, not pending obligations. This is not a new archive model; archive/resurface behavior follows in [#10](https://github.com/robert-crandall/github-projects/issues/10).
+
+Filtering and terminal suppression follow in [#11](https://github.com/robert-crandall/github-projects/issues/11). Future terminal semantics mean confirmed merged, closed, or **currently in GitHub's merge queue**, not release/deployment tracking. Do not implement those future features here.
+
+## Refresh and saves
+
+GitHub refresh stays explicit. Startup, focus, clocks, edits and navigation do not fetch notifications or initialize model requests.
+
+Refresh applies one bounded response to the latest local state. Preserve edits, selection, task completion and existing row order while a request is running. Failed, partial and empty results are distinct; none silently destroys saved history. Missing source evidence remains uncertain.
+
+Local saves use the existing checksummed, revisioned SQLite snapshot and serialized write queue. Saved feedback appears only when the latest changes persist. Errors leave pending edits available with retry and export controls. Conflict recovery backs up the other saved copy before replacing it. Corrupt data never becomes an automatic empty workspace.
+
+## Current-format migration
+
+Migrate the current version-2 workspace to version 3 only after preserving a durable, recoverable original. Never read or import the unrelated older app database or browser namespace.
+
+| Existing record | New home |
 | --- | --- |
-| **Working on** | The one action I explicitly chose. Its notes, next step, and progress survive navigation, refresh, handoff, and relaunch. |
-| **Needs attention** | Requests, relevant updates, due commitments, and available captures. Group GitHub updates by issue or PR without treating the whole thread as one lifelong obligation. |
-| **Later** | Work I deliberately retained for another time, with an optional reminder. |
-
-History, routines, optional project context, and connection settings stay reachable without competing with the current detail. Capture is visible from every main view.
-
-### Selection is not commitment
-
-Selecting a row opens its details. **Work on this** explicitly makes an action my current work; inspecting another row does not switch it. A visible return control brings me back to Working on.
-
-On a fresh workspace, show available work and an empty Working on state. Do not automatically promote the first recommendation to active work.
-
-When I finish or switch, the previous action retains its notes and progress. Finishing clears Working on; it does not silently start another item.
-
-### Item presentation
-
-Each GitHub row exposes its title, repository and number, a short reason for appearing, and **Open on GitHub**. Every eligible PR also exposes **Review in Copilot**. These destinations must remain visible without expanding sources or opening a menu.
-
-The detail pane leads with what changed and why it might need me. It then shows my action, notes, checklist, and relevant controls. Full source evidence and original captures remain available as supporting detail.
-
-For issues, show **Open in Copilot** rather than a review action. A local task without a GitHub reference must not show a fabricated destination.
-
-At narrow widths, use list-to-detail navigation with an explicit Back control. Preserve selection, scroll position, and my current work.
-
-## Refresh and continuity
-
-**GitHub refresh is manual only in this version.**
-
-- Show a labeled **Refresh** button and the last successful refresh time in the main workspace, not only in settings.
-- Do not fetch GitHub automatically on startup, window focus, network reconnection, or a timer. A fresh installation explains that Refresh loads GitHub activity.
-- Treat refresh as one batch, including any requested enrichment and ordering. Do not publish an initial reorder followed by another delayed AI reorder.
-- Preserve selected detail, keyboard focus, drafts, notes, and Working on during refresh. Retain existing row order; place newly discovered entries in a clearly labeled new-updates group.
-- If refresh is partial or fails, retain saved data and show what is missing. No results is not the same as a successful empty result.
-
-An explicit **Reconsider order** action may re-rank available work. It never changes Working on. Choosing work, finishing, or moving an item to Later takes effect immediately without a GitHub refresh.
-
-Local clocks and scheduled reminders continue independently of GitHub refresh. A due reminder appears without selecting an item or moving the current row.
-
-Hourly GitHub refresh is a possible later feature, not a hidden default or a setting to build now. It must preserve the same continuity guarantees.
-
-## Notifications and commitments
-
-Keep three concepts separate:
-
-| Concept | What it records |
-| --- | --- |
-| **GitHub thread** | The issue or PR and its notification/subscription state. |
-| **Incoming update** | Activity I have not yet handled, with the evidence available for this refresh. It may be informational. |
-| **Local action** | A commitment I chose or captured, with its own completion, notes, and progress. |
-
-A single PR can have a completed review and a later, genuinely new review request. Keep them associated without reopening or overwriting the completed action.
-
-Deduplicate repeated fetches of an update. A captured review and an outstanding request for that same review should retain both sources, not compete as separate actions. Do not merge a new request into a completed review simply because the PR URL matches.
-
-### GitHub discovery
-
-Use GitHub notifications as the primary discovery input. Do not restore the old search-driven collection of every recently reviewed PR or recently updated mention.
-
-- Include read as well as unread outstanding notifications. Reading a thread in GitHub must not make a retained commitment disappear.
-- Enrich threads with the activity and current issue/PR state needed to describe them honestly. A generic `updated_at` timestamp or notification `reason` is not proof of a fresh request.
-- Distinguish direct requests from team requests. Preserve the specific `integrations/terraform-provider-core-maintainers` team context; do not describe every team request as personally assigned.
-- Show uncertain activity as an update to inspect, not a definite review or reply obligation. Informational changes should not outrank explicit requests.
-- Make pagination, access failures, stale evidence, and incomplete event coverage visible. A missing thread does not prove completion.
-
-GitHub's notification `reason` is thread-level and can retain `mention` after the original mention. Likewise, `review_requested` does not by itself distinguish a new direct request from an old or team request. Establish new requests from activity after the previously handled evidence, not these labels alone.
-
-Notification availability depends on GitHub settings and retention. Persist captured and chosen commitments locally; do not use notification history as durable task storage.
-
-### What can create a new action
-
-A new review request or a new message asking something of me can surface as a new candidate. Show its actor, time, and source when available. Uncertain messages remain uncertain until I choose to act.
-
-Ordinary comments, CI updates, new commits, merge-queue activity, and merged/closed state do not automatically reopen completed work. A new commit is not a new review request.
-
-Refreshing the same evidence repeatedly must not regenerate a handled candidate. If I finish a review locally, treat its existing request as handled even if GitHub still returns that request.
-
-New activity on work in Later may appear as an update in Needs attention. It must not move the retained action out of Later or override its reminder. There is no event-triggered Sleep/Wake mechanism.
-
-## Actions and their effects
-
-Keep labels explicit about whether an action affects my work or GitHub.
-
-| Control | Effect |
-| --- | --- |
-| **Work on this** | Choose or resume a local action as Working on. Does not mark a notification done or submit anything externally. |
-| **Done** | Finish my local action and handle the evidence associated with it. Does not close the issue/PR, submit a review, unsubscribe, or mark the GitHub notification done. |
-| **Later** | Retain my intended action outside immediate work, optionally with a reminder. Does not change GitHub state. |
-| **Mark notification done on GitHub** | Explicitly acknowledge the notification on GitHub. Does not finish, delete, or forget a retained local action. |
-| **Unsubscribe on GitHub** | Explicitly change the thread subscription. Does not finish a local action or erase its notes. |
-
-Opening details records that I saw the update locally; it does not silently write GitHub read state. Reading is not completing. GitHub's notification-done control also handles the displayed update locally after confirmed success, without requiring a second inbox-clearing step.
-
-Notification acknowledgement and unsubscribe are the only GitHub write operations in the initial desktop scope. Keep them separate from local Done, but readily available when inspecting a notification.
-
-GitHub unsubscribe suppresses ordinary conversation updates, not every future notification: direct mentions, team mentions, or review requests can bring notifications back. State that limit plainly. Do not recreate unsubscribed work through the old discovery searches.
-
-Persist failures and provide explicit retry for external actions. Do not claim an acknowledgement or unsubscribe succeeded because a request was queued. Local completion must remain possible without GitHub connectivity.
-
-Local completion, Later, removal, and switching are recoverable. Restoring a local action does not undo a GitHub acknowledgement or subscription change. Do not imply an external action can be undone unless that reversal actually succeeds.
-
-### No separate Waiting state
-
-If I retain a follow-up, I can leave a note such as "Waiting for a response" and optionally set a reminder in Later. I do not have to choose between two nearly identical lifecycle controls.
-
-If I reviewed a PR and owe nothing else, I am done. I am not waiting for its author to merge it.
-
-## Capture, recommendations, and routines
-
-### Capture
-
-Save arbitrary freeform text and optional links immediately. No required project, priority, label, or date form. Interpretation can propose an editable action or routine, but cannot discard the original or invent commitments.
-
-Unsupported text remains a normal saved action. Interpretation failure leaves it usable. Optional project context must never become a prerequisite for capture or a notification-routing chore.
-
-### Recommendations
-
-Recommend available work inside Needs attention, with a short visible reason. Recommendations never occupy Working on without my choice.
-
-Prefer due scheduled commitments, then small reviews with real size evidence, then other explicit requests and captured actions. Keep informational or uncertain updates secondary. Direct and team requests remain distinguishable.
-
-No cleanup quota, time budget, or forced switch away from reviews. Preserve ordering between explicit refresh/reconsider batches. Captures appear immediately without reordering the rest.
-
-The **Copilot SDK remains part of the desktop product**, including notification triage, capture interpretation, and suggested ordering. Copilot App handoff complements the SDK; it does not replace it.
-
-### Copilot-assisted triage
-
-Give me an explicit **Triage with Copilot** action. The SDK can summarize what changed, distinguish requests from informational updates, suggest a next action, and recommend an order from bounded notification evidence.
-
-- Show the evidence and uncertainty behind a suggestion. Notification text is input to analyze, not instructions the model should execute.
-- Let me review suggestions before applying them. Triage must not automatically start, finish, defer, acknowledge, or unsubscribe work.
-- Preserve my local decisions and Working on. A model's interpretation of a merge-queue update cannot override a finished review.
-- Keep credentials, unrelated files, and private scratch notes outside the triage payload. Use a trusted backend with restricted tools and permissions.
-- Keep manual triage and basic controls usable when the SDK is unavailable. Report errors rather than fabricating model output.
-
-The app owns state transitions, clocks, storage, and completion. The browser prototype demonstrates triage with explicitly labeled deterministic suggestions; live SDK initialization belongs to the desktop implementation.
-
-### Routines
-
-Retain ordered scheduled routines, including "Every day at 10am, announce the change, then increase the feature flag."
-
-- Record each step separately. The app does not post to Slack or change flags; I record actions performed in their existing tools.
-- Show one non-blocking reminder per due occurrence. I can start, snooze for 30 minutes, or skip it. Starting does not mean completing.
-- Coalesce missed days into one outstanding occurrence with missed-day history, not a backlog of flag increases.
-- Preserve partial progress and its original timestamps. Yesterday's announcement never silently becomes today's.
-- Use an explicit timezone for daily schedules, initially my local timezone. Keep that choice when I travel; show permission or delivery limitations.
-
-In the desktop product, closing the window keeps reminders running in the menu bar; explicit Quit stops them. Reopening reconciles missed time without automatically fetching GitHub. Sleeping Macs and denied permissions cannot be promised on-time delivery.
-
-## Copilot App handoff
-
-Make external handoff part of the workflow, not a second embedded coding agent.
-
-For a PR, **Review in Copilot** uses the documented session link:
-
-```text
-ghapp://session/new?repo=OWNER%2FREPO&pr=123&mode=interactive&prompt=Review%20this%20PR
-```
-
-The Copilot App asks for confirmation before creating a session. Launching or cancelling that dialog does not finish, switch, or lose the local action. Returning to GitHub Projects restores my place.
-
-For an issue, **Open in Copilot** opens the issue, not a fictitious PR session:
-
-```text
-ghapp://github.com/OWNER/REPO/issues/123
-```
-
-Issue navigation depends on the repository being configured in Copilot App. Keep Open on GitHub available if setup is needed.
-
-- Build links from validated GitHub repository identities and positive issue/PR numbers. Encode parameter values; do not concatenate untrusted query fragments.
-- Use the official `ghapp://` scheme for native handoff. Where a web launcher is needed, encode the full app link in `https://github.com/copilot/app/launch?open=ENCODED_APP_LINK`.
-- Use a short fixed kickoff prompt. Never place scratch notes, credentials, private message bodies, or other sensitive content in URLs.
-- Surface launch failures and retain Open on GitHub as a fallback. Successful OS dispatch proves only that the handoff was requested.
-- Do not claim the session started, the review finished, or a prior session can be resumed. Session tracking, callbacks, and automatic completion require a separate future integration.
-
-The browser prototype demonstrates this interaction with a labeled simulation. Never launch synthetic fixture identities in GitHub or Copilot.
-
-## Appearance and accessibility
-
-Use the [Fox and GitHub theme references](docs/theme.md), the reusable constraints in [Design System](docs/Design%20System.md), and the [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md). Dusk is no longer an approved palette.
-
-- Use native system sans-serif, neutral large surfaces, and restrained semantic accents. Match the named app themes rather than inventing another palette.
-- Establish one focal detail using hierarchy and spacing. Compact lists provide orientation; they must not become a dense multi-panel dashboard.
-- Use short labels and scannable evidence. Supporting provenance can be expandable; external destinations cannot be buried there.
-- Make core controls discoverable by clicking and accessible by keyboard. Preserve visible focus and stable geometry on hover, selection, and focus.
-- Show brief explicit success and useful failure diagnostics. No gamification, guilt, compulsory onboarding tour, or mandatory inbox-zero ritual.
-
-The browser prototype defaults to **GitHub dark**, using verified app UI colors from its bundled Primer tokens. This is an implementation choice, not a user-confirmed preference over Fox. Fox remains a preferred alternative; the first prototype does not require a theme switcher. [Theme direction](docs/theme.md) records the actual palette and provenance.
-
-## Acceptance scenarios
-
-### Choosing and keeping work
-
-| Scenario | Required result |
-| --- | --- |
-| First open | Saved work loads without a GitHub request. Refresh is visible. Working on is not an automatic recommendation. |
-| Choose an action | Work on this establishes the current action. Selecting another row only inspects it. |
-| New request during work | Nothing changes until Refresh. After refresh, new updates are distinct; the selected detail, existing row order, and current work stay in place. |
-| Finish or switch | Notes and progress remain. Finishing does not automatically start the next recommendation. |
-| Return after handoff or reload | The selected detail and Working on survive with saved notes and progress. |
-
-### Handling GitHub activity
-
-| Scenario | Required result |
-| --- | --- |
-| Review finished, PR queued to merge | Finish the review, then refresh merge-queue activity. The review remains finished; no new review action is invented. |
-| Review requested again | A genuinely new request appears with new evidence, associated with the same PR but distinct from the completed action. |
-| Sticky notification reason | An old `mention` or `review_requested` label on a routine update does not masquerade as a fresh request. |
-| Read, notification done, unsubscribe | Demonstrate their different effects without completing or losing a retained local action. Simulate failures without false success. |
-| Closed, missing, or repeatedly fetched thread | Current source state is visible; retained work survives. Old evidence does not regenerate handled candidates. |
-
-### Local work and destinations
-
-| Scenario | Required result |
-| --- | --- |
-| Capture arbitrary text or an existing review | Preserve the original; merge only the same outstanding action, not a later request into a completed review. |
-| Later with waiting note | Retain context with or without a reminder. Ordinary GitHub activity does not move it; a due reminder never steals focus. |
-| Missed or partial routine | One outstanding occurrence; original step timestamps and missed-day history remain visible. |
-| GitHub and Copilot destinations | Every eligible list row and detail exposes the correct destination. Handoff, cancellation, unavailable app, and return leave the task unfinished. |
-| Empty, offline, partial, or storage failure | Distinguish these states, retain saved data, and expose recovery. Do not claim unsaved edits are durable. |
+| Generated action linked to a thread | A separate thread note, with original authored title and preserved action history. Not a Task. |
+| Explicit capture linked to a thread | A Task retaining title, exact captures, completion, progress and history. Its annotation moves to a distinct thread note. The Task opens those notes directly. |
+| Standalone action or routine | A Task retaining its notes and original history. Routine schedules are retired. |
+| Completed or removed action converted to a Task | Remains Done; the original status and any completion time remain in its history. |
+| Later action converted to a Task | Open, with the previous reminder and waiting context preserved as history, not a live schedule. |
+
+Action notes are never flattened into a single overwritable string. The original capture text, project text, next step, recorded step times, routine occurrences and previous status remain inspectable. The immutable original also retains the retired undo stack and exact pre-conversion document. Repeated version-3 loads do not migrate or duplicate annotations.
+
+New snapshots contain no reminder schedules. Native delivery must also be disabled before the frontend loads, including after restoring a legacy backup or failing a migration save.
 
 ## Prototype and desktop boundaries
 
-| Capability | Browser prototype | Desktop product |
-| --- | --- | --- |
-| Notifications | Synthetic threads and activity, staged until manual Refresh | GitHub Notifications API and relevant source enrichment |
-| Triage, capture, and ordering | Labeled deterministic suggestions with review before applying | Restricted Copilot SDK assistance with ordinary controls still available |
-| Persistence | Isolated browser-local state; never reuse the old key | Fresh SQLite store; never reuse the old app-data location |
-| Reminders | Explicit simulated clock and delivery | Native scheduling with visible permission/delivery status |
-| External controls | Labeled GitHub/Copilot outcome simulations | Explicit notification writes and validated native launch links |
+The browser prototype uses synthetic data, staged activity, simulated external outcomes and its existing isolated local-storage key. It never calls the native backend. The desktop starts from its validated SQLite snapshot or a genuinely empty database, never browser fixtures.
 
-No real credentials, network integration, SDK initialization, GitHub writes, or native reminders belong in the prototype. No synthetic data belongs in a real desktop workspace.
+Both entries share Inbox, Tasks, thread notes and the same domain transitions. Capture, notes and completion work offline. Preserve native packaging, bounded service transport, CLI authentication and recovery safeguards.
 
-The desktop app must keep local work usable during outages. Durable writes, input validation, native launching, scheduling, and narrow permissions are application responsibilities, not promises delegated to a model prompt.
+## References
 
-## Deliberate exclusions
-
-- Migration, compatibility with old storage, or automatic import of the previous app.
-- Search-driven obligation discovery, a project-first dashboard, routing rules, broad filter builders, and notification-triggered Sleep/Wake.
-- Background GitHub polling, automatic reprioritization, and automatic task completion from generic source activity.
-- GitHub writes beyond explicit notification acknowledgement and unsubscribe; no review submission, merge, comments, labels, close, or push from this app.
-- Copilot session tracking or callbacks, embedded coding agents, team planning, mobile apps, and mandatory productivity rituals.
-
-## Document authority
-
-This file is the product authority. [The prototype prompt](docs/prototype-prompt.md) specifies how to evaluate it with a clickable prototype. [DESIGN.md](DESIGN.md) supplies the reusable visual guidance and approved composition; [theme.md](docs/theme.md) records the theme references and implemented palette.
-
-[The old PRD](docs/old-prd.md) is historical context, not an additional source of requirements. The previous application and search digest have been removed; do not restore their behavior from repository history or execute the old digest as part of prototype work.
-
-Integration references: [GitHub notifications REST API](https://docs.github.com/en/rest/activity/notifications), [GitHub inbox semantics](https://docs.github.com/en/subscriptions-and-notifications/how-tos/viewing-and-triaging-notifications/managing-notifications-from-your-inbox), and [Copilot App deep links](https://docs.github.com/en/copilot/how-tos/github-copilot-app/open-with-deep-links). Confirm current endpoint and authentication behavior before implementing the desktop integration.
+[DESIGN.md](DESIGN.md) owns composition and reusable visual constraints. [README.md](README.md) describes operation and recovery. [Native contract](src/platform/README.md) and [service contract](service/README.md) describe integration boundaries. [The prototype brief](docs/prototype-prompt.md) describes browser evaluation. [The old PRD](docs/old-prd.md) is historical, not additional requirements.

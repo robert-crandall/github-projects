@@ -13,9 +13,6 @@ fn main() {
             "launch_github",
             "launch_copilot",
             "clock_now",
-            "reminders_status",
-            "reminders_request_permission",
-            "reminders_retry",
             "service_request",
         ]),
     ))

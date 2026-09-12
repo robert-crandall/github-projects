@@ -1,4 +1,4 @@
-> For the greenfield app, [`PRODUCT.md`](../PRODUCT.md) translates these preferences into requirements. The automation preference below does not override manual GitHub refresh or permit automatic switching. Local recovery does not imply external actions are undoable.
+> For the thread-first client, [`PRODUCT.md`](../PRODUCT.md) translates these preferences into requirements. The automation preference below does not override manual GitHub refresh or permit automatic task creation. Local recovery does not imply external actions are undoable.
 
 ---
 

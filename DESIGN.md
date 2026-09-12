@@ -1,6 +1,6 @@
 ---
 name: "GitHub Projects"
-description: "The greenfield workspace's composition and visual constraints, using Fox and GitHub as theme references."
+description: "A GitHub-dark, three-pane notification client with separate Inbox and Tasks."
 ---
 
 # Design System: GitHub Projects
@@ -9,101 +9,58 @@ description: "The greenfield workspace's composition and visual constraints, usi
 
 **One primary thing. Calm surface.**
 
-I use the **Fox** and **GitHub** themes from Copilot App / GitHub App as the preferred visual references. The first prototype uses the verified GitHub dark palette recorded in [Theme direction](docs/theme.md). Dusk is rejected; no previous palette values remain authoritative.
+Preserve the incumbent GitHub-dark palette and native system typography. No new visual world, theme workshop, decorative typography, or greenfield replacement.
 
-[PRODUCT.md](PRODUCT.md) owns behavior. The supplied [Design System](docs/Design%20System.md) and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) retain their reusable interaction constraints.
+[PRODUCT.md](PRODUCT.md) owns behavior. The [Design System](docs/Design%20System.md) and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) provide reusable interaction constraints.
 
-The composition is a compact list with one persistent detail pane and a stable Working on anchor. It replaces the old Now/Next recommendation card. Old direction comments, implementation measurements, and generated sidecars do not override this brief.
+## Composition
 
-## Color
+The app works like an email client: inboxes on the left, a compact list in the middle, and the selected reader on the right.
 
-Use the verified semantic values in `src/theme.css`. GitHub dark is the implementation default, not a user-confirmed choice over Fox; a theme-switching interface is not required for this prototype.
+**Inbox** lists GitHub issues and PRs, not generated commitments. **Tasks** lists standalone local captures, with completed tasks in a Done section. Capture remains visible in both. There is no Working on anchor or commitment-ranking control.
 
-- Use semantic roles for surfaces, text, boundaries, interaction states, and feedback.
-- Keep large surfaces neutral. Small accents identify actions and state without dominating the workspace.
-- Use readable foreground/background pairings from the selected reference. Check contrast rather than assuming a named theme makes every pairing accessible.
-- Use labels, icons, and structure alongside color for selection, request type, warnings, and errors.
-- Do not reuse Dusk values from old CSS or generated artifacts as silent fallbacks.
+Selecting a row only opens it. Refresh must not move focus, replace local edits, select a task, or reorder existing rows. New source rows can append in a labeled group.
 
-## Typography
+**Earlier threads** is a compact disclosure below Inbox. It preserves access to acknowledged/unsubscribed conversations and notes without treating them as pending work. A migrated linked Task can open its thread notes directly.
 
-Use the native system stack: `-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif`. No webfonts, decorative display face, or monospace body copy.
-
-Use a small hierarchy of page headings, detail titles, row titles, body text, labels, and metadata. Weight, spacing, and placement establish hierarchy without several competing headline sizes.
-
-The selected detail has a clear title without recreating an oversized recommendation hero. Working on is identifiable through a persistent label and stable placement, not a second competing headline.
-
-Supporting paragraphs use short readable measures. Dates and counts may use tabular numerals without changing font family. Monospace is reserved for machine output.
-
-## Layout
-
-The desktop-first workspace pairs a compact list with one persistent detail pane. Working on anchors the action I chose; Needs attention contains recommendations and incoming updates; Later retains postponed commitments.
-
-Selection opens detail without changing Working on. A visible return control restores the current action after inspecting other items.
-
-Keep Capture, Refresh, and the last successful refresh time visible. History, routines, and optional project context remain secondary navigation rather than additional permanent panes.
-
-| Surface | Layout behavior |
+| Surface | Behavior |
 | --- | --- |
-| Wide desktop | Compact list and readable detail share the workspace; extra width does not add unrelated panels. |
-| Smaller desktop | Reduce gutters and navigation space before compromising readable titles and visible destinations. |
-| Narrow window | Show list or detail with an explicit Back control; retain selection, scroll position, and working context. |
+| Wide desktop | All three panes remain visible; reader text has a restrained measure. |
+| Smaller desktop | Reduce gutters and navigation space before sacrificing readable titles. |
+| Narrow window | List or reader, with explicit Back to list; retain notes, selection and per-inbox scroll. |
 
-Rows and hairline dividers establish hierarchy without a wall of cards. Long titles and destination controls wrap rather than disappear. New updates occupy a labeled group; refresh must not move existing rows, selection, or keyboard focus.
+Use rows and hairline dividers, not a wall of cards. Long titles and destinations wrap. Independent list and reader scrolling keeps navigation stable.
 
-## Depth and shapes
+## Palette and type
 
-Use restrained tonal separation and reserved borders for persistent depth. Do not add decorative shadows or a new elevation scale.
+Use semantic tokens from `src/theme.css`; [theme.md](docs/theme.md) records their source. Large surfaces stay neutral. Color accompanies labels and icons, never replacing them.
 
-Keep controls and containers simple. Reserve border space before interaction. Hover, pressed, and selected states change color, not size, padding, or position.
+Use the native system sans stack. No webfonts. Page headings, reader titles, row text and metadata supply a small hierarchy. Keep supporting text legible, focus visible and controls readable at rest.
 
-## Controls
+Use monospace only for raw preserved records or other machine output. Display user-authored notes and captures as text with preserved whitespace.
 
-Use related primary, secondary, quiet, and icon treatments. The chosen theme supplies colors; hierarchy determines prominence.
+## Reader and controls
 
-- **Primary:** the current local action, clearly distinguishable without a large accent surface.
-- **Secondary and quiet:** supporting actions remain readable and discoverable at rest.
-- **Icon:** descriptive accessible names; icons must not obscure the meaning of completion or external writes.
-- **Disabled:** a visibly unavailable state that does not resemble a successful action.
+Thread detail starts with the source title and visible GitHub/Copilot destinations. Label the initial reader **Saved source summary**; do not imply that bounded summaries are the full conversation.
 
-Keep native input, textarea, select, and checkbox behavior. Labels stay visible; helper text stays near the control. Use freeform textareas for scratch notes and capture instead of mandatory structured forms.
+Thread notes are private, locally saved textareas. Migration may produce several separately labeled annotations. Preserve their source titles and inspectable original action history. Editing one must not overwrite another.
 
-Keyboard focus must remain visible. Use a deliberate zero-offset focus treatment with sufficient contrast, and reserve its geometry. Never remove the default indicator without a visible replacement.
+Task detail uses text, notes and a Done checkbox. No required project, priority, Working on, checklist ritual, or routine configuration. Original migrated progress remains read-only history, not executable steps.
 
-## Navigation and detail
+Keep native input behavior, visible labels, keyboard focus and Command/Ctrl+K capture. Capture uses a focused dialog; external writes use confirmation dialogs that state the destination and effect.
 
-Use quiet native-text controls on neutral navigation surfaces. Identify the current view and selected row with structure and the appropriate accessible state, not hue alone.
+GitHub acknowledgement, unsubscribe and local task Done are distinct. Never use an ambiguous completion icon to hide an external write.
 
-Mark the active action separately so selecting detail cannot look like switching work. Narrow layouts retain labels and an explicit route back.
+## Feedback and recovery
 
-Lead detail with what changed and why it might need me, then my action, next step, checklist, and scratch notes. Keep request evidence distinct from inference. Working on is my choice, not a recommendation label.
+Save notes automatically and report pending or failed persistence honestly. A successful local action is not proof that its disk write finished. Keep retry, pending export and recovery visible on failure.
 
-Local Done, Later, notification acknowledgement, and unsubscribe have different effects. Use the explicit labels from PRODUCT.md instead of a generic completion icon that hides the destination of the change.
+Refresh progress stays at its control. Offline and partial failures preserve the workspace. No automatic refresh on focus or reconnect.
 
-## Rows and supporting information
+External handoff feedback reports only a requested launch. GitHub write feedback requires matching confirmation. Undo affects task completion only; it cannot reverse a GitHub operation or overwrite a newer note.
 
-Keep rows compact: a work-kind glyph, readable title, repository and number, and a short reason. Text identifies the signal independently of glyph color.
-
-**Open on GitHub** and **Review in Copilot** or **Open in Copilot** remain visible in rows and details without hover, expansion, or an overflow menu. Local actions without references have no invented destination.
-
-Disclosures reveal source history and full captures without opening a competing workspace. Later is quieter but discoverable, with reminder and waiting-note context retained.
-
-User-requested expansion may change layout. Hover, focus, incoming activity, and delayed ranking must not.
-
-## Feedback
-
-Use brief explicit success feedback and Undo where available. Failures show diagnostic text and recovery controls without replacing the saved workspace.
-
-Refresh progress stays local to its control. Saved work remains usable, including when GitHub is unavailable.
-
-Handoff feedback says only that a launch was requested, never that a review finished. Local Undo does not imply a GitHub action was reversed.
-
-Prototype and simulated-data labels are factual. A neutral wireframe must not be labeled a finished Fox or GitHub theme.
+Prototype labels and synthetic-data notices remain factual. Legacy routine records explain that reminders are retired; no permission or reminder controls remain.
 
 ## Boundaries
 
-- No Dusk palette, new brand workshop, decorative typography, or invented named-theme values.
-- No dense multi-panel project dashboard or giant recommendation card.
-- No full-window accent fills, color-only meaning, or unreadable secondary controls.
-- No decorative motion, hover lift, scaling, or focus-driven layout shifts.
-- No hidden external destinations or invented service status and execution.
+No Dusk palette, new brand, recommendation hero, dense project dashboard, decorative motion, hover lift, focus-driven layout shift, hidden destinations, or invented status. Full conversation rendering, archive semantics and filters are separate follow-up issues.

@@ -15,7 +15,7 @@ impl NativeError {
         Self {
             code: code.into(),
             message: message.into(),
-            retryable: matches!(code, "storage-busy" | "io" | "notification-unavailable"),
+            retryable: matches!(code, "storage-busy" | "io"),
         }
     }
     pub fn invalid() -> Self {

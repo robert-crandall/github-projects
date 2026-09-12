@@ -8,10 +8,6 @@ export function instant(value: string): string {
   }
 }
 
-export function compare(a: string, b: string): number {
-  return Temporal.Instant.compare(a, b);
-}
-
 export function addMinutes(value: string, minutes: number): string {
   return Temporal.Instant.from(value).add({ milliseconds: minutes * 60_000 }).toString();
 }
@@ -24,19 +20,4 @@ export function initialClock(timeZone: string): string {
   } catch {
     throw new Error(`Unknown timezone: ${timeZone}`);
   }
-}
-
-function scheduled(date: Temporal.PlainDate, time: string, timeZone: string): string {
-  return date.toZonedDateTime({ timeZone, plainTime: Temporal.PlainTime.from(time) }).toInstant().toString();
-}
-
-export function nextDaily(now: string, time: string, timeZone: string): string {
-  const date = Temporal.Instant.from(now).toZonedDateTimeISO(timeZone).toPlainDate();
-  const today = scheduled(date, time, timeZone);
-  return compare(today, now) >= 0 ? today : scheduled(date.add({ days: 1 }), time, timeZone);
-}
-
-export function followingDay(dueAt: string, time: string, timeZone: string): string {
-  const date = Temporal.Instant.from(dueAt).toZonedDateTimeISO(timeZone).toPlainDate();
-  return scheduled(date.add({ days: 1 }), time, timeZone);
 }

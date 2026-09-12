@@ -241,8 +241,27 @@ impl Store {
     pub fn save(&mut self, expected_revision: &str, snapshot: Snapshot) -> Result<WorkspaceRead> {
         let json = snapshot.encode()?;
         let mut connection = self.connection()?;
-        if read_connection(&connection)?.revision != expected_revision {
+        let previous = read_connection(&connection)?;
+        if previous.revision != expected_revision {
             return Err(NativeError::conflict());
+        }
+        if previous
+            .snapshot
+            .as_ref()
+            .and_then(Snapshot::state_version)
+            .is_some_and(|version| matches!(version, 1 | 2))
+            && snapshot.state_version() == Some(3)
+        {
+            // Reuse the renderer's validated immutable backup, never the rotating "latest".
+            let already_preserved = self.list_backups()?.iter().any(|backup| {
+                backup.id != "latest"
+                    && self
+                        .read_backup(&backup.id)
+                        .is_ok_and(|saved| saved.revision == previous.revision)
+            });
+            if !already_preserved {
+                self.backup_connection(&connection, &Uuid::new_v4().to_string())?;
+            }
         }
         self.backup_connection(&connection, "latest")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -255,8 +274,7 @@ impl Store {
         if rows != 1 {
             return Err(NativeError::conflict());
         }
-        // The schedule is inside the checksummed envelope, so there is no independent
-        // registration step that could schedule unsaved work.
+        // Migrated state and its empty schedule replace the legacy envelope atomically.
         transaction.commit()?;
         self.recovery_token = Uuid::new_v4().to_string();
         Ok(WorkspaceRead {

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createNativePlatform, NativePlatformError, nativeTickSchema, type NativeSnapshot, type NativeTransport } from './native.ts';
+import { createNativePlatform, NativePlatformError, clockSchema, type NativeSnapshot, type NativeTransport } from './native.ts';
 
 const revision = '97656881-c64b-4be7-84f4-5ec7fe6c1cc1';
 const saved = { revision, snapshot: null, savedAt: null };
@@ -52,16 +52,18 @@ describe('typed native boundary', () => {
     expect(calls.length).toBe(1);
   });
 
-  test('permission requests are an explicit separate operation', async () => {
+  test('retired permission/retry commands are absent and v3 cannot save reminder schedules', async () => {
     const commands: string[] = [];
     const native = createNativePlatform(async command => {
       commands.push(command);
-      return command === 'workspace_read' ? saved : { state: 'denied', alertsEnabled: false };
+      return saved;
     });
     await native.workspaceRead();
     expect(commands).toEqual(['workspace_read']);
-    expect(await native.requestReminderPermission()).toEqual({ state: 'denied', alertsEnabled: false });
-    expect(commands[1]).toBe('reminders_request_permission');
+    expect(native).not.toHaveProperty('requestReminderPermission');
+    expect(native).not.toHaveProperty('retryReminder');
+    expect(() => native.workspaceSave(revision, { ...snapshot, workspace: { version: 1, state: { version: 3 } } })).toThrow();
+    expect(commands).toEqual(['workspace_read']);
   });
 
   test('backup recovery requires opaque token, paths cannot enter API', () => {
@@ -70,13 +72,13 @@ describe('typed native boundary', () => {
     expect(() => native.recoverBackup('latest', '1')).toThrow();
   });
 
-  test('clock events retain explicit errors without inventing reminders', () => {
-    const event = nativeTickSchema.parse({
-      clock: { now: '2026-09-11T20:00:00+00:00', timeZone: 'America/Los_Angeles', error: null },
-      reminders: null, error: { code: 'notification-unavailable', message: 'Unavailable', retryable: true },
+  test('clock reads retain explicit errors without inventing a timezone', () => {
+    const clock = clockSchema.parse({
+      now: '2026-09-11T20:00:00+00:00', timeZone: null,
+      error: { code: 'timezone-unavailable', message: 'Unavailable', retryable: true },
     });
-    expect(event.reminders).toBeNull();
-    expect(event.error?.code).toBe('notification-unavailable');
+    expect(clock.timeZone).toBeNull();
+    expect(clock.error?.code).toBe('timezone-unavailable');
   });
 
   test('default browser transport refuses native operations', async () => {

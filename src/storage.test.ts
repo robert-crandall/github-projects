@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { initialState } from './domain/engine.ts';
+import { legacyFixture } from './domain/test-fixtures.ts';
 import { decodeWorkspace, replaceWithBackup, saveWorkspace, STORAGE_KEY, withStorageEnabled, type WorkspaceStorage } from './storage.ts';
 
 class MemoryStorage implements WorkspaceStorage {
@@ -28,7 +29,7 @@ describe('isolated prototype persistence', () => {
     expect(() => decodeWorkspace('{"version":1}')).toThrow('unsupported or damaged');
     expect(() => decodeWorkspace('{')).toThrow();
     const saved = fixture();
-    saved.state.activeId = 'missing-action';
+    saved.state.selectedKey = 'a:missing-task';
     expect(() => decodeWorkspace(JSON.stringify(saved))).toThrow('inconsistent');
   });
 
@@ -74,5 +75,30 @@ describe('isolated prototype persistence', () => {
     storage.fail = true;
     expect(() => replaceWithBackup(storage, fixture())).toThrow('Quota exceeded');
     expect(storage.getItem(STORAGE_KEY)).toBe('keep');
+  });
+
+  test('v2 conversion saves an immutable original before replacement and later saves do not overwrite it', () => {
+    const storage = new MemoryStorage();
+    const original = JSON.stringify({ state: legacyFixture(), scroll: { attention: 20 } });
+    storage.setItem(STORAGE_KEY, original);
+    storage.setItem('previous-app', 'unrelated');
+    const migrated = decodeWorkspace(original);
+    const raw = saveWorkspace(storage, migrated, original);
+    const backups = [...storage.values.entries()].filter(([key]) => key.startsWith(`${STORAGE_KEY}:recovery:`));
+    expect(backups.map(([, text]) => text)).toEqual([original]);
+    expect(decodeWorkspace(raw).state.version).toBe(3);
+    migrated.state.notes[0]!.text = 'Latest edit';
+    saveWorkspace(storage, migrated, raw);
+    expect(storage.getItem(backups[0]![0])).toBe(original);
+    expect(storage.getItem('previous-app')).toBe('unrelated');
+  });
+
+  test('failed migration backup prevents replacement without losing original notes', () => {
+    const storage = new MemoryStorage();
+    const original = JSON.stringify({ state: legacyFixture(), scroll: {} });
+    storage.setItem(STORAGE_KEY, original);
+    storage.fail = true;
+    expect(() => saveWorkspace(storage, decodeWorkspace(original), original)).toThrow('Quota exceeded');
+    expect(storage.getItem(STORAGE_KEY)).toBe(original);
   });
 });

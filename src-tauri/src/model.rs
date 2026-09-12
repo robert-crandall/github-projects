@@ -86,6 +86,10 @@ impl ReminderSchedule {
 }
 
 impl Snapshot {
+    pub fn state_version(&self) -> Option<u64> {
+        self.workspace.get("state")?.get("version")?.as_u64()
+    }
+
     pub fn encode(&self) -> Result<String> {
         if self.format_version != 1
             || !self.workspace.is_object()
@@ -96,6 +100,8 @@ impl Snapshot {
                 .filter(|v| *v > 0)
                 .is_none()
             || self.reminders.len() > MAX_SCHEDULES
+            || (self.state_version().is_some_and(|version| version >= 3)
+                && !self.reminders.is_empty())
         {
             return Err(NativeError::invalid());
         }

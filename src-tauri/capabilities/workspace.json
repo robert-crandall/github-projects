@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "workspace",
-  "description": "Only the local workspace window can subscribe to native lifecycle events.",
+  "description": "Only the local workspace window can use the bounded native commands.",
   "local": true,
   "windows": ["main"],
-  "permissions": ["native-workspace", "core:event:allow-listen", "core:event:allow-unlisten"]
+  "permissions": ["native-workspace"]
 }

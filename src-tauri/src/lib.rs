@@ -1,8 +1,6 @@
-mod activity;
 mod error;
 mod launch;
 mod model;
-mod reminders;
 mod service;
 mod smoke;
 mod storage;
@@ -10,28 +8,28 @@ mod storage;
 use error::{NativeError, Result};
 use launch::{GitHubIdentity, LaunchResult};
 use model::{Snapshot, WorkspaceRead};
-use reminders::{Notifications, Permission, ReminderStatus, SystemNotifications};
 use serde::Serialize;
 use service::ServiceHost;
-use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    mpsc::{self, SyncSender},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use storage::{Backup, RawExport, StorageStatus, Store};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager, State,
+    Manager, State,
 };
 
 type SharedStore = Arc<Mutex<Result<Store>>>;
 
 struct NativeState {
     store: SharedStore,
-    wake: SyncSender<()>,
-    stopped: Arc<AtomicBool>,
-    ticks: Arc<AtomicUsize>,
+}
+
+impl NativeState {
+    fn new(store: Result<Store>) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -42,21 +40,21 @@ struct Clock {
     error: Option<NativeError>,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct NativeTick {
-    clock: Clock,
-    reminders: Option<ReminderStatus>,
-    error: Option<NativeError>,
-}
-
 fn clock() -> Clock {
     let now = chrono::Utc::now().to_rfc3339();
     match iana_time_zone::get_timezone() {
-        Ok(time_zone) => Clock { now, time_zone: Some(time_zone), error: None },
+        Ok(time_zone) => Clock {
+            now,
+            time_zone: Some(time_zone),
+            error: None,
+        },
         Err(_) => Clock {
-            now, time_zone: None,
-            error: Some(NativeError::new("timezone-unavailable", "The local timezone could not be detected. Choose an explicit timezone before scheduling a daily routine.")),
+            now,
+            time_zone: None,
+            error: Some(NativeError::new(
+                "timezone-unavailable",
+                "The local timezone could not be detected.",
+            )),
         },
     }
 }
@@ -102,10 +100,7 @@ async fn workspace_save(
     expected_revision: String,
     snapshot: Snapshot,
 ) -> Result<WorkspaceRead> {
-    let wake = state.wake.clone();
-    let saved = with_store(state, move |store| store.save(&expected_revision, snapshot)).await?;
-    wake_scheduler(&wake);
-    Ok(saved)
+    with_store(state, move |store| store.save(&expected_revision, snapshot)).await
 }
 
 #[tauri::command]
@@ -153,13 +148,10 @@ async fn workspace_recover(
     backup_id: String,
     expected_recovery_token: String,
 ) -> Result<WorkspaceRead> {
-    let wake = state.wake.clone();
-    let saved = with_store(state, move |store| {
+    with_store(state, move |store| {
         store.recover(&backup_id, &expected_recovery_token)
     })
-    .await?;
-    wake_scheduler(&wake);
-    Ok(saved)
+    .await
 }
 
 #[tauri::command]
@@ -178,51 +170,12 @@ fn clock_now() -> Clock {
 }
 
 #[tauri::command]
-async fn reminders_status(state: State<'_, NativeState>) -> Result<ReminderStatus> {
-    with_store(state, |store| {
-        store.reminder_status(SystemNotifications.permission()?)
-    })
-    .await
-}
-
-#[tauri::command]
-async fn reminders_request_permission(state: State<'_, NativeState>) -> Result<Permission> {
-    let permission = background(|| SystemNotifications.request_permission()).await?;
-    wake_scheduler(&state.wake);
-    Ok(permission)
-}
-
-#[tauri::command]
-async fn reminders_retry(
-    state: State<'_, NativeState>,
-    delivery_key: String,
-    expected_revision: String,
-) -> Result<()> {
-    let wake = state.wake.clone();
-    with_store(state, move |store| {
-        store.retry_reminder(&delivery_key, &expected_revision)
-    })
-    .await?;
-    wake_scheduler(&wake);
-    Ok(())
-}
-
-#[tauri::command]
 async fn service_request(
     state: State<'_, Arc<ServiceHost>>,
     request: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let host = state.inner().clone();
     background(move || host.request(request)).await
-}
-
-fn wake_scheduler(wake: &SyncSender<()>) {
-    match wake.try_send(()) {
-        Ok(()) | Err(mpsc::TrySendError::Full(())) => {}
-        Err(mpsc::TrySendError::Disconnected(())) => {
-            eprintln!("scheduler-stopped: Local reminder reconciliation is unavailable.")
-        }
-    }
 }
 
 fn show_window(app: &tauri::AppHandle) {
@@ -236,7 +189,6 @@ fn show_window(app: &tauri::AppHandle) {
             eprintln!("window-show-failed: Could not show the existing workspace window.");
         }
     }
-    wake_scheduler(&app.state::<NativeState>().wake);
 }
 
 fn navigation_allowed(url: &url::Url) -> bool {
@@ -253,16 +205,7 @@ fn install_lifecycle(
     store: Result<Store>,
     runtime_directory: std::path::PathBuf,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let (wake, receiver) = mpsc::sync_channel(1);
-    let stopped = Arc::new(AtomicBool::new(false));
-    let shared = Arc::new(Mutex::new(store));
-    let ticks = Arc::new(AtomicUsize::new(0));
-    app.manage(NativeState {
-        store: shared.clone(),
-        wake,
-        stopped: stopped.clone(),
-        ticks: ticks.clone(),
-    });
+    app.manage(NativeState::new(store));
     app.manage(Arc::new(ServiceHost::new(
         runtime_directory.join("service-runtime"),
     )?));
@@ -285,78 +228,11 @@ fn install_lifecycle(
             "show" => show_window(app),
             "quit" => {
                 app.state::<Arc<ServiceHost>>().shutdown();
-                app.state::<NativeState>()
-                    .stopped
-                    .store(true, Ordering::SeqCst);
                 app.exit(0);
             }
             _ => {}
         })
         .build(app)?;
-    let handle = app.handle().clone();
-    std::thread::Builder::new()
-        .name("workspace-clock".into())
-        .spawn(move || {
-            let mut activity = None;
-            loop {
-                if stopped.load(Ordering::SeqCst) {
-                    break;
-                }
-                ticks.fetch_add(1, Ordering::SeqCst);
-                let result = match shared.lock() {
-                    Ok(guard) => match guard.as_ref() {
-                        Ok(store) => {
-                            match store.read().map(|saved| {
-                                saved
-                                    .snapshot
-                                    .is_some_and(|snapshot| !snapshot.reminders.is_empty())
-                            }) {
-                                Ok(pending) => {
-                                    if pending && activity.is_none() {
-                                        activity = Some(activity::BackgroundActivity::begin());
-                                    } else if !pending {
-                                        activity = None;
-                                    }
-                                    store.reconcile_reminders(
-                                        chrono::Utc::now(),
-                                        &SystemNotifications,
-                                    )
-                                }
-                                Err(error) => Err(error),
-                            }
-                        }
-                        Err(error) => Err(error.clone()),
-                    },
-                    Err(_) => Err(NativeError::new(
-                        "native-worker-failed",
-                        "The reminder worker cannot access storage. Restart the app.",
-                    )),
-                };
-                let (reminders, error) = match result {
-                    Ok(status) => (Some(status), None),
-                    Err(error) => (None, Some(error)),
-                };
-                if handle
-                    .emit(
-                        "workspace://tick",
-                        NativeTick {
-                            clock: clock(),
-                            reminders,
-                            error,
-                        },
-                    )
-                    .is_err()
-                {
-                    eprintln!(
-                        "event-dispatch-failed: Local clock status could not reach the window."
-                    );
-                }
-                match receiver.recv_timeout(std::time::Duration::from_secs(15)) {
-                    Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-        })?;
     Ok(())
 }
 
@@ -378,13 +254,12 @@ fn smoke_check() -> Result<()> {
             reminders: vec![],
         },
     )?;
-    let permission = SystemNotifications.permission()?;
     println!(
         "{}",
         serde_json::json!({
             "ok": true, "snapshotInitiallyEmpty": true,
             "saveReadRoundtrip": store.read()?.revision == result.revision,
-            "permission": permission, "clock": clock(),
+            "clock": clock(),
             "networkRequests": 0, "permissionRequested": false,
         })
     );
@@ -496,9 +371,6 @@ pub fn run() {
             launch_github,
             launch_copilot,
             clock_now,
-            reminders_status,
-            reminders_request_permission,
-            reminders_retry,
             service_request,
         ])
         .setup(move |app| {
@@ -539,9 +411,6 @@ pub fn run() {
                     eprintln!("window-hide-failed: Could not hide the workspace window.");
                 }
             }
-            tauri::WindowEvent::Focused(true) => {
-                wake_scheduler(&window.state::<NativeState>().wake)
-            }
             _ => {}
         })
         .build(tauri::generate_context!())
@@ -550,9 +419,6 @@ pub fn run() {
             tauri::RunEvent::Reopen { .. } => show_window(app),
             tauri::RunEvent::Exit => {
                 app.state::<Arc<ServiceHost>>().shutdown();
-                let state = app.state::<NativeState>();
-                state.stopped.store(true, Ordering::SeqCst);
-                wake_scheduler(&state.wake);
             }
             _ => {}
         });
@@ -564,3 +430,6 @@ pub fn run() {
     }
     std::process::exit(exit_code);
 }
+
+#[cfg(test)]
+mod retirement_tests;
