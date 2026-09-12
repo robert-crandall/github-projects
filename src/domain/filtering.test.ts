@@ -172,6 +172,84 @@ test('unknown, denied and omitted state fail open but keep checkpoint provenance
   }
 });
 
+test.each([false, true])('retained post-terminal evidence survives unknown recovery and relaunch (named inbox: %s)', named => {
+  let state = workspace();
+  if (named) state = transition(state, { type: 'save-rule', rule: route });
+  state = refresh(state, source('queued', 11), 11);
+  const original = structuredClone(state);
+  const comment = { ...source().events[0]!, id: 'post-exit-comment', at: at(12) };
+  const unknown = source('unknown', 13);
+  unknown.events.push(comment);
+  state = refresh(state, unknown, 13);
+  expect(state.threads[0]!.terminal).toEqual(original.threads[0]!.terminal);
+  expect(state.threads[0]!.sourceState?.state).toBe('unknown');
+  expect(getRows(state, named ? 'inbox:work' : 'inbox')).toHaveLength(1);
+  state = restoreDesktop(JSON.parse(JSON.stringify(state)), at(14));
+  expect(state.threads[0]!.events).toContainEqual(comment);
+  const open = source('open', 15);
+  open.events.push(comment);
+  state = refresh(state, open, 15);
+  expect(state.threads[0]!.sourceState?.state).toBe('open');
+  expect(state.threads[0]!.notificationUpdatedAt).toBe(at(9));
+  expect(state.threads[0]!.terminal).toBeNull();
+  expect(getRows(state, named ? 'inbox:work' : 'inbox')).toHaveLength(1);
+  expect(state.notes).toEqual(original.notes);
+  expect(state.tasks).toEqual(original.tasks);
+  expect(state.selectedKey).toBe(original.selectedKey);
+  expect(state.threads[0]!.archive).toEqual(original.threads[0]!.archive);
+  expect(state.operations).toEqual([]);
+  expect(state.handled).toEqual([]);
+});
+
+test('terminal cutoff rejects delayed listing catch-up without changing manual Archive activity semantics', () => {
+  const queued = source('queued', 11);
+  queued.events.push({ ...queued.events[0]!, id: 'terminal-comment', at: at(10) });
+  let state = refresh(workspace(), queued, 11);
+  const checkpoint = structuredClone(state.threads[0]!.terminal);
+  expect(checkpoint?.boundary).toEqual({ at: at(11), evidenceAt: at(10), notificationUpdatedAt: at(9) });
+  const archived = transition(transition(state, { type: 'clock', now: at(11) }), { type: 'archive', threadId: '123' });
+  const original = structuredClone(archived);
+  state = restoreDesktop(JSON.parse(JSON.stringify(state)), at(12));
+  const open = source('open', 13, 10);
+  open.events = queued.events;
+  state = refresh(state, open, 13);
+  expect(state.threads[0]!.sourceState?.state).toBe('open');
+  expect(state.threads[0]!.terminal).toEqual(checkpoint);
+  expect(getRows(state, 'filtered')).toHaveLength(1);
+  const archiveCatchup = refresh(archived, open, 13);
+  expect(archiveCatchup.threads[0]!.archive).toBeNull();
+  expect(archiveCatchup.threads[0]!.terminal).toEqual(checkpoint);
+  expect(archiveCatchup.notes).toEqual(original.notes);
+  expect(archiveCatchup.tasks).toEqual(original.tasks);
+  expect(archiveCatchup.operations).toEqual([]);
+  open.events.push({ ...open.events[0]!, id: 'late-hydration', at: at(11) });
+  state = refresh(state, open, 13);
+  expect(state.threads[0]!.terminal).toEqual(checkpoint);
+  state = refresh(state, source('open', 14, 12), 14);
+  expect(state.threads[0]!.terminal).toBeNull();
+  expect(getRows(state, 'inbox')).toHaveLength(1);
+});
+
+test('retained old history and bookkeeping learned while unknown do not clear a terminal checkpoint', () => {
+  let state = refresh(workspace(), source('queued', 11), 11);
+  const checkpoint = structuredClone(state.threads[0]!.terminal);
+  const unknown = source('unknown', 13);
+  unknown.events.push(
+    { ...unknown.events[0]!, id: 'old-history', at: at(10) },
+    { ...unknown.events[0]!, id: 'read', kind: 'read', at: at(12) },
+    { ...unknown.events[0]!, id: 'done', kind: 'acknowledged', at: at(12) },
+    { ...unknown.events[0]!, id: 'notification-metadata', rawKind: 'notification-update', at: at(12) },
+  );
+  state = refresh(state, unknown, 13);
+  expect(getRows(state, 'inbox')).toHaveLength(1);
+  state = restoreDesktop(JSON.parse(JSON.stringify(state)), at(14));
+  state = refresh(state, source('open', 15), 15);
+  expect(state.threads[0]!.events).toHaveLength(unknown.events.length);
+  expect(state.threads[0]!.events).toEqual(expect.arrayContaining(unknown.events));
+  expect(state.threads[0]!.terminal).toEqual(checkpoint);
+  expect(getRows(state, 'filtered')).toHaveLength(1);
+});
+
 test('old state responses cannot suppress a newer open source; newer activity than a state check fails open', () => {
   let state = refresh(workspace(), source('open', 14, 13), 14);
   state = refresh(state, source('queued', 11), 11);

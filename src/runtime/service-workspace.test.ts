@@ -464,6 +464,81 @@ test('rules edited during Refresh apply to its one batch; automatic terminal and
   expect(relaunched.state.rules).toEqual(mock.workspace.state.rules);
 });
 
+test.each(['access', 'source_changed', 'catchup'] as const)(
+  'terminal checkpoint survives %s refresh and relaunch without losing post-terminal activity or issuing writes', async scenario => {
+  const at = (hour: number) => `2026-09-11T${String(hour).padStart(2, '0')}:00:00Z`;
+  const event = (id: string, hour: number) => ({ ...evidence(id, 'comment'), at: at(hour) });
+  const current = (state: SourceThread['sourceState']['state'], hour: number, notificationHour: number, events: SourceThread['evidence']): SourceThread => ({
+    ...thread(), evidence: events, updatedAt: at(notificationHour),
+    sourceState: { state, observedAt: at(hour), updatedAt: at(hour - 1), error: state === 'unknown'
+      ? { code: 'access', message: 'Current queue state denied.', retryable: false } : null },
+  });
+  setSystemTime(new Date(at(11)));
+  try {
+    let source = current('queued', 11, 9, [event('first', 9), ...(scenario === 'catchup' ? [event('terminal-comment', 10)] : [])]);
+    const mock = await harness(async request => {
+      expect(request.op).toBe('github.refresh');
+      return reply(request, batch([source]));
+    });
+    await mock.remote.refresh();
+    mock.workspace.dispatch({ type: 'save-inbox', inbox: { id: 'work', name: 'Work' } });
+    mock.workspace.dispatch({ type: 'save-rule', rule: {
+      id: 'prs', name: 'PRs', enabled: true, criteria: { kind: 'pr' }, action: { type: 'inbox', inboxId: 'work' },
+    } });
+    mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'Keep my reader context' });
+    mock.workspace.dispatch({ type: 'draft', text: 'Keep this standalone Task' });
+    mock.workspace.dispatch({ type: 'capture' });
+    mock.workspace.dispatch({ type: 'select', key: 't:123' });
+    mock.workspace.saveScroll('reader:octo/project:pr:1', 417);
+    const original = structuredClone(mock.workspace.state);
+    const checkpoint = original.threads[0]!.terminal;
+    expect(checkpoint?.boundary.at).toBe(at(11));
+    if (scenario === 'catchup') {
+      source = current('open', 13, 10, source.evidence);
+    } else {
+      source = current(scenario === 'access' ? 'unknown' : 'queued', scenario === 'access' ? 13 : 11, 9,
+        [...source.evidence, event('post-exit-comment', 12)]);
+    }
+    setSystemTime(new Date(at(13)));
+    await mock.remote.refresh();
+    expect(mock.workspace.state.threads[0]!.terminal).toEqual(checkpoint);
+    if (scenario !== 'catchup') expect(mock.workspace.state.threads[0]!.sourceState?.error?.code).toBe(scenario);
+    expect(getRows(mock.workspace.state, scenario === 'catchup' ? 'filtered' : 'inbox:work')).toHaveLength(1);
+    await mock.workspace.flush();
+    setSystemTime(new Date(at(14)));
+    const relaunched = new DesktopWorkspace(mock.platform);
+    await relaunched.load(); await relaunched.flush();
+    expect(relaunched.getSnapshot().loadError).toBe('');
+    expect(relaunched.state.threads[0]!.events).toEqual(mock.workspace.state.threads[0]!.events);
+    expect(relaunched.state.threads[0]!.terminal).toEqual(checkpoint);
+    expect(mock.requests).toHaveLength(2);
+    const remote = new ServiceWorkspace(relaunched, mock.client);
+    source = current('open', 15, scenario === 'catchup' ? 10 : 9, source.evidence);
+    setSystemTime(new Date(at(15)));
+    await remote.refresh();
+    expect(relaunched.state.threads[0]!.sourceState?.state).toBe('open');
+    expect(relaunched.state.threads[0]!.terminal).toEqual(scenario === 'catchup' ? checkpoint : null);
+    expect(getRows(relaunched.state, scenario === 'catchup' ? 'filtered' : 'inbox:work')).toHaveLength(1);
+    expect(mock.requests).toHaveLength(3);
+    if (scenario === 'catchup') {
+      source = current('open', 17, 10, [...source.evidence, event('post-exit-comment', 16)]);
+      setSystemTime(new Date(at(17)));
+      await remote.refresh();
+      expect(relaunched.state.threads[0]!.terminal).toBeNull();
+      expect(getRows(relaunched.state, 'inbox:work')).toHaveLength(1);
+    }
+    expect(relaunched.state.notes).toEqual(original.notes);
+    expect(relaunched.state.tasks).toEqual(original.tasks);
+    expect(relaunched.state.selectedKey).toBe(original.selectedKey);
+    expect(relaunched.getSnapshot().workspace!.scroll['reader:octo/project:pr:1']).toBe(417);
+    expect(relaunched.state.threads[0]!.archive).toEqual(original.threads[0]!.archive);
+    expect(relaunched.state.operations).toEqual([]);
+    expect(relaunched.state.handled).toEqual([]);
+    await relaunched.flush();
+    expect(mock.requests.every(request => request.op === 'github.refresh')).toBe(true);
+  } finally { setSystemTime(); }
+});
+
 test('source mapping never guesses queue membership from timeline order, reason or REST mergeability', () => {
   const source = thread([evidence('old-queue', 'merge-queue')]);
   expect(sourceThread(source, []).state).toBe('open');
