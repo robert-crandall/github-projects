@@ -5,6 +5,7 @@ import { ServiceClient, type ServiceOutput } from '../platform/service.ts';
 import type { DesktopWorkspace } from './desktop-workspace.ts';
 import type { RemoteStatus, RemoteWorkspace } from './remote-view.ts';
 import type { Destination } from './view.ts';
+import { ConversationWorkspace } from './conversation-workspace.ts';
 
 function activity(threadId: string, evidence: Evidence): Activity {
   const kinds: Record<Evidence['kind'], Activity['kind']> = {
@@ -44,9 +45,12 @@ export function sourceThread(thread: SourceThread, diagnostics: ServiceOutput<'g
 }
 
 export class ServiceWorkspace implements RemoteWorkspace {
+  readonly conversation: ConversationWorkspace;
   private status: RemoteStatus = { refreshing: false, checking: false, diagnostics: [] };
   private listeners = new Set<() => void>();
-  constructor(private readonly workspace: DesktopWorkspace, private readonly client = new ServiceClient()) {}
+  constructor(private readonly workspace: DesktopWorkspace, private readonly client = new ServiceClient()) {
+    this.conversation = new ConversationWorkspace(workspace.platform, client);
+  }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getSnapshot = () => this.status;
   private publish(patch: Partial<RemoteStatus>) { this.status = { ...this.status, ...patch }; for (const listener of this.listeners) listener(); }
@@ -54,18 +58,23 @@ export class ServiceWorkspace implements RemoteWorkspace {
     if (this.status.refreshing) return;
     this.publish({ refreshing: true });
     const startedAt = new Date().toISOString();
+    const conversation = this.conversation.prepareRefresh();
     try {
       const result = await this.client.call('github.refresh', {});
+      const reader = await conversation;
       const batch: RefreshBatch = { startedAt, fetchedAt: result.fetchedAt, status: result.status,
         threads: result.threads.map(thread => sourceThread(thread, result.diagnostics)),
         diagnostics: result.diagnostics.map(diagnostic => diagnostic.message) };
       this.workspace.update(current => mergeRefresh(current, batch));
+      this.conversation.commit(reader);
     } catch (error) {
+      const reader = await conversation;
       const message = error instanceof Error ? error.message : 'Refresh failed without usable results.';
       this.workspace.update(current => {
         const next = mergeRefresh(current, { threads: [], startedAt, fetchedAt: new Date().toISOString(), status: 'partial', diagnostics: [message] });
         return { ...next, refresh: { ...next.refresh, status: 'error' } };
       });
+      this.conversation.commit(reader);
     } finally { this.publish({ refreshing: false }); }
   }
   async check(): Promise<void> {

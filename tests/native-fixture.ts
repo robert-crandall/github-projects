@@ -1,5 +1,7 @@
 import { expect, type Page } from '@playwright/test';
-import { requestSchema, type Evidence, type Request, type Thread } from '../service/src/schema.ts';
+import { conversationPageSchema, referenceSchema, requestSchema, type ConversationCache, type Evidence, type Request, type Thread } from '../service/src/schema.ts';
+import { GitHubService } from '../service/src/github.ts';
+import { cacheKey, ConversationApi, mergeCachedPage } from './conversation-fixture.ts';
 import { snapshotSchema, type NativeSnapshot, type NativeWorkspace } from '../src/platform/native.ts';
 import { desktopEnvelopeSchema } from '../src/runtime/desktop-workspace.ts';
 import { at, test as browserTest } from './workspace-fixtures.ts';
@@ -27,6 +29,10 @@ export function gate() {
 class ExpectedFailure extends Error {}
 
 export class NativeMock {
+  conversationApi = new ConversationApi();
+  conversations = new Map<string, ConversationCache>();
+  corruptCache = false;
+  fullCache = false;
   saved: NativeWorkspace = { revision: crypto.randomUUID(), snapshot: null, savedAt: null };
   calls: string[] = [];
   requests: Request[] = [];
@@ -55,6 +61,19 @@ export class NativeMock {
 
   private async invoke(command: string, args: Record<string, unknown>) {
     this.calls.push(command);
+    if (command === 'conversation_reset') { this.conversations.clear(); this.corruptCache = false; this.fullCache = false; return null; }
+    if (command === 'conversation_read') {
+      if (this.corruptCache) throw new ExpectedFailure('Conversation cache is corrupt. Discard the cache explicitly; notes are safe.');
+      return this.conversations.get(cacheKey(referenceSchema.parse(args.reference))) ?? null;
+    }
+    if (command === 'conversation_merge') {
+      if (this.corruptCache || this.fullCache) throw new ExpectedFailure('Conversation cache exceeds 4 MiB per source or 64 MiB total, or is corrupt. Discard the cache explicitly; notes are safe.');
+      const page = conversationPageSchema.parse(args.page);
+      const key = cacheKey(page.reference);
+      const cache = mergeCachedPage(this.conversations.get(key), page);
+      this.conversations.set(key, cache);
+      return cache;
+    }
     if (command === 'workspace_read') {
       if (this.holdRead) await this.holdRead.promise;
       if (this.corrupt) throw new ExpectedFailure('Saved workspace is damaged. Recover explicitly.');
@@ -106,7 +125,7 @@ export class NativeMock {
       expect(args.expectedRevision).toBe(this.saved.revision);
       return JSON.stringify(this.saved.snapshot);
     }
-    if (command === 'launch_github' || command === 'launch_copilot') {
+    if (command === 'launch_github' || command === 'launch_copilot' || command === 'launch_web_url') {
       this.launches.push({ command, args: structuredClone(args) });
       if (this.failLaunch) throw new ExpectedFailure('The destination app is unavailable.');
       return { status: 'dispatch-requested', url: 'https://github.com/octo/project/pull/123' };
@@ -116,6 +135,9 @@ export class NativeMock {
     this.requests.push(request);
     let result: unknown;
     switch (request.op) {
+      case 'github.conversation':
+        result = await new GitHubService(this.conversationApi).conversation(request.input, new AbortController().signal);
+        break;
       case 'connection.check':
         result = { github: { available: true, viewer: 'viewer', scopes: ['repo'] }, copilot: { available: true } };
         break;

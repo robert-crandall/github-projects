@@ -84,6 +84,41 @@ export const writeResultSchema = writeInputSchema.extend({
   action: z.enum(['acknowledge', 'unsubscribe']), confirmedAt: time,
   status: z.literal('confirmed'),
 });
+export const conversationStreamSchema = z.enum(['description', 'comments', 'reviews', 'inline']);
+export const conversationInputSchema = z.strictObject({
+  reference: referenceSchema, stream: conversationStreamSchema,
+  page: z.number().int().min(1).max(999_999).nullable(),
+});
+export const conversationMessageSchema = z.strictObject({
+  id: idSchema, kind: conversationStreamSchema,
+  body: z.string().max(1_048_576), author: loginSchema.nullable(),
+  createdAt: time, updatedAt: time,
+  url: z.string().url().max(2_000),
+  replyTo: idSchema.nullable(),
+  reviewId: idSchema.nullable(),
+  path: z.string().max(4_096).nullable(),
+  line: z.number().int().positive().nullable(),
+});
+export const conversationPageSchema = z.strictObject({
+  reference: referenceSchema, stream: conversationStreamSchema,
+  page: z.number().int().min(1).max(999_999),
+  newestPage: z.number().int().min(1).max(999_999),
+  olderPage: z.number().int().min(1).max(999_999).nullable(),
+  fetchedAt: time, messages: z.array(conversationMessageSchema).max(5),
+  error: errorSchema.nullable(),
+});
+export const conversationCacheSchema = z.strictObject({
+  reference: referenceSchema,
+  messages: z.array(conversationMessageSchema).max(5_000),
+  pages: z.array(conversationPageSchema.omit({ messages: true })).max(2_000),
+});
+export type ConversationInput = z.infer<typeof conversationInputSchema>;
+export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
+export type ConversationPage = z.infer<typeof conversationPageSchema>;
+export type ConversationCache = z.infer<typeof conversationCacheSchema>;
+export function conversationKey(reference: Reference): string {
+  return `${reference.repo.toLowerCase()}:${reference.kind}:${reference.number}`;
+}
 export const connectionSchema = z.strictObject({
   github: z.strictObject({
     available: z.boolean(), viewer: loginSchema.optional(),
@@ -145,6 +180,7 @@ const envelope = { v: z.literal(1), id: idSchema.max(180) };
 export const requestSchema = z.discriminatedUnion('op', [
   z.strictObject({ ...envelope, op: z.literal('connection.check'), input: empty }),
   z.strictObject({ ...envelope, op: z.literal('github.refresh'), input: empty }),
+  z.strictObject({ ...envelope, op: z.literal('github.conversation'), input: conversationInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('github.acknowledge'), input: writeInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('github.unsubscribe'), input: writeInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.triage'), input: triageInputSchema }),
@@ -155,6 +191,7 @@ export const requestSchema = z.discriminatedUnion('op', [
 export const resultSchemas = {
   'connection.check': connectionSchema,
   'github.refresh': refreshSchema,
+  'github.conversation': conversationPageSchema,
   'github.acknowledge': writeResultSchema,
   'github.unsubscribe': writeResultSchema,
   'copilot.triage': triageOutputSchema,

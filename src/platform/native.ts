@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { z } from 'zod';
+import { conversationCacheSchema, conversationPageSchema, referenceSchema, type ConversationPage, type Reference } from '../../service/src/schema.ts';
 
 const instant = z.iso.datetime({ offset: true });
 const revision = z.uuid();
@@ -53,6 +54,13 @@ export const githubIdentitySchema = z.object({
   number: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 }).strict();
 const launchResultSchema = z.object({ status: z.literal('dispatch-requested'), url: z.string() }).strict();
+export const webUrlSchema = z.string().max(2_000).refine(value => {
+  try {
+    const url = new URL(value);
+    return !/[\u0000-\u0020\u007f]/u.test(value) && ['https:', 'http:'].includes(url.protocol)
+      && !url.username && !url.password;
+  } catch { return false; }
+});
 const backupSchema = z.object({ id: z.string(), createdAt: instant }).strict();
 const backupId = z.union([z.literal('latest'), z.uuid()]);
 
@@ -66,7 +74,8 @@ export type NativeCommand =
   | 'workspace_read' | 'workspace_save' | 'workspace_storage_status'
   | 'workspace_create_backup' | 'workspace_list_backups' | 'workspace_read_backup'
   | 'workspace_export_json' | 'workspace_export_raw' | 'workspace_recover'
-  | 'launch_github' | 'launch_copilot' | 'clock_now';
+  | 'launch_github' | 'launch_copilot' | 'launch_web_url' | 'clock_now'
+  | 'conversation_read' | 'conversation_merge' | 'conversation_reset';
 export type NativeTransport = (command: NativeCommand, args?: Record<string, unknown>) => Promise<unknown>;
 
 export class NativePlatformError extends Error {
@@ -80,7 +89,8 @@ export class NativePlatformError extends Error {
   }
 }
 
-function parse<T>(schema: z.ZodType<T>, value: unknown, code = 'invalid-input'): T {
+type Validator<T> = { safeParse(value: unknown): { success: true; data: T } | { success: false } };
+function parse<T>(schema: Validator<T>, value: unknown, code = 'invalid-input'): T {
   const result = schema.safeParse(value);
   if (!result.success) {
     throw new NativePlatformError({
@@ -104,7 +114,7 @@ const desktopTransport: NativeTransport = (command, args) => {
 };
 
 export function createNativePlatform(transport: NativeTransport = desktopTransport) {
-  async function call<T>(command: NativeCommand, schema: z.ZodType<T>, args?: Record<string, unknown>): Promise<T> {
+  async function call<T>(command: NativeCommand, schema: Validator<T>, args?: Record<string, unknown>): Promise<T> {
     let response: unknown;
     try { response = await transport(command, args); }
     catch (error) {
@@ -119,6 +129,15 @@ export function createNativePlatform(transport: NativeTransport = desktopTranspo
   }
   return {
     workspaceRead: () => call('workspace_read', workspaceReadSchema),
+    conversationRead: (reference: Reference) => call('conversation_read', conversationCacheSchema.nullable(), { reference: parse(referenceSchema, reference) }),
+    conversationMerge: (page: ConversationPage) => {
+      const valid = parse(conversationPageSchema, page);
+      if (new TextEncoder().encode(JSON.stringify(valid)).length > 1_048_576) {
+        throw new NativePlatformError({ code: 'conversation-limit', message: 'This conversation page exceeds the 1 MiB transport limit. No content was discarded.', retryable: false });
+      }
+      return call('conversation_merge', conversationCacheSchema, { page: valid });
+    },
+    conversationReset: () => call('conversation_reset', z.null()),
     workspaceSave: (expectedRevision: string, snapshot: NativeSnapshot) => {
       const valid = parse(snapshotSchema, snapshot);
       if (new TextEncoder().encode(JSON.stringify(valid)).length > 8 * 1024 * 1024) {
@@ -139,6 +158,7 @@ export function createNativePlatform(transport: NativeTransport = desktopTranspo
     }),
     launchGitHub: (identity: GitHubIdentity) => call('launch_github', launchResultSchema, { identity: parse(githubIdentitySchema, identity) }),
     launchCopilot: (identity: GitHubIdentity) => call('launch_copilot', launchResultSchema, { identity: parse(githubIdentitySchema, identity) }),
+    launchWebUrl: (url: string) => call('launch_web_url', launchResultSchema, { url: parse(webUrlSchema, url) }),
     clockNow: () => call('clock_now', clockSchema),
   };
 }

@@ -2,6 +2,163 @@ import { expect } from '@playwright/test';
 import { snapshotSchema } from '../src/platform/native.ts';
 import { assertMigration, at, capture, checkMigratedReader, checkRelaunchedThreadLink, detail, inbox, legacyFixture, row, tasks } from './workspace-fixtures.ts';
 import { evidence, gate, persisted, refresh, test, thread } from './native-fixture.ts';
+import { rawMessage } from './conversation-fixture.ts';
+import { ServiceError } from '../service/src/errors.ts';
+
+for (const kind of ['issue', 'pr'] as const) {
+  test(`conversation reader loads actual ${kind} bodies through service and typed IPC only on explicit request`, async ({ page, native }) => {
+    const reference = { repo: 'octo/project', number: 123, kind };
+    native.threads[0]!.reference = reference;
+    native.conversationApi.seed(reference);
+    await page.goto('/');
+    await refresh(page);
+    await row(page, 't:123').click();
+    const reader = page.getByRole('region', { name: 'Conversation', exact: true });
+    await expect(reader.getByRole('button', { name: 'Load conversation', exact: true })).toBeEnabled();
+    expect(native.conversationApi.calls).toEqual([]);
+    await reader.getByRole('button', { name: 'Load conversation', exact: true }).click();
+    await expect(reader.getByText('END OF LONG MESSAGE', { exact: false })).toBeVisible();
+    expect((await reader.locator('.conversation-message').first().locator('.message-markdown').textContent())?.match(/Readable source content/g)).toHaveLength(100);
+    if (kind === 'pr') {
+      await expect(reader.getByText('Review body with', { exact: false })).toBeVisible();
+      expect(await reader.getByText('Earlier discussion context is not cached.', { exact: false }).count()).toBe(2);
+      await reader.locator('.conversation-pages > summary').click();
+      await reader.getByRole('button', { name: 'Load older inline discussions', exact: true }).click();
+      await expect(reader.getByText('Opening discussion A', { exact: true })).toBeVisible();
+      const discussion = reader.getByRole('region', { name: 'Inline discussion' }).filter({ hasText: 'Opening discussion A' });
+      await expect(discussion).toContainText('Reply in A');
+      await expect(discussion).toContainText('Second reply in A');
+      await expect(discussion).not.toContainText('Reply in B');
+    }
+    const before = native.requests.length;
+    await page.reload();
+    await expect(reader).toContainText('END OF LONG MESSAGE');
+    expect(native.requests).toHaveLength(before);
+    expect(native.writes.every(write => !JSON.stringify(write).includes('END OF LONG MESSAGE'))).toBe(true);
+    expect(native.state.tasks).toEqual([]);
+  });
+}
+
+test('conversation Markdown never executes HTML, unsafe URLs or external embeds; validated links dispatch explicitly', async ({ page, native }) => {
+  const reference = native.threads[0]!.reference;
+  native.conversationApi.seed(reference);
+  const body = [
+    '# Safe heading', '**Bold** and `code`.', '[source](https://github.com/octo/project/issues/99)',
+    '[bad](javascript:alert%281%29)', '[data](data:text/html,boom)', '[file](file:///etc/passwd)',
+    '![tracking](https://attacker.invalid/pixel.png)', '<img src="https://attacker.invalid/html.png" onerror="alert(1)">',
+    '<script>window.__executed = true</script>', '| A | B |\n| - | - |\n| one | two |',
+  ].join('\n\n');
+  native.conversationApi.routes.set('/repos/octo/project/pulls/123', { status: 200, headers: {}, body: rawMessage(reference, 1, body) });
+  const outbound: string[] = [];
+  await page.route('https://**/*', route => { outbound.push(route.request().url()); return route.abort(); });
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  const reader = page.getByRole('region', { name: 'Conversation', exact: true });
+  await expect(reader.getByRole('heading', { name: 'Safe heading' })).toBeVisible();
+  expect(await reader.locator('img, iframe, script, video, audio, object, embed').count()).toBe(0);
+  expect(await reader.locator('a[href^="javascript:"], a[href^="data:"], a[href^="file:"]').count()).toBe(0);
+  await expect(reader).toContainText('Raw HTML is not rendered');
+  await expect(reader.locator('table')).toContainText('one');
+  await reader.getByRole('link', { name: 'source', exact: true }).click();
+  expect(native.launches.at(-1)).toEqual({ command: 'launch_web_url', args: { url: 'https://github.com/octo/project/issues/99' } });
+  expect(outbound).toEqual([]);
+});
+
+test('reader preserves message anchor when old history arrives and restores per-source position without implicit network', async ({ page, native }) => {
+  native.threads.push(thread([evidence('second')], '456'));
+  native.conversationApi.seed(native.threads[0]!.reference);
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await expect(page.getByText('Newest comment', { exact: true })).toBeVisible();
+  await page.locator('.conversation-pages > summary').click();
+  const pending = gate();
+  native.conversationApi.hold = pending.promise;
+  await page.getByRole('button', { name: 'Load older comments', exact: true }).click();
+  const anchor = page.locator('[data-reader-anchor$="comments:11"]');
+  await anchor.evaluate(element => element.scrollIntoView({ block: 'start' }));
+  const before = await anchor.evaluate(element => element.getBoundingClientRect().top);
+  pending.release();
+  native.conversationApi.hold = undefined;
+  await expect(page.getByRole('button', { name: 'Reload newest messages', exact: true })).toBeEnabled();
+  expect(Math.abs((await anchor.evaluate(element => element.getBoundingClientRect().top)) - before)).toBeLessThan(3);
+  const offset = await detail(page).evaluate(element => element.scrollTop);
+  await persisted(page);
+  const calls = native.requests.length;
+  await row(page, 't:456').click();
+  await expect(page.getByRole('button', { name: 'Load conversation', exact: true })).toBeEnabled();
+  await row(page, 't:123').click();
+  await expect(page.getByText('Newest comment', { exact: true })).toBeVisible();
+  expect(Math.abs((await detail(page).evaluate(element => element.scrollTop)) - offset)).toBeLessThan(3);
+  await page.evaluate(() => { window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online')); });
+  expect(native.requests).toHaveLength(calls);
+});
+
+test('stale conversation results after switching sources are ignored; partial/offline cache and recovery preserve notes', async ({ page, native }) => {
+  native.threads.push(thread([evidence('second')], '456'));
+  native.conversationApi.seed(native.threads[0]!.reference);
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('PRIVATE preserved note');
+  await persisted(page);
+  const pending = gate();
+  native.conversationApi.hold = pending.promise;
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await row(page, 't:456').click();
+  pending.release();
+  native.conversationApi.hold = undefined;
+  await expect(page.getByRole('button', { name: 'Load conversation', exact: true })).toBeEnabled();
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).not.toContainText('END OF LONG MESSAGE');
+  await row(page, 't:123').click();
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toContainText('END OF LONG MESSAGE');
+  native.conversationApi.failure = new ServiceError('rate_limit', true);
+  await page.getByRole('button', { name: 'Reload newest messages', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toContainText('Some pages are partial or unavailable');
+  const calls = native.requests.length;
+  await page.reload();
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toContainText('END OF LONG MESSAGE');
+  expect(native.requests).toHaveLength(calls);
+  native.corruptCache = true;
+  await page.reload();
+  await expect(page.getByRole('region', { name: 'Conversation', exact: true })).toContainText('cache is corrupt');
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('PRIVATE preserved note');
+  await page.getByRole('button', { name: 'Discard conversation cache', exact: true }).click();
+  await page.getByRole('button', { name: 'Discard cached conversations', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Load conversation', exact: true })).toBeEnabled();
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('PRIVATE preserved note');
+  expect(native.requests).toHaveLength(calls);
+  expect(JSON.stringify(native.requests)).not.toContain('PRIVATE');
+});
+
+test('conversation reader at desktop and narrow sizes wraps Markdown without fetching embeds', async ({ page, native }, testInfo) => {
+  const reference = native.threads[0]!.reference;
+  native.threads[0]!.title = 'Keep review conversations readable offline';
+  native.conversationApi.seed(reference);
+  native.conversationApi.routes.set('/repos/octo/project/pulls/123', {
+    status: 200, headers: {}, body: rawMessage(reference, 1, [
+      '## What changed', 'Read the whole conversation without leaving the thread. Keep comments and their replies together.',
+      '> This sample demonstrates the reader layout. No live source data is used.',
+      '### Notes from the review', '- Keep older replies with their discussion.\n- Preserve private notes while refreshing.\n- Make partial pages explicit.',
+      '```ts\nconst source = { repository: "octo/project", kind: "pr", number: 123 };\n```',
+      '[Source context](https://github.com/octo/project/pull/123)',
+    ].join('\n\n')),
+  });
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByRole('button', { name: 'Load conversation', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'What changed' })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('reader-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('button', { name: 'Back to list', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(await detail(page).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('reader-narrow.png') });
+});
 
 test('empty native load waits for SQLite and capture, notes and Done persist without demo or startup requests', async ({ page, native }) => {
   native.holdRead = gate();

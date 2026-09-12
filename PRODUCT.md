@@ -22,7 +22,11 @@ Working on, Later, routines, mandatory steps, project grouping and commitment ra
 
 ## Reading and external operations
 
-The first Inbox release retains bounded source summaries and a saved history disclosure. It labels them honestly, rather than claiming to contain the full conversation. Full issue/PR conversation reading follows in [#9](https://github.com/robert-crandall/github-projects/issues/9).
+The desktop reader shows real issue/PR descriptions, comments, reviews and inline discussions with stable reply grouping, author, time and source links. Markdown is untrusted: do not execute source HTML or automatically load external images/embeds. Keep long messages readable without clipping.
+
+Selection reads only the separate local conversation cache. **Load conversation**, **Load older** and page reloads are explicit network actions. Keep bounded pagination, page freshness, inaccessible/partial results and missing reply context visible. Stable IDs deduplicate repeated pages and retain edits; discovered history never becomes new notification evidence.
+
+Conversation bodies never enter the workspace snapshot, note saves or model requests. The independent cache is limited to 4 MiB per source (repository + type + number) and 64 MiB total. Full/corrupt caches offer explicit cache-only discard, preserving the old cache file and all notes/Tasks. No silent eviction or reset.
 
 Keep **Open on GitHub** and **Review in Copilot** / **Open in Copilot** visible on eligible thread rows and in the reader. Native launches accept validated GitHub identities, not arbitrary URLs or private notes. A successful launch request does not prove a session exists or a review finished.
 
@@ -37,6 +41,8 @@ Filtering and terminal suppression follow in [#11](https://github.com/robert-cra
 GitHub refresh stays explicit. Startup, focus, clocks, edits and navigation do not fetch notifications or initialize model requests.
 
 Refresh applies one bounded response to the latest local state. Preserve edits, selection, task completion and existing row order while a request is running. Failed, partial and empty results are distinct; none silently destroys saved history. Missing source evidence remains uncertain.
+
+When the selected conversation is cached, Refresh updates its description and newest pages alongside notifications and publishes the result together. Successful notifications survive reader failures with explicit partial errors. Older saved pages are not implicitly refreshed; their timestamps and explicit reload controls remain available. Preserve reader anchors and per-source scroll positions, and ignore stale selected-conversation responses after navigation.
 
 Local saves use the existing checksummed, revisioned SQLite snapshot and serialized write queue. Saved feedback appears only when the latest changes persist. Errors leave pending edits available with retry and export controls. Conflict recovery backs up the other saved copy before replacing it. Corrupt data never becomes an automatic empty workspace.
 

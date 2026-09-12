@@ -2,10 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { checkAbort, sanitized, ServiceError } from './errors.ts';
 import { executable, run, type Runner } from './process.ts';
+import { readConversation } from './conversation.ts';
 import {
   LIMITS, loginSchema, referenceSchema, repoSchema, threadIdSchema, teamSchema, refreshSchema,
   writeInputSchema, writeResultSchema,
-  type Diagnostic, type Evidence, type Reference, type Thread,
+  type ConversationInput, type Diagnostic, type Evidence, type Reference, type Thread,
 } from './schema.ts';
 
 export type ApiResponse = { status: number; headers: Record<string, string>; body: unknown };
@@ -17,6 +18,7 @@ const getRoute = new RegExp(
   `^(?:/user|/user/teams\\?per_page=100&page=[1-9]\\d{0,5}|/notifications\\?all=true&per_page=50&page=[12]`
   + `|/notifications/threads/[1-9]\\d{0,19}(?:/subscription)?`
   + `|/repos/${repoPath}/(?:pulls|issues)/[1-9]\\d{0,15}`
+  + `|/repos/${repoPath}/(?:issues/[1-9]\\d{0,15}/comments|pulls/[1-9]\\d{0,15}/(?:reviews|comments))\\?per_page=5&page=[1-9]\\d{0,5}`
   + `|/repos/${repoPath}/issues/[1-9]\\d{0,15}/timeline\\?per_page=100&page=[1-9]\\d{0,5})$`,
 );
 export class GhApi implements GitHubApi {
@@ -60,12 +62,12 @@ function apiError(response: ApiResponse): ServiceError {
   if (response.status === 403 || response.status === 404) return new ServiceError('access');
   return new ServiceError('unavailable', true);
 }
-function parse<T>(schema: z.ZodType<T>, body: unknown): T {
+export function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (!result.success) throw new ServiceError('invalid_output');
   return result.data;
 }
-function requireStatus(response: ApiResponse, status = 200): void {
+export function requireStatus(response: ApiResponse, status = 200): void {
   if (response.status !== status) throw response.status >= 400 ? apiError(response) : new ServiceError('invalid_output');
 }
 const time = z.iso.datetime();
@@ -187,7 +189,7 @@ export function classifyEvents(
   }
   return { evidence: [...new Map(evidence.map(event => [event.id, event])).values()], omitted };
 }
-function pageLink(response: ApiResponse, relation: 'last' | 'next', path: string): number | undefined {
+export function pageLink(response: ApiResponse, relation: 'last' | 'next', path: string): number | undefined {
   const value = response.headers.link;
   if (!value) return undefined;
   for (const part of value.split(',')) {
@@ -220,6 +222,9 @@ export class GitHubService {
   }>();
   constructor(private readonly api: GitHubApi = new GhApi(), options: { refreshBudgetMs?: number } = {}) {
     this.refreshBudgetMs = z.number().int().positive().max(LIMITS.refreshMs).parse(options.refreshBudgetMs ?? LIMITS.refreshMs);
+  }
+  conversation(input: ConversationInput, signal: AbortSignal) {
+    return readConversation(this.api, input, signal);
   }
   async connection(signal: AbortSignal) {
     const response = await this.api.request('GET', '/user', signal);

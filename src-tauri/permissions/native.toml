@@ -1,10 +1,11 @@
 [[permission]]
 identifier = "native-workspace"
-description = "Bounded workspace persistence, local clock, and validated GitHub destinations."
+description = "Bounded workspace and conversation persistence, local clock, and validated web destinations."
 commands.allow = [
   "workspace_read", "workspace_save", "workspace_storage_status",
   "workspace_create_backup", "workspace_list_backups", "workspace_read_backup",
   "workspace_export_json", "workspace_export_raw", "workspace_recover",
-  "launch_github", "launch_copilot", "clock_now",
+  "conversation_read", "conversation_merge", "conversation_reset",
+  "launch_github", "launch_copilot", "launch_web_url", "clock_now",
   "service_request"
 ]

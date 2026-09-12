@@ -84,7 +84,54 @@ impl GitHubIdentity {
 }
 
 pub fn dispatch(identity: GitHubIdentity, copilot: bool) -> Result<LaunchResult> {
-    let url = identity.url(copilot)?;
+    dispatch_url(identity.url(copilot)?)
+}
+
+pub(crate) fn web_url(value: &str) -> Result<String> {
+    let invalid = || {
+        NativeError::new(
+            "invalid-destination",
+            "Only HTTP or HTTPS links without credentials or control characters can be opened.",
+        )
+    };
+    if value.len() > 8_192
+        || value.chars().any(|c| c.is_control() || c.is_whitespace())
+        || value.contains('\\')
+        || value.as_bytes().windows(3).any(|bytes| {
+            bytes[0] == b'%'
+                && std::str::from_utf8(&bytes[1..])
+                    .ok()
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                    .is_some_and(|byte| byte < 32 || byte == 127)
+        })
+    {
+        return Err(invalid());
+    }
+    let parsed = url::Url::parse(value).map_err(|_| invalid())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !value
+            .get(..value.find(':').unwrap_or(0) + 3)
+            .is_some_and(|prefix| prefix.ends_with("://"))
+        || value.split_once("://").is_some_and(|(_, rest)| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .contains('@')
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(parsed.to_string())
+}
+
+pub fn dispatch_web(value: String) -> Result<LaunchResult> {
+    dispatch_url(web_url(&value)?)
+}
+
+fn dispatch_url(url: String) -> Result<LaunchResult> {
     #[cfg(target_os = "macos")]
     {
         // Fixed executable and validated, generated URL; no shell, renderer arguments, or output logging.
@@ -182,5 +229,39 @@ mod tests {
         )
         .is_err());
         assert!(serde_json::from_str::<GitHubIdentity>(r#"{"source":"github","owner":"a","repo":"b","number":1,"kind":"pr","prompt":"private"}"#).is_err());
+    }
+
+    #[test]
+    fn web_links_are_http_only_and_never_shell_arguments() {
+        for value in [
+            "https://github.com/octo/repo/issues/1#issuecomment-2",
+            "http://localhost:8080/a?query=value#anchor",
+            "https://example.com/a%20b",
+            "https://example.com/?text=$(id);echo",
+        ] {
+            assert!(web_url(value).is_ok(), "{value}");
+        }
+        for value in [
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "file:///etc/passwd",
+            "ghapp://github.com/a/b/issues/1",
+            "--help",
+            "https:example.com",
+            "//example.com",
+            "https://user:password@example.com",
+            "https://user@example.com",
+            "https://@example.com",
+            "https://example.com\n--args",
+            " https://example.com",
+            "https://example.com/a\tb",
+            "https://example.com/%0a--args",
+            "https://example.com/%00",
+            "https://example.com/%7F",
+            "https://example.com\\@evil.com",
+            "https://",
+        ] {
+            assert!(web_url(value).is_err(), "{value}");
+        }
     }
 }
