@@ -1,6 +1,7 @@
 import { LIMITS, threadIdSchema, type Evidence, type Thread as SourceThread } from '../../service/src/schema.ts';
 import { beginOperation, finishOperation, mergeRefresh, type RefreshBatch } from '../domain/live.ts';
-import type { Activity, Thread } from '../types.ts';
+import type { Activity, Row, Thread } from '../types.ts';
+import { transition } from '../domain/engine.ts';
 import { ServiceClient, type ServiceOutput } from '../platform/service.ts';
 import type { DesktopWorkspace } from './desktop-workspace.ts';
 import type { RemoteStatus, RemoteWorkspace } from './remote-view.ts';
@@ -25,16 +26,17 @@ function activity(threadId: string, evidence: Evidence): Activity {
 export function sourceThread(thread: SourceThread, diagnostics: ServiceOutput<'github.refresh'>['diagnostics']): Thread {
   const { evidence, ...metadata } = thread;
   const events = evidence.map(event => activity(thread.id, event));
-  if (!events.length) events.push({
+  if (!events.some(event => Date.parse(event.at) >= Date.parse(thread.updatedAt))) events.push({
     id: `github:notification:${thread.id}:${thread.updatedAt}`, threadId: thread.id, kind: 'unknown', rawKind: 'notification-update',
-    at: thread.updatedAt, actor: 'GitHub', summary: 'Notification activity is available, but source event evidence is incomplete. Inspect the source before deciding.',
+    at: thread.updatedAt, actor: 'GitHub', summary: 'GitHub updated this notification. The saved timeline may not include the activity; inspect the source for context.',
     requestState: 'uncertain',
   });
   const queued = thread.state === 'open' && evidence.at(-1)?.kind === 'merge-queue';
   return {
     id: thread.id, ...thread.reference, source: 'github', title: thread.title,
     reason: thread.reason === 'review_requested' ? 'review_requested' : thread.reason.includes('mention') ? 'mention' : 'subscribed',
-    rawReason: thread.reason, notification: thread.notification, state: queued ? 'queued' : thread.state === 'open' ? 'open' : 'closed',
+    rawReason: thread.reason, notification: thread.notification, notificationUpdatedAt: thread.updatedAt,
+    state: queued ? 'queued' : thread.state === 'open' ? 'open' : 'closed',
     subscribed: thread.subscription === 'subscribed', subscription: thread.subscription,
     lines: thread.size ? thread.size.additions + thread.size.deletions : undefined,
     events, sourceMetadata: metadata,
@@ -106,15 +108,54 @@ export class ServiceWorkspace implements RemoteWorkspace {
         return { ...current, operations: current.operations.map(operation => operation.id === previous.id
           ? { ...operation, status: 'pending', message: 'Retry intent awaits local persistence; GitHub has not confirmed success.' } : operation) };
       });
-    } else this.workspace.update(current => beginOperation(current, { id: operationId, threadId: thread.id, action: destination.action!, eventIds }));
+    } else this.workspace.update(current => beginOperation(current, {
+      id: operationId, threadId: thread.id, action: destination.action!, eventIds, notificationUpdatedAt: thread.notificationUpdatedAt,
+    }));
+    await this.performWrite(operationId, thread);
+  }
+  async archive(row: Row): Promise<void> {
+    const thread = row.thread;
+    if (!thread || thread.source !== 'github') throw new Error('Select a saved GitHub thread before archiving.');
+    const canWrite = threadIdSchema.safeParse(thread.id).success;
+    const operationId = crypto.randomUUID();
+    let pending = false;
+    this.workspace.update(current => {
+      const archived = transition(current, { type: 'archive', threadId: thread.id });
+      pending = current.operations.some(operation => operation.threadId === thread.id && operation.status === 'pending');
+      if (!canWrite) return archived;
+      return beginOperation(archived, {
+        id: operationId, threadId: thread.id, action: 'done',
+        eventIds: row.events.slice(-LIMITS.events).map(event => event.id), notificationUpdatedAt: thread.notificationUpdatedAt,
+      }, true);
+    });
+    if (!canWrite || pending) {
+      await this.workspace.flush();
+      this.workspace.feedback(!canWrite
+        ? 'Archived here. This source has no GitHub notification ID, so no GitHub write was sent.'
+        : 'Archived here. Another GitHub write is pending; retry this archive acknowledgement explicitly when it finishes.');
+      return;
+    }
+    await this.performWrite(operationId, thread);
+    this.workspace.feedback(this.workspace.state.threads.find(value => value.id === thread.id)?.archive
+      ? 'Archived here. GitHub confirmed Done for this notification. Notes and Tasks are unchanged.'
+      : 'GitHub confirmed Done. This thread is in Inbox here; notes and Tasks are unchanged.');
+  }
+  private async performWrite(operationId: string, thread: Thread): Promise<void> {
     try {
       await this.workspace.flush();
-      const input = { operationId, threadId: thread.id, reference: { repo: thread.repo, number: thread.number, kind: thread.kind }, displayedEvidenceIds: eventIds };
-      const action = destination.action === 'done' ? 'acknowledge' : 'unsubscribe';
+      const operation = this.workspace.state.operations.find(operation => operation.id === operationId)!;
+      if (operation.action === 'done' && !operation.notificationUpdatedAt) {
+        throw new Error('This intent has no saved notification-update boundary. No GitHub write was sent. Refresh, then acknowledge the current evidence explicitly instead of retrying this older intent.');
+      }
+      const eventIds = operation.eventIds;
+      const input = { operationId, threadId: thread.id, reference: { repo: thread.repo, number: thread.number, kind: thread.kind },
+        displayedEvidenceIds: eventIds, notificationUpdatedAt: operation.notificationUpdatedAt };
+      const action = operation.action === 'done' ? 'acknowledge' : 'unsubscribe';
       const result = await this.client.call(action === 'acknowledge' ? 'github.acknowledge' : 'github.unsubscribe', input);
       if (result.operationId !== operationId || result.threadId !== thread.id || result.action !== action
         || JSON.stringify(result.reference) !== JSON.stringify(input.reference)
-        || JSON.stringify(result.displayedEvidenceIds) !== JSON.stringify(eventIds)) throw new Error('GitHub confirmation did not match the saved operation context.');
+        || JSON.stringify(result.displayedEvidenceIds) !== JSON.stringify(eventIds)
+        || result.notificationUpdatedAt !== input.notificationUpdatedAt) throw new Error('GitHub confirmation did not match the saved operation context.');
       this.workspace.update(current => finishOperation(current, operationId, { confirmedAt: result.confirmedAt }));
       await this.workspace.flush();
     } catch (error) {

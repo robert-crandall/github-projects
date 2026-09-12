@@ -84,7 +84,7 @@ All objects are strict: unknown keys fail validation. Thread IDs are positive de
 
 `refreshSchema` contains `batchId`, `fetchedAt`, `viewer`, `status: complete | partial`, `threads`, `diagnostics`, and notification coverage. `coverage.missingMeansDone` is always `false`.
 
-Each thread includes its notification ID, validated repository reference, current title/state/PR size, read/unread state, sticky reason, subscription observation, and evidence. Notification `updatedAt` and `reason` are context only; they never create request evidence.
+Each thread includes its notification ID, validated repository reference, current title/state/PR size, read/unread state, sticky reason, subscription observation, and evidence. Notification `updatedAt` is the actual notification's `updated_at`, not a reader-cache or enrichment time. The client uses it for archive boundaries and acknowledgement preflight; it never fabricates a review request from that timestamp or a sticky reason.
 
 Each evidence entry includes:
 
@@ -126,13 +126,15 @@ These DTOs live in a separate native cache, never in task/note snapshots, `Row.e
 
 ### Explicit writes
 
-`writeInputSchema` is `{operationId, threadId, reference, displayedEvidenceIds}`. Persist this operation context before dispatch so failures can be retried explicitly. Before writing, the backend gets the thread and checks that it matches the supplied repository reference.
+`writeInputSchema` is `{operationId, threadId, reference, displayedEvidenceIds, notificationUpdatedAt?}`. Archive persists this context together with local placement before dispatch. Before writing, the backend gets the thread and checks its repository reference. For acknowledgement, a newer source timestamp returns `source_changed` without DELETE. Responses echo the captured timestamp as well as evidence IDs; retry never substitutes a newer timestamp.
+
+The optional timestamp field retains protocol compatibility with earlier callers and saved operations. The desktop refuses acknowledgement of an older intent without a timestamp; it preserves that history and directs the user to Refresh and confirm current evidence instead. Unsubscribe does not depend on an activity cutoff.
 
 **Done on GitHub uses `DELETE /notifications/threads/{id}` and requires HTTP 204.** `PATCH` means read, not done, and is not exposed. Unsubscribe uses `PUT /notifications/threads/{id}/subscription` with `{"ignored":true}` and requires HTTP 200 with `ignored:true`. This suppresses ordinary conversation updates even for watched repositories; future mentions, participation, or review requests may generate new notifications.
 
 Confirmed operation IDs are deduplicated within a service process. Reusing an ID with different context fails. Native persistence must avoid resending already-confirmed operations after a restart. GitHub does not accept these app operation IDs as transactional idempotency keys. Cancellation/timeouts may occur after GitHub accepted a write: retain an uncertain/failed operation, never claim success. A retry returning inaccessible/not-found is not confirmation.
 
-After confirmed acknowledgement, integration may handle only the displayed evidence IDs locally. Retained actions/notes survive. Local Done, selection, navigation, and Undo never invoke these endpoints.
+GitHub does not offer an atomic comparison-and-delete or event-scoped acknowledgement. A notification arriving between the preflight GET and DELETE may also be marked done remotely. Confirmation permits handling only the displayed evidence IDs locally, never concurrent newer evidence. Notes and Tasks survive. Local Restore, task Done, selection, navigation and Undo never invoke these endpoints.
 
 ### Copilot previews and privacy
 

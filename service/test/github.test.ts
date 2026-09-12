@@ -303,6 +303,19 @@ describe('explicit GitHub writes (mocked only)', () => {
     expect(api.calls.filter(value => value.method === 'DELETE').length).toBe(1);
     await expect(service.write('unsubscribe', input, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
   });
+  test('stale acknowledgement and its retry cannot clear a newer notification; unsubscribe remains independent', async () => {
+    const api = new FakeApi();
+    const service = new GitHubService(api);
+    const stale = { ...input, notificationUpdatedAt: at(19) };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(service.write('acknowledge', stale, signal())).rejects.toMatchObject({ dto: { code: 'source_changed' } });
+    }
+    expect(api.calls.every(call => call.method === 'GET')).toBe(true);
+    await service.write('unsubscribe', { ...stale, operationId: 'unsub' }, signal());
+    expect(api.calls.at(-1)!.method).toBe('PUT');
+    await service.write('acknowledge', { ...input, operationId: 'fresh', notificationUpdatedAt: at(20) }, signal());
+    expect(api.calls.at(-1)!.method).toBe('DELETE');
+  });
   test('wrong subject context, queued status and failed writes never claim success', async () => {
     const api = new FakeApi();
     const service = new GitHubService(api);

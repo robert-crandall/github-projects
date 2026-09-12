@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { earlierThreads, getRow, getRows, initialState, transition } from './engine.ts';
+import { getRow, getRows, initialState, transition } from './engine.ts';
 
 test('Inbox contains one row per thread and selection never creates or selects a task', () => {
   let state = initialState();
@@ -28,7 +28,7 @@ test('notes belong to threads, remain separate and cannot be edited through anot
 });
 
 test('capture from every main view saves exact text into Tasks without interpretation or linking', () => {
-  for (const view of ['inbox', 'tasks'] as const) {
+  for (const view of ['inbox', 'archive', 'tasks'] as const) {
     let state = transition(initialState(), { type: 'view', view });
     const text = '  Review https://github.com/octo/project/pull/1\nEvery day at 10am, announce, then increase  ';
     const threads = structuredClone(state.threads);
@@ -72,7 +72,7 @@ test('refresh only applies staged activity explicitly and preserves edits, focus
   expect(state.staged).toEqual([]);
 });
 
-test('acknowledgement and unsubscribe preserve thread notes and all Tasks in Earlier threads', () => {
+test('acknowledgement and unsubscribe do not change local placement, thread notes or Tasks', () => {
   for (const action of ['done', 'unsubscribe'] as const) {
     let state = initialState();
     const threadId = state.threads[0]!.id;
@@ -81,8 +81,9 @@ test('acknowledgement and unsubscribe preserve thread notes and all Tasks in Ear
     state = transition(state, { type: 'notification', threadId, action });
     expect(state.notes).toEqual(before.notes);
     expect(state.tasks).toEqual(before.tasks);
-    expect(getRows(state).some(row => row.thread?.id === threadId)).toBe(false);
-    expect(earlierThreads(state).some(row => row.thread?.id === threadId)).toBe(true);
+    expect(getRows(state).some(row => row.thread?.id === threadId)).toBe(true);
+    state = transition(state, { type: 'archive', threadId });
+    expect(getRows(state, 'archive').some(row => row.thread?.id === threadId)).toBe(true);
     state = transition(state, { type: 'select', key: `t:${threadId}` });
     expect(state.tasks).toEqual(before.tasks);
     expect(state.notes).toEqual(before.notes);

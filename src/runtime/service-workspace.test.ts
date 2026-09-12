@@ -57,7 +57,7 @@ async function harness(handler: ServiceTransport, snapshot: NativeWorkspace['sna
   await workspace.load(); await workspace.flush();
   const client = new ServiceClient(async request => { requests.push(request); return handler(request); });
   const remote = new ServiceWorkspace(workspace, client);
-  return { workspace, remote, requests, backups, saved: () => saved, failSave: () => { failSave = true; },
+  return { workspace, remote, client, requests, backups, saved: () => saved, failSave: () => { failSave = true; },
     blockSave: () => { blockedSave = deferred<void>(); return blockedSave; }, platform };
 }
 const reply = (request: Request, result: unknown) => ({ v: 1, id: request.id, ok: true, result });
@@ -160,17 +160,18 @@ test('successive acknowledgements drain over 200 pending events without handling
   await mock.remote.refresh();
   const before = getRow(mock.workspace.state, 't:123')!;
   expect(before.events).toHaveLength(201);
-  const writing = mock.remote.write({ row: before, kind: 'notification', action: 'done' });
+  const writing = mock.remote.archive(before);
   const request = await firstWrite.promise;
   expect(request.input.displayedEvidenceIds).toEqual(events.slice(1).map(event => event.id));
   const newer = { ...evidence('newer-request'), at: '2026-09-11T17:01:00Z' };
-  source = thread([newer]);
+  source = { ...thread([newer]), updatedAt: newer.at };
   await mock.remote.refresh();
   confirmation.resolve();
   await writing;
   expect(mock.workspace.state.handled).toHaveLength(200);
   expect(mock.workspace.state.handled).not.toContain(events[0]!.id);
   expect(mock.workspace.state.handled).not.toContain(newer.id);
+  expect(mock.workspace.state.threads[0]!.archive).toBeNull();
   const remaining = getRow(mock.workspace.state, 't:123')!;
   expect(remaining.thread!.events).toHaveLength(202);
   expect(getRows(mock.workspace.state)).toHaveLength(1);
@@ -180,13 +181,178 @@ test('successive acknowledgements drain over 200 pending events without handling
     events.slice(1).map(event => event.id), [events[0]!.id, newer.id],
   ]);
   expect(remaining.events.map(event => event.id)).toEqual([events[0]!.id, newer.id]);
-  expect(getRows(mock.workspace.state)).toEqual([]);
+  expect(getRow(mock.workspace.state, 't:123')!.events).toEqual([]);
+  expect(getRows(mock.workspace.state)).toHaveLength(1);
   expect(mock.workspace.state.handled).toHaveLength(202);
   expect(getRow(mock.workspace.state, 't:123')!.thread!.events).toHaveLength(202);
   const relaunched = new DesktopWorkspace(mock.platform);
   await relaunched.load();
   expect(relaunched.state.threads[0]!.notification).toBe('done');
-  expect(getRows(relaunched.state)).toEqual([]);
+  expect(getRow(relaunched.state, 't:123')!.events).toEqual([]);
+  expect(getRows(relaunched.state)).toHaveLength(1);
+});
+
+test('Archive saves placement and intent together before dispatch, and newer source activity survives the pending acknowledgement', async () => {
+  const pending = deferred<void>();
+  const sent = deferred<void>();
+  let source = thread();
+  const mock = await harness(async request => {
+    if (request.op === 'github.refresh') return reply(request, batch([source]));
+    expect(request.op).toBe('github.acknowledge');
+    expect(mock.saved().snapshot!.workspace).toMatchObject({ state: {
+      threads: [{ archive: { notificationUpdatedAt: thread().updatedAt } }], operations: [{ status: 'pending' }],
+    } });
+    sent.resolve();
+    await pending.promise;
+    return reply(request, { ...request.input, action: 'acknowledge', status: 'confirmed', confirmedAt: new Date().toISOString() });
+  });
+  await mock.remote.refresh();
+  mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'Private archive note' });
+  const row = getRow(mock.workspace.state, 't:123')!;
+  const saving = mock.blockSave();
+  const archiving = mock.remote.archive(row);
+  expect(getRows(mock.workspace.state)).toEqual([]);
+  expect(mock.workspace.state.operations[0]!.status).toBe('pending');
+  expect(mock.requests.map(request => request.op)).toEqual(['github.refresh']);
+  saving.resolve();
+  await sent.promise;
+  const next = '2026-09-11T17:01:00Z';
+  source = { ...thread(), updatedAt: next };
+  await mock.remote.refresh();
+  expect(getRows(mock.workspace.state)).toHaveLength(1);
+  pending.resolve();
+  await archiving;
+  expect(mock.workspace.state.threads[0]!.notification).toBe('unread');
+  expect(getRows(mock.workspace.state)).toHaveLength(1);
+  expect(mock.workspace.state.handled).not.toContain(`github:notification:123:${next}`);
+  await mock.workspace.flush();
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load();
+  expect(getRows(relaunched.state)).toHaveLength(1);
+  expect(relaunched.state.notes[0]!.text).toBe('Private archive note');
+});
+
+test('offline Archive persists locally, never replays on relaunch and retries only its original source boundary', async () => {
+  let fail = true;
+  const mock = await harness(async request => {
+    if (request.op === 'github.refresh') return reply(request, batch());
+    if (fail) throw new Error('Acknowledgement timed out; GitHub may have received it.');
+    return reply(request, { ...request.input, action: 'acknowledge', status: 'confirmed', confirmedAt: new Date().toISOString() });
+  });
+  await mock.remote.refresh();
+  const row = getRow(mock.workspace.state, 't:123')!;
+  await expect(mock.remote.archive(row)).rejects.toThrow('timed out');
+  expect(getRows(mock.workspace.state, 'archive')).toHaveLength(1);
+  const operation = structuredClone(mock.workspace.state.operations[0]!);
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load(); await relaunched.flush();
+  expect(mock.requests).toHaveLength(2);
+  expect(getRows(relaunched.state, 'archive')).toHaveLength(1);
+  fail = false;
+  await new ServiceWorkspace(relaunched, mock.client).write({ row, kind: 'notification', action: 'done', retryId: operation.id });
+  expect(relaunched.state.operations[0]).toMatchObject({ id: operation.id, eventIds: operation.eventIds,
+    notificationUpdatedAt: operation.notificationUpdatedAt, status: 'confirmed' });
+});
+
+test('Archive on a placeholder stays local, and failed local persistence cannot dispatch its remote intent', async () => {
+  const mock = await harness(async () => { throw new Error('Must not call the network'); });
+  loadSource(mock.workspace);
+  mock.workspace.update(state => ({ ...state, threads: state.threads.map(thread => ({ ...thread, id: placeholderId, events: [] })) }));
+  await mock.remote.archive(getRow(mock.workspace.state, `t:${placeholderId}`)!);
+  expect(mock.workspace.state.operations).toEqual([]);
+  expect(mock.workspace.getSnapshot().feedback).toContain('no GitHub notification ID');
+  mock.workspace.update(state => ({ ...state, threads: state.threads.map(thread => ({ ...thread, id: '123' })) }));
+  await mock.workspace.flush();
+  mock.failSave();
+  await expect(mock.remote.archive(getRow(mock.workspace.state, 't:123')!)).rejects.toThrow('storage failure');
+  expect(mock.workspace.state.threads[0]!.archive).not.toBeNull();
+  expect(mock.workspace.getSnapshot().persistence.pending).toBe(true);
+  expect(mock.requests).toEqual([]);
+});
+
+test('acknowledgement intent keeps the displayed timestamp even when refresh preceded modal confirmation', async () => {
+  const mock = await harness(async request => reply(request, {
+    ...request.input, action: 'acknowledge', status: 'confirmed', confirmedAt: new Date().toISOString(),
+  }));
+  loadSource(mock.workspace);
+  const displayed = getRow(mock.workspace.state, 't:123')!;
+  loadSource(mock.workspace, { ...thread(), updatedAt: '2026-09-11T17:01:00Z' });
+  await mock.remote.write({ row: displayed, kind: 'notification', action: 'done' });
+  expect(mock.workspace.state.operations[0]!.notificationUpdatedAt).toBe(thread().updatedAt);
+  expect(mock.workspace.state.threads[0]!.notification).toBe('unread');
+  expect(mock.requests[0]!.input).toMatchObject({ notificationUpdatedAt: thread().updatedAt });
+});
+
+test('archiving again during a pending request is local; its eventual confirmation cannot reverse local Restore', async () => {
+  const wait = deferred<void>();
+  const sent = deferred<void>();
+  const mock = await harness(async request => {
+    sent.resolve();
+    await wait.promise;
+    return reply(request, { ...request.input, action: 'acknowledge', status: 'confirmed', confirmedAt: new Date().toISOString() });
+  });
+  loadSource(mock.workspace);
+  const original = getRow(mock.workspace.state, 't:123')!;
+  const archiving = mock.remote.archive(original);
+  await sent.promise;
+  loadSource(mock.workspace, { ...thread(), updatedAt: '2026-09-11T17:01:00Z' });
+  await mock.remote.archive(getRow(mock.workspace.state, 't:123')!);
+  expect(mock.workspace.state.operations).toHaveLength(2);
+  expect(mock.workspace.state.operations[1]).toMatchObject({ status: 'failed', notificationUpdatedAt: '2026-09-11T17:01:00Z' });
+  expect(mock.requests).toHaveLength(1);
+  expect(getRows(mock.workspace.state, 'archive')).toHaveLength(1);
+  mock.workspace.dispatch({ type: 'restore-thread', threadId: '123' });
+  wait.resolve();
+  await archiving;
+  expect(getRows(mock.workspace.state, 'inbox')).toHaveLength(1);
+  expect(mock.workspace.state.threads[0]!.notification).toBe('unread');
+  expect(mock.workspace.state.handled).toEqual(['request-1']);
+});
+
+test('Archive during pending unsubscribe retains a separate acknowledgement intent for explicit retry', async () => {
+  const wait = deferred<void>();
+  const sent = deferred<void>();
+  const mock = await harness(async request => {
+    if (request.op === 'github.unsubscribe') { sent.resolve(); await wait.promise; }
+    return reply(request, { ...request.input, action: request.op === 'github.unsubscribe' ? 'unsubscribe' : 'acknowledge',
+      status: 'confirmed', confirmedAt: new Date().toISOString() });
+  });
+  loadSource(mock.workspace);
+  const row = getRow(mock.workspace.state, 't:123')!;
+  const unsubscribing = mock.remote.write({ row, kind: 'notification', action: 'unsubscribe' });
+  await sent.promise;
+  await mock.remote.archive(row);
+  expect(mock.workspace.state.operations).toHaveLength(2);
+  const acknowledgement = mock.workspace.state.operations[1]!;
+  expect(acknowledgement).toMatchObject({ action: 'done', status: 'failed', notificationUpdatedAt: thread().updatedAt });
+  expect(acknowledgement.message).toContain('Not sent');
+  expect(mock.saved().snapshot?.workspace).toMatchObject({ state: { operations: mock.workspace.state.operations } });
+  expect(mock.requests.map(request => request.op)).toEqual(['github.unsubscribe']);
+  wait.resolve();
+  await unsubscribing;
+  expect(mock.workspace.state.operations[1]!.status).toBe('failed');
+  await mock.remote.write({ row, kind: 'notification', action: 'done', retryId: acknowledgement.id });
+  expect(mock.workspace.state.threads[0]).toMatchObject({ notification: 'done', subscription: 'unsubscribed' });
+  expect(getRows(mock.workspace.state, 'archive')).toHaveLength(1);
+});
+
+test('legacy retry without a notification timestamp is retained and rejected before network; fresh context is explicit', async () => {
+  const mock = await harness(async request => reply(request, {
+    ...request.input, action: 'acknowledge', status: 'confirmed', confirmedAt: new Date().toISOString(),
+  }));
+  loadSource(mock.workspace);
+  mock.workspace.update(state => ({ ...state, operations: [{
+    id: 'legacy-intent', threadId: '123', action: 'done', status: 'uncertain', eventIds: ['request-1'], startedAt: state.clock, message: 'Interrupted legacy write',
+  }] }));
+  const row = getRow(mock.workspace.state, 't:123')!;
+  await expect(mock.remote.write({ row, kind: 'notification', action: 'done', retryId: 'legacy-intent' })).rejects.toThrow('no saved notification-update boundary');
+  expect(mock.requests).toEqual([]);
+  expect(mock.workspace.state.operations[0]!.id).toBe('legacy-intent');
+  expect(mock.workspace.state.handled).toEqual([]);
+  await mock.remote.archive(row);
+  expect(mock.workspace.state.operations).toHaveLength(2);
+  expect(mock.workspace.state.operations[1]!.notificationUpdatedAt).toBe(thread().updatedAt);
+  expect(mock.workspace.state.operations[1]!.status).toBe('confirmed');
 });
 
 test('manual refresh uses latest notes and Done; capture, edits, load and clocks never call model or network', async () => {

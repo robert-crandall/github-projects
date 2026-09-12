@@ -121,18 +121,25 @@ test('staged activity requires explicit Refresh and preserves row order, selecti
   await expect(page.getByRole('button', { name: 'Refresh', exact: true })).toBeFocused();
 });
 
-for (const action of ['Mark notification done on GitHub', 'Unsubscribe on GitHub']) {
-  test(`${action} retains notes under Earlier threads without changing Tasks`, async ({ page }) => {
+for (const action of ['Archive thread', 'Unsubscribe on GitHub']) {
+  test(`${action} retains notes without changing Tasks`, async ({ page }) => {
     await page.goto('/');
     await page.getByLabel('Thread notes', { exact: true }).fill('I still need this annotation');
     await detail(page).getByRole('button', { name: 'Add note' }).click();
     await page.getByLabel('Thread note 2').fill('Independent annotation');
     const before = await saved(page);
-    await detail(page).getByRole('button', { name: action, exact: true }).click();
+    if (action === 'Archive thread') {
+      await page.getByRole('button', { name: /Demo scenarios/ }).click();
+      await page.getByLabel('External handoff fails').check();
+      await page.getByRole('button', { name: 'Back to workspace' }).click();
+      await detail(page).getByRole('button', { name: action, exact: true }).click();
+      expect((await saved(page)).threads[0]!.archive).not.toBeNull();
+      await detail(page).getByRole('button', { name: 'Retry GitHub operation' }).click();
+    } else await detail(page).getByRole('button', { name: action, exact: true }).click();
     await page.getByLabel('Simulate a failed GitHub write').check();
     await page.getByRole('button', { name: 'Simulate success' }).click();
     await expect(page.getByRole('dialog')).toContainText('Nothing was acknowledged or unsubscribed');
-    expect((await saved(page)).threads).toEqual(before.threads);
+    if (action !== 'Archive thread') expect((await saved(page)).threads).toEqual(before.threads);
     await page.getByLabel('Simulate a failed GitHub write').uncheck();
     await page.getByRole('button', { name: 'Retry simulation' }).click();
     await page.getByRole('button', { name: 'Return to workspace' }).click();
@@ -140,10 +147,9 @@ for (const action of ['Mark notification done on GitHub', 'Unsubscribe on GitHub
     expect(after.tasks).toEqual(before.tasks);
     expect(after.notes).toEqual(before.notes);
     const thread = after.threads.find(thread => `t:${thread.id}` === before.selectedKey)!;
-    expect(action.startsWith('Mark') ? thread.notification : thread.subscribed).toBe(action.startsWith('Mark') ? 'done' : false);
-    await inbox(page).click();
-    await page.locator('.earlier-threads > summary').click();
-    await page.locator('.earlier-threads').locator(`[data-row-key="${before.selectedKey}"] .row-select`).click();
+    expect(action === 'Archive thread' ? thread.notification : thread.subscribed).toBe(action === 'Archive thread' ? 'done' : false);
+    await page.getByRole('navigation', { name: 'Inboxes' }).getByRole('button', { name: action === 'Archive thread' ? /^Archive/ : /^Inbox/ }).click();
+    await row(page, before.selectedKey!).click();
     await page.reload();
     await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('I still need this annotation');
     await expect(page.getByLabel('Thread note 2')).toHaveValue('Independent annotation');
@@ -194,7 +200,7 @@ test('failed and partial Refresh preserve saved context and recover only on expl
   expect((await saved(page)).tasks).toEqual(before.tasks);
   await stage(page, 'empty');
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await expect(page.getByText('No threads in this saved inbox')).toBeVisible();
+  await expect(page.locator('.queue .work-row')).toHaveCount(before.threads.filter(thread => !thread.archive).length);
   expect((await saved(page)).notes).toEqual(before.notes);
   expect((await saved(page)).threads).toHaveLength(before.threads.length);
 });

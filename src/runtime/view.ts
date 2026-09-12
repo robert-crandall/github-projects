@@ -12,6 +12,7 @@ export type WorkspaceView = {
   desktop?: {
     saving: boolean; refreshing: boolean; refresh: () => void;
     open: (destination: Destination) => void;
+    archive: (row: Row) => void;
     connections: () => void;
     conversation: (reference: Reference) => ReactNode;
     readerReady: (reference: Reference) => boolean;

@@ -1,5 +1,7 @@
 import type { Activity, AppState, Command, Row, Scenario, Thread, View } from '../types.ts';
 import { addMinutes, initialClock, instant } from './clock.ts';
+import { archiveBoundary } from './archive.ts';
+import { LIMITS } from '../../service/src/schema.ts';
 
 const PRIMARY = 'demo-relay-101';
 const TEAM = 'demo-provider-202';
@@ -18,19 +20,19 @@ function id(state: AppState, prefix: string): string {
   return `${prefix}-${state.sequence}`;
 }
 
-function pending(state: AppState, thread: Thread): Activity[] {
+export function pendingEvidence(state: AppState, thread: Thread): Activity[] {
   if (thread.notification === 'done') return [];
   return thread.events.filter(event => event.kind !== 'read' && event.kind !== 'acknowledged' && !state.handled.includes(event.id)
     && (state.runtime !== 'desktop' || thread.subscription !== 'unsubscribed' || isRequest(event) || event.kind === 'mention'));
 }
 
 function threadRow(state: AppState, thread: Thread): Row {
-  const events = pending(state, thread);
+  const events = pendingEvidence(state, thread);
   const latest = thread.events.at(-1);
   return {
     key: `t:${thread.id}`, title: thread.title, kind: thread.kind === 'pr' ? 'review' : 'update',
     reason: latest?.summary ?? 'No source activity saved yet.', thread, events,
-    fresh: state.newKeys.includes(`t:${thread.id}`), available: events.length > 0,
+    fresh: !thread.archive && state.newKeys.includes(`t:${thread.id}`), available: !thread.archive,
   };
 }
 
@@ -48,18 +50,14 @@ export function getRow(state: AppState, key: string): Row | undefined {
 }
 
 export function getRows(state: AppState, view: View = state.view): Row[] {
-  const rows = view === 'inbox' ? state.threads.map(thread => threadRow(state, thread)).filter(row => row.available)
-    : state.tasks.map(task => getRow(state, `a:${task.id}`)!);
+  const rows = view === 'tasks' ? state.tasks.map(task => getRow(state, `a:${task.id}`)!)
+    : state.threads.map(thread => threadRow(state, thread)).filter(row => view === 'inbox' ? row.available : !row.available);
   const positions = new Map(state.order.map((key, index) => [key, index]));
   return rows.sort((a, b) => (positions.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.key) ?? Number.MAX_SAFE_INTEGER));
 }
 
-export function earlierThreads(state: AppState): Row[] {
-  return state.threads.map(thread => threadRow(state, thread)).filter(row => !row.available);
-}
-
 function appendOrder(state: AppState): void {
-  const keys = [...getRows(state, 'inbox'), ...getRows(state, 'tasks')].map(row => row.key);
+  const keys = [...getRows(state, 'inbox'), ...getRows(state, 'archive'), ...getRows(state, 'tasks')].map(row => row.key);
   const added = keys.filter(key => !state.order.includes(key));
   state.order.push(...added);
   state.newKeys = unique([...state.newKeys, ...added.filter(key => key.startsWith('t:'))]);
@@ -101,7 +99,8 @@ export function initialState(timeZone = 'UTC'): AppState {
     },
   ];
   return {
-    version: 3, runtime: 'demo', clock, timeZone, threads,
+    version: 3, runtime: 'demo', clock, timeZone,
+    threads: threads.map(thread => ({ ...thread, archive: thread.id === CLOSED ? archiveBoundary(thread, clock) : null })),
     tasks: [{ id: 'demo-local-task', title: 'Write a short rollout checklist', notes: 'Synthetic local task. No GitHub reference required.',
       status: 'open', createdAt: clock }],
     notes: [{ id: 'demo-review-note', threadId: PREVIOUS, text: 'Review finished. No need to wait for merge.' },
@@ -126,7 +125,8 @@ function stage(state: AppState, scenario: Scenario): void {
   if (scenario === 'new-review') {
     const threadId = id(state, 'demo-new-review');
     thread = { id: threadId, repo: 'sample/relay', number: state.sequence + 300, kind: 'pr',
-      title: 'Add delivery timeout diagnostics', reason: 'review_requested', state: 'open', notification: 'done', subscribed: true, events: [] };
+      title: 'Add delivery timeout diagnostics', reason: 'review_requested', state: 'open', notification: 'done', subscribed: true, events: [],
+      archive: { at: state.clock } };
     state.threads.push(thread);
   }
   const kinds: Record<Exclude<Scenario, 'empty'>, Activity['kind']> = {
@@ -157,6 +157,11 @@ function applyEvent(state: AppState, event: Activity): void {
     thread.notification = 'done';
     state.handled = unique([...state.handled, ...thread.events.map(entry => entry.id)]);
     return;
+  }
+  // Staged demo events are explicitly new; unlike a fetched page, their identity is authoritative.
+  if (thread.archive) {
+    thread.archive = null;
+    state.newKeys = unique([...state.newKeys, `t:${thread.id}`]);
   }
   if (event.kind === 'merge-queue') thread.state = 'queued';
   if (event.kind === 'merged') thread.state = 'closed';
@@ -218,6 +223,26 @@ export function transition(state: AppState, command: Command): AppState {
       else next.notes.push({ id: id(next, 'note'), threadId: command.threadId, text: command.text });
       break;
     }
+    case 'archive':
+    case 'restore-thread': {
+      const thread = next.threads.find(thread => thread.id === command.threadId);
+      if (!thread) throw new Error('This thread no longer exists.');
+      thread.archive = command.type === 'archive' ? archiveBoundary(thread, next.clock) : null;
+      if (command.type === 'archive' && next.runtime !== 'desktop') {
+        const eventIds = pendingEvidence(next, thread).slice(-LIMITS.events).map(event => event.id);
+        const failed = next.failures.external;
+        next.operations.push({
+          id: id(next, 'demo-archive'), threadId: thread.id, action: 'done', eventIds, startedAt: next.clock,
+          status: failed ? 'failed' : 'confirmed',
+          message: failed ? 'Simulated GitHub acknowledgement failed. Archive and notes remain here; retry explicitly.' : 'Simulated GitHub Done confirmed.',
+        });
+        if (!failed) {
+          next.handled = unique([...next.handled, ...eventIds]);
+          if (!pendingEvidence(next, thread).length) thread.notification = 'done';
+        }
+      }
+      break;
+    }
     case 'edit':
     case 'done':
     case 'restore': {
@@ -252,12 +277,18 @@ export function transition(state: AppState, command: Command): AppState {
     case 'notification': {
       const thread = next.threads.find(entry => entry.id === command.threadId);
       if (!thread) throw new Error('This GitHub thread no longer exists.');
+      const retry = command.retryId ? next.operations.find(operation => operation.id === command.retryId) : undefined;
+      if (command.retryId && (!retry || retry.threadId !== thread.id || retry.action !== command.action || !['failed', 'uncertain'].includes(retry.status))) {
+        throw new Error('This operation cannot be retried with a different context.');
+      }
       if (next.failures.external) throw new Error('Simulated GitHub write failed. Notification, subscription, notes and tasks are unchanged.');
       if (command.action === 'read') thread.notification = 'read';
       else {
-        next.handled = unique([...next.handled, ...thread.events.map(event => event.id)]);
-        if (command.action === 'done') thread.notification = 'done';
-        else thread.subscribed = false;
+        next.handled = unique([...next.handled, ...(retry?.eventIds ?? pendingEvidence(next, thread).slice(-LIMITS.events).map(event => event.id))]);
+        if (command.action === 'done') {
+          if (!pendingEvidence(next, thread).length) thread.notification = 'done';
+        } else thread.subscribed = false;
+        if (retry) { retry.status = 'confirmed'; retry.message = 'Simulated GitHub Done confirmed.'; }
       }
       break;
     }
@@ -273,7 +304,10 @@ export function transition(state: AppState, command: Command): AppState {
     case 'reset': {
       // Reset synthetic source activity only. Every local note, task and history remains.
       const fixtures = initialState(next.timeZone);
-      next.threads = [...fixtures.threads, ...next.threads.filter(thread => !fixtures.threads.some(fixture => fixture.id === thread.id))];
+      next.threads = [...fixtures.threads.map(thread => {
+        const previous = next.threads.find(previous => previous.id === thread.id);
+        return { ...thread, archive: previous ? previous.archive : thread.archive };
+      }), ...next.threads.filter(thread => !fixtures.threads.some(fixture => fixture.id === thread.id))];
       next.staged = [];
       next.handled = fixtures.handled;
       next.refresh = fixtures.refresh;
