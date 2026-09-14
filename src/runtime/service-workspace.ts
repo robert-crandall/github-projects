@@ -42,7 +42,7 @@ export function sourceThread(thread: SourceThread, diagnostics: ServiceOutput<'g
     events, sourceMetadata: metadata,
     coverage: { timeline: thread.coverage.timeline, newestPage: thread.coverage.fetchedPages.includes(thread.coverage.newestPage),
       fetchedPages: thread.coverage.fetchedPages.length, observedAt: thread.coverage.observedAt },
-    diagnostics: diagnostics.filter(diagnostic => diagnostic.threadId === thread.id).map(diagnostic => diagnostic.message),
+    diagnostics: [...new Set(diagnostics.filter(diagnostic => diagnostic.threadId === thread.id).map(diagnostic => diagnostic.message))],
   };
 }
 
@@ -66,7 +66,9 @@ export class ServiceWorkspace implements RemoteWorkspace {
       const reader = await conversation;
       const batch: RefreshBatch = { startedAt, fetchedAt: result.fetchedAt, status: result.status,
         threads: result.threads.map(thread => sourceThread(thread, result.diagnostics)),
-        diagnostics: result.diagnostics.map(diagnostic => diagnostic.message) };
+        diagnostics: result.diagnostics.map(diagnostic => diagnostic.message),
+        coverageMessage: result.status === 'complete' && result.coverage.notifications === 'partial'
+          ? `Showing the latest ${result.threads.length} thread${result.threads.length === 1 ? '' : 's'}.` : '' };
       this.workspace.update(current => mergeRefresh(current, batch));
       this.conversation.commit(reader);
     } catch (error) {
@@ -74,7 +76,7 @@ export class ServiceWorkspace implements RemoteWorkspace {
       const message = error instanceof Error ? error.message : 'Refresh failed without usable results.';
       this.workspace.update(current => {
         const next = mergeRefresh(current, { threads: [], startedAt, fetchedAt: new Date().toISOString(), status: 'partial', diagnostics: [message] });
-        return { ...next, refresh: { ...next.refresh, status: 'error' } };
+        return { ...next, refresh: { ...next.refresh, status: 'error', message } };
       });
       this.conversation.commit(reader);
     } finally { this.publish({ refreshing: false }); }

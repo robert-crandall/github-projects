@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { GhApi, GitHubService, classifyEvents, parseResponse, pullRequestStateQuery, sourceReference, type ApiResponse, type GitHubApi } from '../src/github.ts';
+import { GhApi, GitHubService, classifyEvents, pageLink, parseResponse, pullRequestStateQuery, sourceReference, type ApiResponse, type GitHubApi } from '../src/github.ts';
 import { ServiceError } from '../src/errors.ts';
 import { requestSchema } from '../src/schema.ts';
 
@@ -184,6 +184,81 @@ describe('GitHub evidence identity', () => {
   });
 });
 describe('bounded GitHub refresh', () => {
+  test('notification batch limits are successful reads with explicit partial coverage, not errors', async () => {
+    for (const morePages of [false, true]) {
+      const api = new FakeApi();
+      for (let page = 1; page <= 2; page++) {
+        api.overrides.set(`GET /notifications?all=true&per_page=50&page=${page}`, response(
+          Array.from({ length: 50 }, (_, index) => notification(String((page - 1) * 50 + index + 1))),
+          page === 1 || morePages ? { link: `<https://api.github.com/notifications?all=true&per_page=50&page=${page + 1}>; rel="next"` } : {},
+        ));
+      }
+      const result = await new GitHubService(api).refresh(signal());
+      expect(result.status).toBe('complete');
+      expect(result.diagnostics).toEqual([]);
+      expect(result.threads).toHaveLength(50);
+      expect(result.coverage).toEqual({ notifications: 'partial', pages: 2, received: 100, returned: 50, missingMeansDone: false });
+      expect(api.calls.filter(call => call.path.startsWith('/notifications?'))).toHaveLength(2);
+    }
+  });
+  test('canonical repository-ID pagination loads the newest timeline through the original repository route', async () => {
+    const api = new FakeApi();
+    const path = '/repos/integrations/provider/issues/12/timeline';
+    api.overrides.set(`GET ${path}?per_page=100&page=1`, response([request(1)], {
+      link: '<https://api.github.com/repositories/42/issues/12/timeline?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/42/issues/12/timeline?per_page=100&page=2>; rel="last"',
+    }));
+    api.overrides.set(`GET ${path}?per_page=100&page=2`, response([request(2)]));
+    const result = await new GitHubService(api).refresh(signal());
+    expect(result.status).toBe('complete');
+    expect(result.diagnostics).toEqual([]);
+    expect(result.threads[0]!.coverage).toMatchObject({ timeline: 'complete', newestPage: 2, fetchedPages: [1, 2] });
+    expect(result.threads[0]!.evidence.map(event => event.requestState)).toEqual(['historical', 'current']);
+    expect(api.calls.some(call => call.path === `${path}?per_page=100&page=2`)).toBe(true);
+    expect(api.calls.some(call => call.path.startsWith('/repositories/'))).toBe(false);
+  });
+  test('canonical pagination still rejects changed sources, resources, credentials, hosts and unbounded pages', () => {
+    const path = '/repos/integrations/provider/issues/12/timeline';
+    for (const url of [
+      'https://api.github.com/repositories/42/issues/13/timeline?page=2',
+      'https://api.github.com/repositories/42/issues/12/comments?page=2',
+      'https://api.github.com/repositories/42/pulls/12/timeline?page=2',
+      'https://api.github.com/repositories/not-an-id/issues/12/timeline?page=2',
+      'https://api.github.com/repos/other/repo/issues/12/timeline?page=2',
+      'https://api.github.com.evil/repositories/42/issues/12/timeline?page=2',
+      'http://api.github.com/repositories/42/issues/12/timeline?page=2',
+      'https://user@api.github.com/repositories/42/issues/12/timeline?page=2',
+      'https://api.github.com/repositories/42/issues/12/timeline?page=2#fragment',
+      'https://api.github.com/repositories/42/issues/12/timeline?page=1000000',
+    ]) {
+      expect(() => pageLink(response([], { link: `<${url}>; rel="last"` }), 'last', path)).toThrow(ServiceError);
+    }
+  });
+  test('cross-references without event IDs retain stable, distinct identities without making valid timelines partial', async () => {
+    const api = new FakeApi();
+    const crossReference = (issueId: number, hour: number) => ({
+      event: 'cross-referenced', created_at: at(hour), updated_at: at(hour),
+      actor: { login: 'author' }, source: { type: 'issue', issue: { id: issueId } },
+    });
+    const path = 'GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1';
+    const events = [request(1), crossReference(42, 2), crossReference(43, 2), crossReference(42, 3)];
+    api.overrides.set(path, response([...events, crossReference(42, 2)]));
+    const result = await new GitHubService(api).refresh(signal());
+    const evidence = result.threads[0]!.evidence;
+    expect(result.status).toBe('complete');
+    expect(result.diagnostics).toEqual([]);
+    expect(evidence).toHaveLength(4);
+    expect(new Set(evidence.map(event => event.id)).size).toBe(4);
+    expect(evidence[0]!.requestState).toBe('current');
+    expect(evidence.slice(1).map(event => event.kind)).toEqual(['other', 'other', 'other']);
+    expect((await new GitHubService(api).refresh(signal())).threads[0]!.evidence).toEqual(evidence);
+    for (const source of [undefined, { type: 'issue', issue: {} }, { type: 'commit', issue: { id: 42 } }]) {
+      api.overrides.set(path, response([request(1), { ...crossReference(42, 2), source }]));
+      const invalid = await new GitHubService(api).refresh(signal());
+      expect(invalid.status).toBe('partial');
+      expect(invalid.threads[0]!.evidence).toHaveLength(1);
+      expect(invalid.threads[0]!.evidence[0]!.requestState).toBe('uncertain');
+    }
+  });
   test('manual call includes read and unread; connection never fetches notifications', async () => {
     const api = new FakeApi();
     const service = new GitHubService(api);
@@ -224,9 +299,16 @@ describe('bounded GitHub refresh', () => {
     api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=9', response([
       { id: 10, event: 'added_to_merge_queue', created_at: at(10) },
     ]));
-    const thread = (await new GitHubService(api).refresh(signal())).threads[0]!;
+    const result = await new GitHubService(api).refresh(signal());
+    const thread = result.threads[0]!;
+    expect(result.status).toBe('complete');
+    expect(result.diagnostics).toEqual([]);
     expect(thread.evidence.map(value => value.kind)).toEqual(['merge-queue']);
     expect(thread.coverage).toMatchObject({ timeline: 'partial', newestPage: 9, fetchedPages: [9] });
+    api.overrides.set('GET /notifications/threads/1/subscription', new ServiceError('access'));
+    const failed = await new GitHubService(api).refresh(signal());
+    expect(failed.status).toBe('partial');
+    expect(failed.diagnostics).toEqual([expect.objectContaining({ scope: 'subscription', code: 'access', threadId: '1' })]);
   });
   test('missing membership and malformed latest event suppress certainty', async () => {
     const api = new FakeApi();

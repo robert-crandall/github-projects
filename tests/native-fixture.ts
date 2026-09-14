@@ -1,5 +1,5 @@
 import { expect, type Page } from '@playwright/test';
-import { conversationPageSchema, referenceSchema, requestSchema, type ConversationCache, type Evidence, type Request, type Thread } from '../service/src/schema.ts';
+import { conversationPageSchema, referenceSchema, requestSchema, type ConversationCache, type Diagnostic, type Evidence, type Request, type Thread } from '../service/src/schema.ts';
 import { GitHubService } from '../service/src/github.ts';
 import { cacheKey, ConversationApi, mergeCachedPage } from './conversation-fixture.ts';
 import { snapshotSchema, type NativeSnapshot, type NativeWorkspace } from '../src/platform/native.ts';
@@ -46,6 +46,8 @@ export class NativeMock {
   now = at;
   threads = [thread()];
   partial = false;
+  notificationLimit = false;
+  diagnostics?: Diagnostic[];
   corrupt = false;
   failSave = false;
   failBackup = false;
@@ -155,8 +157,8 @@ export class NativeMock {
         result = {
           batchId: crypto.randomUUID(), fetchedAt: this.now, viewer: 'viewer',
           status: this.partial ? 'partial' : 'complete', threads: this.threads,
-          diagnostics: this.partial ? [{ scope: 'timeline', code: 'access', threadId: '123', message: 'Some timeline evidence is unavailable.' }] : [],
-          coverage: { notifications: this.partial ? 'partial' : 'complete', pages: 1,
+          diagnostics: this.diagnostics ?? (this.partial ? [{ scope: 'timeline', code: 'access', threadId: '123', message: 'Some timeline evidence is unavailable.' }] : []),
+          coverage: { notifications: this.partial || this.notificationLimit ? 'partial' : 'complete', pages: 1,
             received: this.threads.length, returned: this.threads.length, missingMeansDone: false },
         };
         break;

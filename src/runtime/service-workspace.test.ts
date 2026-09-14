@@ -66,6 +66,27 @@ function loadSource(workspace: DesktopWorkspace, source = thread()) {
   workspace.update(state => mergeRefresh(state, { threads: [sourceThread(source, [])], startedAt: new Date().toISOString(), fetchedAt: new Date().toISOString(), status: 'complete', diagnostics: [] }));
 }
 
+test('successful bounded refresh advances freshness and retains a neutral coverage note across relaunch', async () => {
+  let bounded = true;
+  const mock = await harness(async request => reply(request, {
+    ...batch(), coverage: { notifications: bounded ? 'partial' : 'complete', pages: 2, received: bounded ? 100 : 1,
+      returned: 1, missingMeansDone: false },
+  }));
+  await mock.remote.refresh();
+  await mock.workspace.flush();
+  const refreshed = mock.workspace.state.refresh;
+  expect(refreshed.status).toBe('ok');
+  expect(refreshed.lastSuccessAt).not.toBeNull();
+  expect(refreshed.diagnostics).toEqual([]);
+  expect(refreshed.coverageMessage).toBe('Showing the latest 1 thread.');
+  const relaunched = new DesktopWorkspace(mock.platform);
+  await relaunched.load();
+  expect(relaunched.state.refresh).toEqual(refreshed);
+  bounded = false;
+  await mock.remote.refresh();
+  expect(mock.workspace.state.refresh.coverageMessage).toBe('');
+});
+
 const placeholderId = 'capture:octo/project:1';
 function legacyCapture() {
   const legacy = legacyFixture(true);

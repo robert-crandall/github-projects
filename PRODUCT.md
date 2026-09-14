@@ -62,6 +62,8 @@ GitHub refresh stays explicit. Startup, focus, clocks, edits and navigation do n
 
 Refresh applies one bounded response to the latest local state. Preserve edits, selection, task completion and existing row order while a request is running. Failed, partial and empty results are distinct; none silently destroys saved history. Missing source evidence remains uncertain.
 
+The normal notification batch cap and bounded older history are coverage limits, not refresh failures. A successful bounded read advances freshness without an error banner. Keep notification coverage visible as a neutral note and timeline coverage in source history. Genuine failed reads and malformed evidence remain explicit.
+
 When the selected conversation is cached, Refresh updates its description and newest pages alongside notifications and publishes the result together. Successful notifications survive reader failures with explicit partial errors. Older saved pages are not implicitly refreshed; their timestamps and explicit reload controls remain available. Preserve reader anchors and per-source scroll positions, and ignore stale selected-conversation responses after navigation.
 
 Local saves use the existing checksummed, revisioned SQLite snapshot and serialized write queue. Saved feedback appears only when the latest changes persist. Errors leave pending edits available with retry and export controls. Conflict recovery backs up the other saved copy before replacing it. Corrupt data never becomes an automatic empty workspace.
