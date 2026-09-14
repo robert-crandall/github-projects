@@ -92,6 +92,8 @@ export const legacyStateSchema = z.object({
   selectedKey: z.string().nullable(), activeId: z.string().nullable(), view: viewSchema, draft: z.string(),
   refresh: z.object({
     lastSuccessAt: time.nullable(), status: z.enum(['saved', 'ok', 'partial', 'error']), message: z.string(),
+    diagnostics: z.array(z.string()).optional(),
+    coverageMessage: z.string().optional(),
   }),
   failures: z.object({
     refresh: z.enum(['none', 'partial', 'error']), storage: z.boolean(), interpretation: z.boolean(), external: z.boolean(),

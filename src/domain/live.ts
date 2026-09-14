@@ -32,7 +32,10 @@ export function restoreDesktop(value: unknown, now: string): AppState {
   return transition(state, { type: 'clock', now });
 }
 
-export type RefreshBatch = { threads: Thread[]; startedAt: string; fetchedAt: string; status: 'complete' | 'partial'; diagnostics: string[] };
+export type RefreshBatch = {
+  threads: Thread[]; startedAt: string; fetchedAt: string; status: 'complete' | 'partial';
+  diagnostics: string[]; coverageMessage?: string;
+};
 
 /** Apply to the current workspace, not the snapshot used to initiate the request. */
 export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
@@ -138,9 +141,11 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
   next.refresh = {
     lastSuccessAt: batch.status === 'complete' ? instant(batch.fetchedAt) : next.refresh.lastSuccessAt,
     status: batch.status === 'complete' ? 'ok' : 'partial',
-    message: batch.diagnostics.join(' ') || (batch.status === 'complete'
+    diagnostics: [...new Set(batch.diagnostics)],
+    coverageMessage: batch.coverageMessage ?? '',
+    message: batch.status === 'complete'
       ? `Refresh complete. Received ${batch.threads.length} GitHub threads. Notes and tasks are unchanged.`
-      : 'Some GitHub activity could not be loaded. Saved work is retained.'),
+      : `Received ${batch.threads.length} GitHub thread${batch.threads.length === 1 ? '' : 's'}. Saved work is retained. Refresh to retry missing activity.`,
   };
   return transition(next, { type: 'clock', now: next.clock });
 }

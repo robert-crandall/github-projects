@@ -94,6 +94,21 @@ test('PR reviews and multiple inline conversations retain authors, source links 
   expect(inline.messages[2]!.reviewId).not.toBe(inline.messages[0]!.reviewId);
 });
 
+test('canonical repository-ID links load newest conversation pages without following the supplied URL', async () => {
+  for (const [stream, resource] of [['comments', 'issues/12/comments'], ['reviews', 'pulls/12/reviews'], ['inline', 'pulls/12/comments']] as const) {
+    const api = new Api();
+    const route = `/repos/octo/project/${resource}`;
+    api.routes.set(`${route}?per_page=5&page=1`, response([raw(1)], {
+      link: `<https://api.github.com/repositories/42/${resource}?per_page=5&page=3>; rel="last"`,
+    }));
+    api.routes.set(`${route}?per_page=5&page=3`, response([raw(11, 'Newest message')]));
+    const result = await new GitHubService(api).conversation({ reference, stream, page: null }, signal());
+    expect(result).toMatchObject({ page: 3, newestPage: 3, olderPage: 2, error: null });
+    expect(result.messages.map(message => message.body)).toEqual(['Newest message']);
+    expect(api.calls).toEqual([`${route}?per_page=5&page=1`, `${route}?per_page=5&page=3`]);
+  }
+});
+
 test('permission, rate limit, offline and malformed pages remain explicit without fallback content', async () => {
   for (const failure of [
     response(null, {}, 403), response(null, {}, 404), response(null, { 'retry-after': '30' }, 429),

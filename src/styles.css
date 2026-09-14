@@ -140,6 +140,12 @@ blockquote { margin: 12px 0; font-size: 12px; white-space: pre-wrap; overflow-wr
 .error-banner strong { font-size: 12px; }
 .error-banner p { font-size: 11px; color: var(--secondary); }
 .error-banner .text-button { color: var(--text); font-size: 11px; }
+.refresh-banner > svg { flex-shrink: 0; }
+.refresh-banner > div { min-width: 0; }
+.refresh-details { color: var(--secondary); font-size: 11px; overflow-wrap: anywhere; }
+.refresh-details summary { cursor: pointer; padding-block: 4px; }
+.refresh-details ul { max-height: 160px; overflow: auto; margin: 4px 0 0; padding-left: 18px; }
+.refresh-details li + li { margin-top: 4px; }
 .empty-list { text-align: center; padding: 50px 28px; color: var(--muted); }
 .empty-list h3 { color: var(--secondary); margin: 15px 0 8px; }
 .empty-list p { font-size: 12px; margin-bottom: 13px; }

@@ -52,7 +52,21 @@ test('missing and repeatedly fetched threads never erase notes or regenerate ack
   const missing = mergeRefresh(state, { threads: [], startedAt: now, fetchedAt: now, status: 'partial', diagnostics: ['Timeline unavailable'] });
   expect(missing.notes).toEqual(state.notes);
   expect(missing.threads[0]!.events[0]!.requestState).toBe('uncertain');
-  expect(missing.refresh.message).toContain('unavailable');
+  expect(missing.refresh.diagnostics).toContain('Timeline unavailable');
+});
+
+test('partial refresh summarizes results and persists each distinct diagnostic once', () => {
+  const before = transition(loaded(), { type: 'note', threadId: '123', text: 'Keep my note' });
+  const diagnostics = Array.from({ length: 50 }, (_, index) => index % 2 ? 'Timeline unavailable' : 'Notification limit reached');
+  const next = mergeRefresh(before, { threads: [thread()], startedAt: now, fetchedAt: now, status: 'partial', diagnostics });
+  expect(next.refresh.status).toBe('partial');
+  expect(next.refresh.lastSuccessAt).toBe(before.refresh.lastSuccessAt);
+  expect(next.refresh.message).toBe('Received 1 GitHub thread. Saved work is retained. Refresh to retry missing activity.');
+  expect(next.refresh.diagnostics).toEqual(['Notification limit reached', 'Timeline unavailable']);
+  expect(next.notes).toEqual(before.notes);
+  expect(restoreDesktop(next, now).refresh).toEqual(next.refresh);
+  expect(refresh(next).refresh.diagnostics).toEqual([]);
+  expect(refresh(next).refresh.status).toBe('ok');
 });
 
 test('ack response handles only displayed evidence, preserves concurrent request and Undo cannot reverse it', () => {

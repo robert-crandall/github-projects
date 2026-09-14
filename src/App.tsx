@@ -18,6 +18,19 @@ export function stamp(value: string, zone: string, date = false) {
     timeZone: zone, hour: 'numeric', minute: '2-digit', ...(date ? { month: 'short', day: 'numeric' } as const : {}),
   }).format(new Date(value));
 }
+function RefreshBanner({ refresh }: { refresh: AppState['refresh'] }) {
+  if (refresh.status !== 'partial' && refresh.status !== 'error') return null;
+  const partial = refresh.status === 'partial';
+  const diagnostics = partial ? [...new Set(refresh.diagnostics ?? [refresh.message])] : [];
+  return <section className="error-banner refresh-banner" role="status"><AlertCircle size={18} /><div>
+    <strong>{partial ? 'Some activity could not be refreshed' : 'Refresh failed; showing saved work'}</strong>
+    <p>{partial && !refresh.diagnostics ? 'Saved work is retained. Refresh to retry missing activity.' : refresh.message}</p>
+    {diagnostics.length > 0 && <details className="refresh-details">
+      <summary>Refresh details ({diagnostics.length})</summary>
+      <ul>{diagnostics.map(message => <li key={message}>{message}</li>)}</ul>
+    </details>}
+  </div></section>;
+}
 function ItemIcon({ row, size = 18 }: { row: Row; size?: number }) {
   if (row.kind === 'review') return <GitPullRequest size={size} />;
   if (row.kind === 'update') return <MessageSquare size={size} />;
@@ -327,12 +340,13 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
           : state.view === 'filtered' ? 'Kept out of Inbox locally. Notes and history remain here.'
             : 'GitHub conversations, with your notes alongside.'}</p></div>
         <div className="refresh-area"><button className="secondary refresh-button" disabled={live?.refreshing} aria-busy={live?.refreshing} onClick={() => live ? live.refresh() : dispatch({ type: 'refresh' })}><RefreshCw size={15} />{live?.refreshing ? 'Refreshing...' : 'Refresh'}</button>
-          <span>{state.refresh.lastSuccessAt ? `Updated ${stamp(state.refresh.lastSuccessAt, state.timeZone)}` : live ? 'Refresh to load GitHub activity' : 'Sample snapshot · not yet refreshed'}</span></div>
+          <span>{state.refresh.lastSuccessAt ? `Updated ${stamp(state.refresh.lastSuccessAt, state.timeZone)}` : live ? 'Refresh to load GitHub activity' : 'Sample snapshot · not yet refreshed'}</span>
+          {state.refresh.coverageMessage && <span>{state.refresh.coverageMessage}</span>}</div>
       </header>
       {(workspace.storageError || workspace.operationError) && <section className="error-banner" role="alert"><AlertCircle size={18} /><div><strong>{workspace.storageError ? 'Your changes are not saved' : 'That action could not finish'}</strong><p>{workspace.storageError || workspace.operationError}</p>
         {workspace.storageError && <div className="button-row"><button className="text-button" onClick={() => workspace.retryStorage()}>Retry storage</button><button className="text-button" onClick={() => workspace.exportBackup()}>Export pending copy</button><button className="text-button" onClick={() => workspace.exportBackup(true)}>Export saved copy</button><button className="text-button" onClick={() => workspace.retryStorage(true)}>Back up saved copy &amp; use this one</button></div>}
       </div></section>}
-      {(state.refresh.status === 'error' || state.refresh.status === 'partial') && <section className="error-banner" role="status"><AlertCircle size={18} /><div><strong>{state.refresh.status === 'partial' ? 'Some activity could not be refreshed' : 'Refresh failed; showing saved work'}</strong><p>{state.refresh.message}</p></div></section>}
+      <RefreshBanner refresh={state.refresh} />
       <div className="workspace-grid">
         <section className="queue" aria-label={viewLabel(state, state.view)}>
           <div className="queue-heading"><h2>{state.view === 'tasks' ? 'Open tasks' : 'Threads'}<span>{open.length}</span></h2></div>

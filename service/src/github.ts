@@ -110,8 +110,12 @@ const eventSchema = z.object({
   body: z.string().nullable().optional(),
   requested_reviewer: actor.nullable().optional(), requested_team: team.nullable().optional(),
   review_requester: actor.nullable().optional(),
+  source: z.unknown().optional(),
 });
 type SourceEvent = z.infer<typeof eventSchema>;
+const crossReferenceSource = z.object({
+  type: z.literal('issue'), issue: z.object({ id: z.number().int().positive().safe() }),
+});
 
 export function sourceReference(notification: Notification): Reference {
   const kind = notification.subject.type === 'PullRequest' ? 'pr'
@@ -143,8 +147,13 @@ export function classifyEvents(
   let omitted = false;
   const evidence: Evidence[] = [];
   for (const event of events) {
-    const identity = event.id ?? (event.node_id ? createHash('sha256').update(event.node_id).digest('hex') : event.sha);
     const at = event.created_at ?? event.submitted_at ?? event.author?.date;
+    let identity = event.id ?? (event.node_id ? createHash('sha256').update(event.node_id).digest('hex') : event.sha);
+    if (!identity && at && event.event === 'cross-referenced') {
+      const source = crossReferenceSource.safeParse(event.source);
+      // REST cross-references have no event ID. The source issue and occurrence time identify the link.
+      if (source.success) identity = createHash('sha256').update(JSON.stringify([source.data.issue.id, at])).digest('hex');
+    }
     if (!identity || !at) { omitted = true; continue; }
     let recipient: Evidence['recipient'] = { kind: 'none' };
     if (event.requested_reviewer) {
@@ -210,7 +219,12 @@ export function pageLink(response: ApiResponse, relation: 'last' | 'next', path:
     if (!match || match[2] !== relation) continue;
     let url: URL;
     try { url = new URL(match[1]!); } catch { throw new ServiceError('invalid_output'); }
-    if (url.origin !== 'https://api.github.com' || url.username || url.password || url.hash || url.pathname !== path) {
+    const sourcePath = /^\/repos\/[^/]+\/[^/]+(\/(?:issues|pulls)\/[1-9]\d*\/(?:timeline|comments|reviews))$/.exec(path)?.[1];
+    const canonicalPath = /^\/repositories\/[1-9]\d*(\/.*)$/.exec(url.pathname)?.[1];
+    // GitHub canonicalizes repository names to IDs in Link headers. Only reuse the page number;
+    // callers always reconstruct requests from their original validated repository and resource.
+    const matchesPath = url.pathname === path || (sourcePath !== undefined && canonicalPath === sourcePath);
+    if (url.origin !== 'https://api.github.com' || url.username || url.password || url.hash || !matchesPath) {
       throw new ServiceError('invalid_output');
     }
     const page = url.searchParams.get('page');
@@ -308,10 +322,7 @@ export class GitHubService {
         break;
       }
     }
-    if (!complete || notifications.length > LIMITS.threads) {
-      diagnostics.push(diagnose('notifications', new ServiceError('limit')));
-      complete = false;
-    }
+    if (notifications.length > LIMITS.threads) complete = false;
     const selected = notifications.slice(0, LIMITS.threads);
     const collected: (Thread | undefined)[] = Array.from({ length: selected.length });
     let nextIndex = 0;
@@ -445,7 +456,8 @@ export class GitHubService {
           if (event.requestState === 'current') event.requestState = 'uncertain';
         }
       }
-      if (coverage.timeline === 'partial') diagnostics.push(diagnose('timeline', new ServiceError('limit'), notification.id));
+      if (invalid || classified.omitted) diagnostics.push({ scope: 'timeline', threadId: notification.id, code: 'invalid_output',
+        message: 'Some timeline events could not be read. Previously saved evidence is retained.' });
     } catch (error) {
       checkAbort(callerSignal);
       diagnostics.push(diagnose('timeline', error, notification.id));

@@ -939,6 +939,109 @@ test('startup, focus, elapsed time, edits and navigation never fetch; failed, pa
   expect(native.requests.map(request => request.op)).toEqual(Array(4).fill('github.refresh'));
 });
 
+test('successful refresh with bounded coverage shows freshness without an error banner', async ({ page, native }, testInfo) => {
+  native.notificationLimit = true;
+  native.threads = Array.from({ length: 50 }, (_, index) => thread([], String(123 + index)));
+  native.threads[0]!.coverage = { timeline: 'partial', newestPage: 5, fetchedPages: [5], observedAt: at };
+  await page.goto('/');
+  await refresh(page);
+  await expect(page.locator('.error-banner')).toHaveCount(0);
+  await expect(page.getByText('Showing the latest 50 threads.', { exact: true })).toBeVisible();
+  await expect(page.locator('.refresh-area')).toContainText('Updated');
+  expect(native.state.refresh.status).toBe('ok');
+  expect(native.state.threads[0]!.coverage?.timeline).toBe('partial');
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Keep this local note');
+  await persisted(page);
+  const requests = native.requests.length;
+  await page.reload();
+  await expect(page.locator('.error-banner')).toHaveCount(0);
+  await expect(page.getByText('Showing the latest 50 threads.', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Keep this local note');
+  expect(native.requests).toHaveLength(requests);
+  await page.screenshot({ path: testInfo.outputPath('normal-refresh-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByText('Showing the latest 50 threads.', { exact: true })).toBeVisible();
+  expect(await page.locator('body').evaluate(element => element.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('normal-refresh-narrow.png') });
+  native.partial = true;
+  await refresh(page);
+  await expect(page.getByText('Some activity could not be refreshed')).toBeVisible();
+  await expect(page.getByText('Showing the latest 50 threads.', { exact: true })).toHaveCount(0);
+});
+
+test('repeated refresh errors stay compact with accessible details and clear after recovery', async ({ page, native }, testInfo) => {
+  await page.goto('/');
+  await refresh(page);
+  await row(page, 't:123').click();
+  await page.getByLabel('Thread notes', { exact: true }).fill('Keep my note through partial refresh');
+  native.partial = true;
+  native.diagnostics = Array.from({ length: 50 }, (_, index) => {
+    const { code, message } = new ServiceError(index % 2 ? 'limit' : 'invalid_output').dto;
+    return { scope: 'timeline', threadId: String(index + 1), code, message };
+  });
+  await refresh(page);
+  const banner = page.locator('.error-banner').filter({ hasText: 'Some activity could not be refreshed' });
+  const disclosure = banner.locator('details');
+  const details = banner.locator('summary');
+  for (const [name, width, height, maximumHeight] of [['desktop', 1440, 1000, 125], ['narrow', 390, 844, 175]] as const) {
+    await page.setViewportSize({ width, height });
+    await expect(banner).toBeVisible();
+    await expect(disclosure).not.toHaveAttribute('open', '');
+    await expect(banner).toContainText('Received 1 GitHub thread.');
+    expect((await banner.boundingBox())!.height).toBeLessThan(maximumHeight);
+    await page.screenshot({ path: testInfo.outputPath(`refresh-errors-${name}.png`) });
+    await details.focus();
+    await page.keyboard.press('Enter');
+    await expect(disclosure).toHaveAttribute('open', '');
+    await expect(disclosure.locator('li')).toHaveCount(2);
+    await expect(disclosure.getByText(new ServiceError('limit').message, { exact: true })).toBeVisible();
+    await expect(disclosure.getByText(new ServiceError('invalid_output').message, { exact: true })).toBeVisible();
+    expect(await page.locator('body').evaluate(element => element.scrollWidth <= window.innerWidth)).toBe(true);
+    await details.click();
+  }
+  await persisted(page);
+  const requests = native.requests.length;
+  await page.reload();
+  await expect(banner).toBeVisible();
+  await expect(disclosure).not.toHaveAttribute('open', '');
+  expect(native.requests).toHaveLength(requests);
+  await expect(page.getByLabel('Thread notes', { exact: true })).toHaveValue('Keep my note through partial refresh');
+  native.partial = false;
+  native.diagnostics = [];
+  await refresh(page);
+  await expect(banner).toHaveCount(0);
+  expect(native.state.refresh.diagnostics).toEqual([]);
+});
+
+for (const legacy of [true, false]) test(`long ${legacy ? 'legacy' : 'distinct'} refresh diagnostics cannot crowd out the workspace`, async ({ page, native }) => {
+  await page.goto('/');
+  await refresh(page);
+  await persisted(page);
+  const messages = Array.from({ length: 250 }, (_, index) => `Warning ${index}: ${'Unavailable '.repeat(20)}`);
+  const state = native.state;
+  state.refresh = { ...state.refresh, status: 'partial',
+    message: legacy ? messages.join(' ') : 'Saved work is retained. Refresh to retry missing activity.',
+    diagnostics: messages };
+  if (legacy) delete state.refresh.diagnostics;
+  native.saved.snapshot!.workspace = { version: 1, state, scroll: {} };
+  const requests = native.requests.length;
+  await page.reload();
+  const banner = page.locator('.error-banner').filter({ hasText: 'Some activity could not be refreshed' });
+  await expect(banner).toBeVisible();
+  const disclosure = banner.locator('details');
+  await expect(disclosure).not.toHaveAttribute('open', '');
+  expect((await banner.boundingBox())!.height).toBeLessThan(125);
+  await banner.locator('summary').click();
+  const warnings = disclosure.locator('ul');
+  await expect(warnings).toBeVisible();
+  expect(await warnings.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  expect((await warnings.boundingBox())!.height).toBeLessThanOrEqual(160);
+  await expect(warnings).toContainText(messages.at(-1)!);
+  expect((await banner.boundingBox())!.height).toBeLessThan(300);
+  expect(native.requests).toHaveLength(requests);
+});
+
 test('save failure retains latest pending notes and explicit retry saves them before relaunch', async ({ page, native }) => {
   await page.goto('/');
   await capture(page, 'Persistent original task');
