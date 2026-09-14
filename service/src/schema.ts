@@ -83,6 +83,47 @@ export const refreshSchema = z.strictObject({
     missingMeansDone: z.literal(false),
   }),
 });
+const waitingBucketIdSchema = z.enum([
+  'direct-review', 'team-review', 'ready-to-merge', 'needs-fix', 'mentioned', 'reviewed', 'assigned',
+]);
+const waitingItemSchema = z.strictObject({
+  reference: referenceSchema, title: z.string().max(500), author: loginSchema.nullable(),
+  updatedAt: time, reasons: z.array(z.enum(['changes-requested', 'conflicts', 'ci'])).max(3),
+});
+const waitingBucketSchema = z.strictObject({
+  id: waitingBucketIdSchema, items: z.array(waitingItemSchema).min(1).max(50),
+});
+export const waitingSchema = z.strictObject({
+  fetchedAt: time, viewer: loginSchema,
+  buckets: z.array(waitingBucketSchema).max(7),
+  limitedQueries: z.array(z.enum([
+    'direct-review', 'team-review', 'authored', 'mentioned', 'reviewed', 'assigned',
+  ])).max(6),
+}).superRefine((value, context) => {
+  const identities = new Set<string>();
+  let previous = -1;
+  for (const bucket of value.buckets) {
+    const priority = waitingBucketIdSchema.options.indexOf(bucket.id);
+    if (priority <= previous) context.addIssue({ code: 'custom', message: 'Buckets must be unique and in priority order.' });
+    previous = priority;
+    for (const item of bucket.items) {
+      const identity = `${item.reference.repo.toLowerCase()}#${item.reference.number}`;
+      if (identities.has(identity)) context.addIssue({ code: 'custom', message: 'Waiting items must be unique.' });
+      identities.add(identity);
+      if (item.reference.kind !== (bucket.id === 'assigned' ? 'issue' : 'pr')
+        || new Set(item.reasons).size !== item.reasons.length
+        || (bucket.id === 'needs-fix' ? item.reasons.length === 0 : item.reasons.length !== 0)) {
+        context.addIssue({ code: 'custom', message: 'Waiting item does not match its bucket.' });
+      }
+    }
+  }
+  if (identities.size > 300 || new Set(value.limitedQueries).size !== value.limitedQueries.length) {
+    context.addIssue({ code: 'custom', message: 'Waiting digest exceeds its query bounds.' });
+  }
+});
+export type WaitingDigest = z.infer<typeof waitingSchema>;
+export type WaitingItem = z.infer<typeof waitingItemSchema>;
+export type WaitingBucket = z.infer<typeof waitingBucketSchema>;
 export const writeInputSchema = z.strictObject({
   operationId: idSchema, threadId: threadIdSchema, reference: referenceSchema,
   displayedEvidenceIds: z.array(idSchema).max(LIMITS.events),
@@ -188,6 +229,7 @@ const envelope = { v: z.literal(1), id: idSchema.max(180) };
 export const requestSchema = z.discriminatedUnion('op', [
   z.strictObject({ ...envelope, op: z.literal('connection.check'), input: empty }),
   z.strictObject({ ...envelope, op: z.literal('github.refresh'), input: empty }),
+  z.strictObject({ ...envelope, op: z.literal('github.waiting'), input: empty }),
   z.strictObject({ ...envelope, op: z.literal('github.conversation'), input: conversationInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('github.acknowledge'), input: writeInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('github.unsubscribe'), input: writeInputSchema }),
@@ -199,6 +241,7 @@ export const requestSchema = z.discriminatedUnion('op', [
 export const resultSchemas = {
   'connection.check': connectionSchema,
   'github.refresh': refreshSchema,
+  'github.waiting': waitingSchema,
   'github.conversation': conversationPageSchema,
   'github.acknowledge': writeResultSchema,
   'github.unsubscribe': writeResultSchema,

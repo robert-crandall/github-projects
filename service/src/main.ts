@@ -1,10 +1,11 @@
 import { CopilotService } from './copilot.ts';
 import { GitHubService } from './github.ts';
+import { WaitingService } from './waiting.ts';
 import { sanitized } from './errors.ts';
 import { serve, type Handler } from './protocol.ts';
 import type { ServiceErrorDTO } from './schema.ts';
 
-export function createHandler(github = new GitHubService(), copilot = new CopilotService()): Handler {
+export function createHandler(github = new GitHubService(), copilot = new CopilotService(), waiting = new WaitingService()): Handler {
   return async (request, signal) => {
     switch (request.op) {
       case 'connection.check': {
@@ -16,6 +17,7 @@ export function createHandler(github = new GitHubService(), copilot = new Copilo
         };
       }
       case 'github.refresh': return github.refresh(signal);
+      case 'github.waiting': return waiting.fetch(signal);
       case 'github.conversation': return github.conversation(request.input, signal);
       case 'github.acknowledge': return github.write('acknowledge', request.input, signal);
       case 'github.unsubscribe': return github.write('unsubscribe', request.input, signal);

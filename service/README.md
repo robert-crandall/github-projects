@@ -1,6 +1,6 @@
 # Trusted desktop service
 
-This backend implements manual GitHub notification operations and real Copilot SDK previews. It does not connect the browser prototype, change domain state, open old app data, or implement the native RPC host.
+This backend implements manual GitHub notification operations, a rule-based Waiting on me digest, and real Copilot SDK previews. It does not connect the browser prototype, change domain state, open old app data, or implement the native RPC host.
 
 ## Build and package
 
@@ -18,7 +18,7 @@ The standalone artifact is `service/dist/github-projects-service-aarch64-apple-d
 
 The executable embeds Bun and the SDK JavaScript. It runs outside the repository without Node, Bun, `node_modules`, or a companion JavaScript file. Compilation disables `.env` and `bunfig.toml` autoloading. The service only uses the SDK's external-CLI stdio transport; its optional in-process FFI/native runtime is not supported or selected.
 
-**Runtime prerequisites:** installed executable `gh` and `copilot`, a supported GitHub CLI sign-in, and Copilot access for that GitHub account. Backend-only executable discovery uses absolute PATH directories and standard CLI install directories, including the current user's `.local/bin`. The renderer cannot choose executable paths or CLI arguments.
+**Runtime prerequisites:** installed executable `gh` and a supported GitHub CLI sign-in. Copilot previews additionally require `copilot` and Copilot access for that GitHub account; the Waiting on me digest does not. Backend-only executable discovery uses absolute PATH directories and standard CLI install directories, including the current user's `.local/bin`. The renderer cannot choose executable paths or CLI arguments.
 
 The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was released against CLI 1.0.83. The packaged arm64 executable was exercised with the installed 1.0.84-1 CLI. Newer/older CLIs must pass the SDK handshake; failures remain explicit. The x64 build command is provided, but this implementation's real authentication/inference smoke ran on arm64.
 
@@ -52,6 +52,7 @@ Malformed input has `id: null`. The host should treat protocol failures as servi
 | Request IDs | Unique per process; 1-180 ASCII identity characters; 4,096 requests per process |
 | Overall deadline | 120 seconds; cancellation propagates into gh/SDK cleanup |
 | GitHub collection | 90-second budget; three concurrent enrichment workers, one refresh at a time |
+| Waiting on me | Six sequential searches of at most 50 hits; at most 50 authored PR reads using three workers; 120-second overall deadline |
 | gh process | 20 seconds, 4 MiB combined stdout/stderr |
 | Copilot concurrency/deadline | One operation, 90 seconds including setup/inference |
 | Copilot payload/answer | 60,000 bytes each; at most one format correction within the same deadline |
@@ -70,6 +71,7 @@ The host must expose only these operation names through its native command, not 
 | --- | --- | --- |
 | `connection.check` | `{}` | Separate `github` and `copilot` availability, sanitized errors; GitHub viewer/scopes |
 | `github.refresh` | `{}` | One batch with source threads, evidence, current state, and coverage diagnostics |
+| `github.waiting` | `{}` | `waitingSchema`: authenticated viewer, fetched time, nonempty ordered buckets, and capped-query IDs |
 | `github.conversation` | `{reference, stream, page}` | One full-body message page, pagination metadata, fetched time and explicit partial/access error |
 | `github.acknowledge` | `writeInputSchema` | Echoed context, `action: "acknowledge"`, `status: "confirmed"`, `confirmedAt` |
 | `github.unsubscribe` | `writeInputSchema` | Echoed context, `action: "unsubscribe"`, `status: "confirmed"`, `confirmedAt` |
@@ -79,6 +81,71 @@ The host must expose only these operation names through its native command, not 
 | `cancel` | `{requestId}` | `{requestId, cancelled}` |
 
 All objects are strict: unknown keys fail validation. Thread IDs are positive decimal strings. Repository references are `{repo: "owner/repo", number: positiveInteger, kind: "pr" | "issue"}`. Evidence/context IDs allow up to 500 characters. The service constructs all network endpoints itself.
+
+### Waiting on me: manual-only rules
+
+Send `{"v":1,"id":"waiting-1","op":"github.waiting","input":{}}` only after an explicit user request. This is a separate, read-only digest, not an automation to execute. It does not schedule, poll, auto-refresh, request a model, initialize Copilot, modify notifications, apply inbox filters, archive items, or fetch source bodies. No model selector is needed. A later manual run repeats the reads; there is no digest cache in the service.
+
+`waitingSchema` exports the renderer-safe `WaitingDigest`, `WaitingItem` and `WaitingBucket` types from `src/schema.ts`. The result is:
+
+```json
+{
+  "fetchedAt": "2026-09-14T12:00:00.000Z",
+  "viewer": "viewer",
+  "buckets": [{
+    "id": "needs-fix",
+    "items": [{
+      "reference": {"repo": "octo/project", "kind": "pr", "number": 12},
+      "title": "Example pull request",
+      "author": "viewer",
+      "updatedAt": "2026-09-13T12:00:00Z",
+      "reasons": ["changes-requested", "conflicts", "ci"]
+    }]
+  }],
+  "limitedQueries": []
+}
+```
+
+Titles are at most 500 characters. Author is a validated login or `null`; deleted authors with an empty login normalize to `null`. Authored results use the authenticated viewer. All timestamps are ISO instants. Only nonempty buckets are returned, in this first-match priority order:
+
+| Bucket | Eligibility |
+| --- | --- |
+| `direct-review` | Open non-draft PRs from `user-review-requested:@me` |
+| `team-review` | Open non-draft PRs from `team-review-requested:integrations/terraform-provider-core-maintainers`, and no other team |
+| `ready-to-merge` | Authored non-draft PRs with `APPROVED`, `MERGEABLE`, and passing CI or no checks |
+| `needs-fix` | Authored non-draft PRs with `CHANGES_REQUESTED`, `CONFLICTING`, or failing CI; every applicable reason is included |
+| `mentioned` | Mentioned open PRs updated within three days, with a known author other than the viewer |
+| `reviewed` | Previously reviewed open PRs updated within two days, with a known author other than the viewer; a light signal |
+| `assigned` | Assigned open issues updated within 30 days |
+
+Each identity is case-insensitive `owner/repo#number`, shared across all buckets. First eligible match wins. Each bucket sorts oldest update first, then by that identity. Day windows include both their exact lower boundary and the captured request time; future timestamps are excluded. Mentions and reviewed results may be drafts. Unknown/deleted authors are conservatively excluded from those two weak-signal buckets because the service cannot establish that the viewer did not author them. Other buckets retain unknown authors as `null`.
+
+The service resolves `gh` itself and first reads `GET /user`. It then executes exactly these searches, sequentially, stopping at the first failure:
+
+```text
+gh search prs user-review-requested:@me --archived=false --state=open --limit 50 --json number,title,repository,author,updatedAt,isDraft
+gh search prs team-review-requested:integrations/terraform-provider-core-maintainers --archived=false --state=open --limit 50 --json number,title,repository,author,updatedAt,isDraft
+gh search prs --author=@me --archived=false --state=open --limit 50 --json number,title,repository,isDraft,updatedAt
+gh search prs --mentions=@me --archived=false --state=open --limit 50 --json number,title,repository,author,updatedAt
+gh search prs --reviewed-by=@me --archived=false --state=open --limit 50 --json number,title,repository,author,updatedAt
+gh search issues --assignee=@me --archived=false --state=open --limit 50 --json number,title,repository,author,updatedAt
+```
+
+`--archived=false` excludes archived repositories in GitHub's search, before the 50-result cap. The app's local Archive location does not affect this filter. `user-review-requested` is deliberately not the broader `review-requested` qualifier. Team membership is never queried or expanded. Search repository identity comes from `repository.nameWithOwner`, not REST's `full_name`. Every authored search result that is not a draft gets one bounded read:
+
+```text
+gh pr view <number> --repo <owner/repo> --json number,reviewDecision,mergeable,isDraft,statusCheckRollup
+```
+
+The number must match, and PRs that became drafts are skipped. The service validates every enrichment field and check entry before classification. It uses a check's nonempty `conclusion`, falling back to `state`, then empty. Any `FAILURE`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED` or `ERROR` makes CI failing, even alongside pending checks. Otherwise, any empty/null value, `PENDING`, `IN_PROGRESS`, `QUEUED` or `EXPECTED` makes CI pending. With checks and neither condition, CI passes; an empty or null rollup means no checks. A CheckRun's `status` is lifecycle metadata, not a conclusion: an empty conclusion without a state remains pending even when status is `IN_PROGRESS` or `COMPLETED`. Unrecognized/malformed fields fail the operation, never become passing CI. `STALE` and `STARTUP_FAILURE` follow the requested non-failing/non-pending rule; this digest is not a substitute for GitHub's merge protections.
+
+An empty `reviewDecision` means no review requirement, not a needs-fix reason. `UNKNOWN` mergeability is not a conflict. Neither broadens ready-to-merge: that bucket still requires exactly `APPROVED` and `MERGEABLE`.
+
+`limitedQueries` contains any of `direct-review`, `team-review`, `authored`, `mentioned`, `reviewed`, `assigned` whose search returned exactly 50 hits, before filtering or deduplication. It means more results may exist, not that the query failed. Each bucket holds at most 50 items; the entire digest holds at most 300. A successful empty digest has `buckets: []`, without special report text.
+
+All reads share a 120-second deadline and cancellation signal; authored enrichment uses at most three workers. The existing shell-free runner limits each process to 20 seconds and 4 MiB. Any authentication, query, enrichment, malformed-output, or unexpected bound failure rejects the whole digest with a sanitized error. In-flight peers are cancelled and awaited after an enrichment failure. No partial/empty success replaces a failed read. Timeout and cancellation errors explicitly describe a read-only operation. CLI exit 4 reports authentication; other nonzero search/view exits report unavailable without exposing private stderr. These reads are not transactional, and capped results do not prove that all work was found.
+
+`WaitingService` accepts backend-only `runner`, `resolve`, `now`, and bounded `deadlineMs` test dependencies. `createHandler(github, copilot, waiting)` accepts it as the optional third parameter. Renderers should import only `src/schema.ts`, never service implementation or process modules.
 
 ### Refresh and reconciliation
 
@@ -122,7 +189,7 @@ Pagination accepts GitHub's canonical `/repositories/{id}/...` links only for th
 
 Timeline comments and review summaries are included as bounded notification evidence. The independent `github.conversation` operation reads full bodies; it never changes the timeline evidence contract or notification state. `timeline: complete` means the fetched REST timeline listing was complete, not that every possible GitHub source is available. The notification service itself has retention/settings limits. Neither complete coverage nor an absent notification finishes a local commitment.
 
-GitHub requests are not a transaction. Concurrent source changes may require a later manual refresh. Missing/failed source reads do not confirm terminal status; the client exposes saved coverage and fails open for suppression while preserving local checkpoints and manual Archive. This version does not search repositories, poll, auto-refresh, or asynchronously reorder after returning a batch.
+GitHub requests are not a transaction. Concurrent source changes may require a later manual refresh. Missing/failed source reads do not confirm terminal status; the client exposes saved coverage and fails open for suppression while preserving local checkpoints and manual Archive. Notification refresh does not search repositories, poll, auto-refresh, or asynchronously reorder after returning a batch. The independent Waiting on me operation uses only the fixed searches documented above.
 
 ### Conversation pages
 
@@ -166,7 +233,9 @@ Tests use synthetic gh/API and SDK responses. They cover pagination, read/unread
 
 The merge-queue regression was verified by temporarily classifying queue events as review requests: the test failed at that exact event kind. The correct classification was restored and the suite passed.
 
-The compiled roundtrip test skips only when no artifact exists; build before running release tests. No automated test sends a GitHub write or uses a real model. The explicit optional smoke below performs one tiny synthetic SDK inference (at most one corrective format retry), from a temporary non-repository cwd. It requires authorization because it consumes Copilot service access:
+The compiled roundtrip test skips only when no artifact exists; build before running release tests. No automated test sends a GitHub write or uses a real model. `test/waiting.test.ts` covers exact search/view arguments and fixed-team scope, bucket priority and case-insensitive deduplication, draft/author rules, inclusive time boundaries, ordering, CI states and failure precedence, all reasons, limits, all-or-nothing validation/errors, three-worker cleanup, deadlines, cancellation, strict JSONL, and absence of Copilot calls. Its clock and runner are synthetic.
+
+The explicit optional smoke below performs one tiny synthetic SDK inference (at most one corrective format retry), from a temporary non-repository cwd. It is unrelated to Waiting on me and requires authorization because it consumes Copilot service access:
 
 ```bash
 bun scripts/smoke.ts

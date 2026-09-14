@@ -56,6 +56,20 @@ Current queue membership comes only from GitHub GraphQL `PullRequest.mergeQueueE
 
 Terminal checkpoints preserve the notification/evidence boundary. New activity while confirmed terminal advances that boundary but does not return the thread. After a confirmed exit/reopen, genuinely newer activity resumes normal routing; old-history hydration does not. Unknown/failed/missing state checks fail open with a warning, while retaining checkpoint provenance so later old history cannot become new activity. Manual Archive is not cleared by an unknown check. Saved observations survive relaunch; only explicit Refresh checks them again.
 
+## Waiting on me
+
+**Waiting on me** is an explicitly generated, read-only digest across GitHub, independent of notification placement and Tasks. Opening it never fetches data. **Generate digest** / **Regenerate digest** runs the fixed search and bucketing rules in [README.md](README.md#waiting-on-me) for the authenticated github.com viewer. Ordinary Refresh, startup, focus, clocks and reconnect never generate a digest.
+
+Keep direct review requests separate from requests to `integrations/terraform-provider-core-maintainers`; do not broaden either query. Exclude archived repositories from every search before applying result limits; local Archive placement is unrelated. Enrich non-draft authored PRs for review decision, mergeability and CI. Use first-match identity deduplication and oldest-update-first ordering within each bucket. Recent mentions and reviewed-PR activity remain explicitly uncertain signals, not proven commitments.
+
+The digest does not use AI. If Copilot ranking is added later, it must be explicitly requested and offer a selectable model; it cannot run automatically. No private notes, Tasks or conversation-cache bodies enter digest requests.
+
+Show result time, query limits, loading, empty and error states. Any failed read stops the new report without replacing the previous result with partial or empty success. Results and checklist marks live only in memory, separate from the workspace snapshot. Closing keeps them available; successful regeneration or restart resets marks. Checking alone never changes GitHub or Tasks. Copy the dated Markdown checklist or explicitly open an item on GitHub; no merge, review, comment, notification write or Copilot session is dispatched by generation.
+
+**Add checked items to Tasks** at the bottom explicitly captures only the checked items as open local Tasks. Keep each source title, suggested action, uncertainty, fix causes and GitHub URL, without linking a thread or fetching more context. Apply the batch in one local transition and preserve the unfinished capture, existing Tasks and selected reader. Clear the accepted selection to prevent repeated-click duplicates. Persistence and recovery use the existing workspace contract; failed saves retain pending Tasks and offer storage retry without recapturing. **Open Tasks** is a separate navigation action.
+
+The prototype offers clearly labeled synthetic samples only. It never invokes the native service or opens sample destinations.
+
 ## Refresh and saves
 
 GitHub refresh stays explicit. Startup, focus, clocks, edits and navigation do not fetch notifications or initialize model requests.

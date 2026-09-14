@@ -22,6 +22,13 @@ function id(state: AppState, prefix: string): string {
   return `${prefix}-${state.sequence}`;
 }
 
+function addTask(state: AppState, title: string, notes = '') {
+  if (!title.trim()) throw new Error('Write something to capture first.');
+  const task = { id: id(state, 'local'), title, notes, status: 'open' as const, createdAt: state.clock };
+  state.tasks.push(task);
+  return task;
+}
+
 export function pendingEvidence(state: AppState, thread: Thread): Activity[] {
   if (thread.notification === 'done') return [];
   return thread.events.filter(event => event.kind !== 'read' && event.kind !== 'acknowledged' && !state.handled.includes(event.id)
@@ -259,12 +266,15 @@ export function transition(state: AppState, command: Command): AppState {
     }
     case 'draft': next.draft = command.text; break;
     case 'capture': {
-      if (!next.draft.trim()) throw new Error('Write something to capture first.');
-      const task = { id: id(next, 'local'), title: next.draft, notes: '', status: 'open' as const, createdAt: next.clock };
-      next.tasks.push(task);
+      const task = addTask(next, next.draft);
       next.draft = '';
       next.view = 'tasks';
       next.selectedKey = `a:${task.id}`;
+      break;
+    }
+    case 'capture-tasks': {
+      if (!command.tasks.length || command.tasks.length > 300) throw new Error('Select between 1 and 300 items to add to Tasks.');
+      for (const task of command.tasks) addTask(next, task.title, task.notes);
       break;
     }
     case 'note': {

@@ -1,5 +1,5 @@
 import { expect, setSystemTime, test } from 'bun:test';
-import { LIMITS, type Request, type Thread as SourceThread } from '../../service/src/schema.ts';
+import { LIMITS, type Request, type Thread as SourceThread, type WaitingDigest } from '../../service/src/schema.ts';
 import { mergeRefresh } from '../domain/live.ts';
 import { migrateWorkspace } from '../domain/migration.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
@@ -65,6 +65,81 @@ const reply = (request: Request, result: unknown) => ({ v: 1, id: request.id, ok
 function loadSource(workspace: DesktopWorkspace, source = thread()) {
   workspace.update(state => mergeRefresh(state, { threads: [sourceThread(source, [])], startedAt: new Date().toISOString(), fetchedAt: new Date().toISOString(), status: 'complete', diagnostics: [] }));
 }
+
+const waitingDigest: WaitingDigest = {
+  fetchedAt: '2026-09-14T16:00:00Z', viewer: 'viewer', limitedQueries: [],
+  buckets: [{ id: 'direct-review', items: [{
+    reference: { repo: 'octo/project', number: 42, kind: 'pr' }, title: 'Review this change', author: 'octocat',
+    updatedAt: '2026-09-07T16:00:00Z', reasons: [],
+  }] }],
+};
+
+test('Waiting on me runs only explicitly, coalesces duplicate commands and never changes workspace state', async () => {
+  const gate = deferred<void>();
+  const mock = await harness(async request => {
+    expect(request.op).toBe('github.waiting');
+    expect(request.input).toEqual({});
+    await gate.promise;
+    return reply(request, waitingDigest);
+  });
+  loadSource(mock.workspace);
+  mock.workspace.dispatch({ type: 'select', key: 't:123' });
+  mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'PRIVATE thread note' });
+  mock.workspace.dispatch({ type: 'draft', text: 'PRIVATE local task' });
+  mock.workspace.dispatch({ type: 'capture' });
+  await mock.workspace.flush();
+  const before = structuredClone(mock.saved());
+  const beforeState = structuredClone(mock.workspace.state);
+  const unsubscribe = mock.remote.subscribe(() => {});
+  expect(mock.remote.getSnapshot().waiting).toEqual({ running: false, error: '' });
+  expect(mock.requests).toEqual([]);
+  const pending = mock.remote.generateWaiting();
+  await mock.remote.generateWaiting();
+  expect(mock.requests).toHaveLength(1);
+  expect(mock.remote.getSnapshot().waiting.running).toBe(true);
+  gate.resolve();
+  await pending;
+  expect(mock.remote.getSnapshot().waiting).toEqual({ running: false, error: '', result: waitingDigest });
+  expect(mock.saved()).toEqual(before);
+  expect(mock.workspace.state).toEqual(beforeState);
+  expect(JSON.stringify(mock.requests)).not.toContain('PRIVATE');
+  unsubscribe();
+  const reopened = new ServiceWorkspace(mock.workspace, mock.client);
+  expect(reopened.getSnapshot().waiting.result).toBeUndefined();
+  expect(mock.requests).toHaveLength(1);
+});
+
+test('a failed or invalid digest keeps the previous result and never turns into an empty success', async () => {
+  let outcome: 'ok' | 'error' | 'invalid' = 'error';
+  const mock = await harness(async request => {
+    if (outcome === 'error') throw new Error('GitHub authentication failed.');
+    return reply(request, outcome === 'ok' ? waitingDigest : { ...waitingDigest, buckets: [{}] });
+  });
+  await mock.remote.generateWaiting();
+  expect(mock.remote.getSnapshot().waiting).toEqual({ running: false, error: 'GitHub authentication failed.' });
+  outcome = 'ok';
+  await mock.remote.generateWaiting();
+  outcome = 'invalid';
+  await mock.remote.generateWaiting();
+  expect(mock.remote.getSnapshot().waiting.result).toEqual(waitingDigest);
+  expect(mock.remote.getSnapshot().waiting.error).toContain('invalid result');
+  expect(mock.remote.getSnapshot().waiting.running).toBe(false);
+  outcome = 'error';
+  await mock.remote.generateWaiting();
+  expect(mock.remote.getSnapshot().waiting.result).toEqual(waitingDigest);
+  expect(mock.remote.getSnapshot().waiting.error).toContain('authentication');
+  expect(mock.requests.every(request => request.op === 'github.waiting')).toBe(true);
+});
+
+test('ordinary notification refresh never generates or replaces a waiting digest', async () => {
+  const mock = await harness(async request => reply(request, request.op === 'github.waiting' ? waitingDigest : batch()));
+  await mock.remote.refresh();
+  expect(mock.remote.getSnapshot().waiting.result).toBeUndefined();
+  await mock.remote.generateWaiting();
+  await mock.remote.refresh();
+  expect(mock.remote.getSnapshot().waiting.result).toEqual(waitingDigest);
+  expect(mock.requests.map(request => request.op)).toEqual(['github.refresh', 'github.waiting', 'github.refresh']);
+});
 
 test('successful bounded refresh advances freshness and retains a neutral coverage note across relaunch', async () => {
   let bounded = true;
