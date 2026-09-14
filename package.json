@@ -1,5 +1,5 @@
 {
-  "name": "github-projects-prototype",
+  "name": "github-projects",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "native:dev": "tauri dev",
     "native:build": "tauri build --bundles app",
+    "install_app": "bun run native:build && rsync -a --delete \"src-tauri/target/release/bundle/macos/GitHub Projects.app/\" \"/Applications/GitHub Projects.app/\"",
     "test:native": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test": "bun test src",
     "test:browser": "playwright test"

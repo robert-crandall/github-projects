@@ -23,9 +23,20 @@ bun run native:build
 open "src-tauri/target/release/bundle/macos/GitHub Projects Workspace.app"
 ```
 
+To build and install into `/Applications`, quit any running copy first:
+
+```bash
+bun run native:install
+open "/Applications/GitHub Projects Workspace.app"
+```
+
+This replaces the installed app's bundle contents without touching local data. It requires write access to `/Applications`; it does not request administrator privileges.
+
 The build compiles a target-specific standalone service and includes it inside the app. The app does not require Bun, Node, `node_modules`, or the repository at runtime. Apple Silicon and Intel service targets are supported; actual bundle/authentication validation ran on Apple Silicon.
 
 The bundle is ad-hoc signed for local use, **not notarized for distribution**.
+
+The app icon source is `src-tauri/icons/source.png`. Its PNG and ICNS variants are generated with Tauri's icon command.
 
 ### Connections and authentication
 
