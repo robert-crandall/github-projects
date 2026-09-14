@@ -12,6 +12,7 @@
     "tauri": "tauri",
     "native:dev": "tauri dev",
     "native:build": "tauri build --bundles app",
+    "native:install": "bun run native:build && rsync -a --delete \"src-tauri/target/release/bundle/macos/GitHub Projects Workspace.app/\" \"/Applications/GitHub Projects Workspace.app/\"",
     "test:native": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test": "bun test src",
     "test:browser": "playwright test"
