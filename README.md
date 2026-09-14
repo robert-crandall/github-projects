@@ -36,6 +36,8 @@ The build compiles a target-specific standalone service and includes it inside t
 
 The bundle is ad-hoc signed for local use, **not notarized for distribution**.
 
+The app icon source is `src-tauri/icons/source.png`. Its PNG and ICNS variants are generated with Tauri's icon command.
+
 ### Connections and authentication
 
 Local capture, thread notes, task notes and Done work without authentication.
