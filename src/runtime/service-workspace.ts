@@ -48,7 +48,7 @@ export function sourceThread(thread: SourceThread, diagnostics: ServiceOutput<'g
 
 export class ServiceWorkspace implements RemoteWorkspace {
   readonly conversation: ConversationWorkspace;
-  private status: RemoteStatus = { refreshing: false, checking: false, diagnostics: [] };
+  private status: RemoteStatus = { refreshing: false, checking: false, diagnostics: [], waiting: { running: false, error: '' } };
   private listeners = new Set<() => void>();
   constructor(private readonly workspace: DesktopWorkspace, private readonly client = new ServiceClient()) {
     this.conversation = new ConversationWorkspace(workspace.platform, client);
@@ -56,6 +56,17 @@ export class ServiceWorkspace implements RemoteWorkspace {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getSnapshot = () => this.status;
   private publish(patch: Partial<RemoteStatus>) { this.status = { ...this.status, ...patch }; for (const listener of this.listeners) listener(); }
+  async generateWaiting(): Promise<void> {
+    if (this.status.waiting.running) return;
+    this.publish({ waiting: { ...this.status.waiting, running: true, error: '' } });
+    try {
+      const result = await this.client.call('github.waiting', {});
+      this.publish({ waiting: { running: false, error: '', result } });
+    } catch (error) {
+      this.publish({ waiting: { ...this.status.waiting, running: false,
+        error: error instanceof Error ? error.message : 'The digest could not be generated. Retry explicitly.' } });
+    }
+  }
   async refresh(): Promise<void> {
     if (this.status.refreshing) return;
     this.publish({ refreshing: true });

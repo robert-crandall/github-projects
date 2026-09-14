@@ -1,6 +1,6 @@
 # GitHub Projects
 
-A local-first macOS GitHub notification client with separate **Inbox** and **Tasks**. Read threads and keep private thread notes; capture standalone tasks without a network round trip. GitHub activity arrives only when you click **Refresh**.
+A local-first macOS GitHub notification client with separate **Inbox** and **Tasks**. Read threads and keep private thread notes; capture standalone tasks without a network round trip. GitHub reads run only on explicit commands.
 
 The desktop keeps the GitHub-dark three-pane interface, real GitHub evidence, CLI authentication and SQLite. The separate browser prototype remains runnable with synthetic data.
 
@@ -69,6 +69,32 @@ The reader shows real issue/PR descriptions, comments, reviews and grouped inlin
 Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns archived/terminal threads to Inbox.
 
 Normal refresh loads up to 50 recent threads and bounded recent timeline history. Reaching those built-in limits is not an error: the refresh timestamp advances, and a neutral note beside **Refresh** identifies the limited notification batch. Saved source history retains its timeline coverage details. Actual failures keep a compact summary above the workspace; **Refresh details** lists each distinct warning once. Saved notes and tasks remain available; use **Refresh** to retry failed reads.
+
+### Waiting on me
+
+Open **Waiting on me**, then choose **Generate digest** for a read-only checklist across GitHub, including sources outside your saved Inbox. Opening the panel, ordinary Refresh, startup, focus and reconnect never generate it. **Regenerate digest** is the only way to update the snapshot.
+
+All six searches exclude archived repositories before applying their result limits. This does not exclude threads merely placed in this app's **Archive**; repository archival and local thread placement are separate.
+
+The digest uses fixed rules, not Copilot, so there is no model call or model selector. It uses the account signed into `gh` on github.com, not a hardcoded personal login. Generating it never merges, reviews, comments, changes notifications, creates Tasks, or sends local notes to a model.
+
+Items appear once, in the first matching group below. Oldest updates come first within each group.
+
+| Group | Included items |
+| --- | --- |
+| Review requested of me | Non-draft PRs from `user-review-requested:@me`. Team requests do not count as direct requests. |
+| Team review requested | Non-draft PRs requested of **integrations/terraform-provider-core-maintainers** only. No other team is queried. |
+| My PR - ready to merge | Authored non-drafts with APPROVED reviews, MERGEABLE status, and passing checks or no checks. |
+| My PR - needs my fix | Authored non-drafts with changes requested, conflicts, or failing CI. Every applicable cause is shown. |
+| Mentioned - may owe a reply | PRs mentioning me, authored by someone else and updated within 3 days. This does not prove a reply is owed. |
+| PR I reviewed - recent activity | PRs I reviewed, authored by someone else and updated within 2 days. This is a light re-review signal. |
+| Assigned issue | Open issues assigned to me and updated within 30 days. |
+
+An empty review decision is not a fix blocker; unknown mergeability is not a known conflict. Neither is enough to label a PR ready to merge. Draft authored PRs are skipped. Each search returns at most 50 results; the report names searches that reach the cap rather than claiming complete coverage. Any failed search or authored-PR enrichment stops the new digest and leaves the previous result visible with its timestamp.
+
+Check items, then choose **Add checked items to Tasks** at the bottom. Each checked item becomes an open local Task with its source title, suggested action and GitHub URL in notes, including any fix causes or uncertainty. The batch preserves your unfinished capture and current reader. Checkmarks clear after adding, preventing a repeated click from adding the same selection twice. Saves use the normal local recovery controls; a failed save keeps the Tasks pending for **Retry storage**. **Open Tasks** takes you to them.
+
+Checking alone never creates or completes Tasks or changes GitHub. Checkmarks survive closing the panel, but reset after a successful regeneration or app restart. Added Tasks persist independently and never complete themselves from GitHub activity. **Copy Markdown** copies the dated checklist with its current checkmarks; **Open on GitHub** opens the source without acting on it. The browser prototype offers **Generate sample** instead and adds sample Tasks only in its isolated local workspace.
 
 ### Filtering threads
 

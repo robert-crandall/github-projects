@@ -2,6 +2,43 @@ import { expect, type Page } from '@playwright/test';
 import type { Scenario } from '../src/types.ts';
 import { assertMigration, capture, checkMigratedReader, checkRelaunchedThreadLink, detail, inbox, legacyFixture, row, saved, storageKey, tasks, test } from './workspace-fixtures.ts';
 
+test('Waiting on me prototype generates only labeled samples and keeps Tasks separate', async ({ page }) => {
+  await page.goto('/');
+  await expect.poll(() => page.evaluate(key => localStorage.getItem(key) !== null, storageKey)).toBe(true);
+  const before = await saved(page);
+  const opener = page.getByRole('button', { name: 'Waiting on me', exact: true });
+  await opener.click();
+  const dialog = page.getByRole('dialog', { name: 'Waiting on me', exact: true });
+  await expect(dialog.getByText('Prototype - synthetic digest, no GitHub requests', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('checkbox')).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Generate sample', exact: true }).click();
+  await expect(dialog.getByRole('checkbox')).toHaveCount(7);
+  await dialog.getByRole('checkbox').first().check();
+  await dialog.getByRole('button', { name: 'Open sample/notification-client#42 on GitHub', exact: true }).click();
+  await expect(dialog.getByRole('status')).toHaveText('Synthetic example only. No browser was opened.');
+  await page.keyboard.press('Escape');
+  await expect(opener).toBeFocused();
+  expect(await saved(page)).toEqual(before);
+  await opener.click();
+  await expect(dialog.getByRole('checkbox').first()).toBeChecked();
+  const add = dialog.getByRole('button', { name: /^Add checked items to Tasks/ });
+  await expect(add).toHaveText('Add checked items to Tasks (1)');
+  await add.evaluate(button => {
+    if (!(button instanceof HTMLButtonElement)) throw new Error('Expected the task capture button.');
+    button.click(); button.click();
+  });
+  await expect(add).toBeDisabled();
+  const captured = await saved(page);
+  expect(captured.tasks).toHaveLength(before.tasks.length + 1);
+  expect(captured.tasks.at(-1)).toMatchObject({
+    title: 'Keep thread notes when navigating', notes: 'I need to review.\nhttps://github.com/sample/notification-client/pull/42', status: 'open',
+  });
+  await dialog.getByRole('button', { name: 'Open Tasks', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
+  await page.reload();
+  expect((await saved(page)).tasks).toEqual(captured.tasks);
+});
+
 async function stage(page: Page, scenario: Scenario) {
   await page.getByRole('button', { name: /Demo scenarios/ }).click();
   await page.getByLabel('Activity scenario').selectOption(scenario);

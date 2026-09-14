@@ -1,6 +1,7 @@
 import type { AppState, Command, Row } from '../types.ts';
 import type { ReactNode } from 'react';
 import type { Reference } from '../../service/src/schema.ts';
+import type { WaitingStatus } from './remote-view.ts';
 
 export type Destination = { row: Row; kind: 'github' | 'copilot' | 'notification'; action?: 'done' | 'unsubscribe'; retryId?: string };
 export type WorkspaceView = {
@@ -14,6 +15,9 @@ export type WorkspaceView = {
     open: (destination: Destination) => void;
     archive: (row: Row) => void;
     connections: () => void;
+    waiting: WaitingStatus;
+    generateWaiting: () => void;
+    openWaiting: (reference: Reference) => Promise<void>;
     conversation: (reference: Reference) => ReactNode;
     readerReady: (reference: Reference) => boolean;
   };

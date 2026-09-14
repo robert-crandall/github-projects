@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import {
   AlertCircle, Archive, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, Circle, ExternalLink,
-  GitPullRequest, Github, Inbox, ListFilter, MessageSquare, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
+  GitPullRequest, Github, Inbox, ListChecks, ListFilter, MessageSquare, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
 } from 'lucide-react';
 import { getRow, getRows } from './domain/engine.ts';
 import { conversationKey, threadIdSchema } from '../service/src/schema.ts';
@@ -11,6 +11,7 @@ import type { Destination, WorkspaceView } from './runtime/view.ts';
 import { ReaderPosition } from './runtime/ReaderPosition.tsx';
 import { placement, viewLabel } from './domain/filtering.ts';
 import { Rules } from './Rules.tsx';
+import { WaitingOnMe } from './WaitingOnMe.tsx';
 
 type Dispatch = WorkspaceView['dispatch'];
 export function stamp(value: string, zone: string, date = false) {
@@ -282,6 +283,7 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
   const [capture, setCapture] = useState(false);
   const [demo, setDemo] = useState(false);
   const [rules, setRules] = useState(false);
+  const [waiting, setWaiting] = useState(false);
   const [destination, setDestination] = useState<Destination>();
   const openDestination = live?.open ?? setDestination;
   const archive = (row: Row) => {
@@ -326,6 +328,7 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
         <button className={`nav-link ${state.view === 'tasks' ? 'current' : ''}`} aria-current={state.view === 'tasks' ? 'page' : undefined} onClick={() => dispatch({ type: 'view', view: 'tasks' })}><CheckCheck size={17} />Tasks<span className="count">{state.tasks.filter(task => task.status === 'open').length}</span></button>
       </nav>
       <div className="sidebar-bottom">
+        <button className="nav-link" onClick={() => setWaiting(true)}><ListChecks size={16} />Waiting on me</button>
         <button className="nav-link" onClick={() => setRules(true)}><ListFilter size={16} />Filtering rules</button>
         <button className="nav-link" disabled={!state.undo.length} onClick={() => dispatch({ type: 'undo' }, 'Task change undone.')}><RotateCcw size={15} />Undo task change</button>
         {live ? <button className="nav-link" aria-label="Connections" aria-description={`${unconfirmed} unconfirmed GitHub writes`} onClick={live.connections}><Settings2 size={16} />Connections
@@ -374,6 +377,7 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
     {capture && <Capture state={state} dispatch={dispatch} close={() => setCapture(false)} />}
     {demo && <Demo state={state} dispatch={dispatch} close={() => setDemo(false)} />}
     {rules && <Rules state={state} dispatch={dispatch} error={workspace.operationError || ''} close={() => setRules(false)} />}
+    <WaitingOnMe open={waiting} close={() => setWaiting(false)} workspace={workspace} />
     {destination && <Handoff destination={destination} state={state} dispatch={dispatch} close={() => setDestination(undefined)} />}
     {children}
   </div>;

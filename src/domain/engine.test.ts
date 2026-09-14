@@ -44,6 +44,37 @@ test('capture from every main view saves exact text into Tasks without interpret
   }
 });
 
+test('batch capture is local and atomic, retaining the draft, current reader and existing tasks', () => {
+  for (const runtime of ['demo', 'desktop'] as const) {
+    const state = { ...initialState(), runtime, draft: 'Unfinished capture' };
+    state.tasks[0]!.status = 'done';
+    const original = structuredClone(state);
+    const captures = [{ title: 'First task', notes: 'Review.\nhttps://github.com/octo/project/pull/42' },
+      { title: 'Second task', notes: 'https://github.com/octo/project/issues/43' }];
+    const next = transition(state, { type: 'capture-tasks', tasks: captures });
+    expect(next.tasks.slice(0, state.tasks.length)).toEqual(original.tasks);
+    expect(next.tasks.slice(-2).map(({ id, ...task }) => task)).toEqual(captures.map(task => ({
+      ...task, status: 'open', createdAt: state.clock,
+    })));
+    expect(new Set(next.tasks.map(task => task.id)).size).toBe(next.tasks.length);
+    expect(next.order.slice(-2)).toEqual(next.tasks.slice(-2).map(task => `a:${task.id}`));
+    expect(next.draft).toBe(original.draft);
+    expect(next.view).toBe(original.view);
+    expect(next.selectedKey).toBe(original.selectedKey);
+    expect(next.threads).toEqual(original.threads);
+    expect(next.notes).toEqual(original.notes);
+    expect(next.operations).toEqual(original.operations);
+    expect(next.handled).toEqual(original.handled);
+    expect(next.undo).toEqual(original.undo);
+    expect(state).toEqual(original);
+    expect(() => transition(state, { type: 'capture-tasks', tasks: [...captures, { title: ' ', notes: '' }] })).toThrow('capture');
+    expect(state).toEqual(original);
+    expect(() => transition(state, { type: 'capture-tasks', tasks: [] })).toThrow('Select');
+    expect(() => transition(state, { type: 'capture-tasks', tasks: Array.from({ length: 301 }, () => captures[0]!) })).toThrow('300');
+    expect(transition(state, { type: 'capture-tasks', tasks: Array.from({ length: 300 }, () => captures[0]!) }).tasks).toHaveLength(301);
+  }
+});
+
 test('completed tasks stay done across comments, queue, new requests, refresh and clock', () => {
   let state = initialState();
   const key = `a:${state.tasks[0]!.id}`;
