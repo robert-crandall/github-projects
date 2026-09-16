@@ -5,6 +5,7 @@ import { cacheKey, ConversationApi, mergeCachedPage } from './conversation-fixtu
 import { snapshotSchema, type NativeSnapshot, type NativeWorkspace } from '../src/platform/native.ts';
 import { desktopEnvelopeSchema } from '../src/runtime/desktop-workspace.ts';
 import { at, test as browserTest } from './workspace-fixtures.ts';
+import type { WorkCollection } from '../service/src/work-schema.ts';
 
 export function evidence(id = 'request-1', kind: Evidence['kind'] = 'review-request'): Evidence {
   return {
@@ -30,6 +31,20 @@ export function gate() {
 class ExpectedFailure extends Error {}
 
 export class NativeMock {
+  constructor(private readonly referenceWorkspace = true) {}
+  workCollection: WorkCollection = {
+    candidates: [{
+      title: 'Review the usersd rollout', action: 'review', url: 'https://github.com/octo/project/pull/123',
+      evidence: [{
+        id: 'github:request:123:1', source: 'github', streamId: 'github-reviews', at,
+        url: 'https://github.com/octo/project/pull/123', summary: 'A direct review request.',
+      }],
+    }],
+    observations: [{ url: 'https://github.com/octo/project/pull/123', state: 'open', observedAt: at, reason: '' }],
+    warnings: [], collectedAt: at,
+  };
+  failRank = false;
+  holdRank?: ReturnType<typeof gate>;
   conversationApi = new ConversationApi();
   conversations = new Map<string, ConversationCache>();
   corruptCache = false;
@@ -168,6 +183,26 @@ export class NativeMock {
     this.requests.push(request);
     let result: unknown;
     switch (request.op) {
+      case 'work.connections':
+        result = { servers: [], instructions: 'No shared Slack connection. Configure a selected read-only MCP server.' };
+        break;
+      case 'work.collect':
+        result = structuredClone(this.workCollection);
+        break;
+      case 'work.rank':
+        if (this.holdRank) await this.holdRank.promise;
+        if (this.failRank) throw new ExpectedFailure('Copilot ranking failed. Your tasks and previous order are retained.');
+        result = {
+          orderedIds: request.input.tasks.map(task => task.id).reverse(),
+          reasons: request.input.tasks.map(task => ({ id: task.id, reason: `Priority for ${task.title}` })),
+        };
+        break;
+      case 'work.intake':
+        result = { items: [], hasMore: false };
+        break;
+      case 'work.ackIntake':
+        result = request.input;
+        break;
       case 'github.waiting':
         if (this.holdWaiting) await this.holdWaiting.promise;
         if (this.failWaiting) throw new ExpectedFailure('GitHub authentication failed. Sign in and retry.');
@@ -218,27 +253,40 @@ export class NativeMock {
         return { failure: { code: 'io', message, retryable: true } };
       }
     });
-    await page.addInitScript(() => {
+    await page.addInitScript(({ referenceWorkspace }) => {
+      if (referenceWorkspace) window.history.replaceState(null, '', '#reference');
+      let sequence = 0;
+      const callbacks = new Map<number, (event: unknown) => void>();
+      const listeners = new Map<number, number>();
       const target = window as unknown as {
         isTauri: boolean; __TAURI_INTERNALS__: object;
+        __TAURI_EVENT_PLUGIN_INTERNALS__: object;
         nativeInvoke(command: string, args: Record<string, unknown>): Promise<{ value?: unknown; failure?: unknown }>;
       };
       target.isTauri = true;
+      window.addEventListener('native-work-tick', () => {
+        for (const [id, callback] of listeners) callbacks.get(callback)?.({ event: 'work-tick', id, payload: null });
+      });
+      target.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event: string, id: number) => listeners.delete(id) };
       target.__TAURI_INTERNALS__ = {
+        transformCallback(callback: (event: unknown) => void) { callbacks.set(++sequence, callback); return sequence; },
         async invoke(command: string, args: Record<string, unknown> = {}) {
+          if (command === 'plugin:event|listen') { listeners.set(++sequence, Number(args.handler)); return sequence; }
+          if (command === 'plugin:event|unlisten') { listeners.delete(Number(args.eventId)); return; }
           const reply = await target.nativeInvoke(command, args);
           if (reply.failure) throw reply.failure;
           return reply.value;
         },
       };
       Object.defineProperty(window, 'localStorage', { get() { throw new Error('Desktop must never access browser localStorage'); } });
-    });
+    }, { referenceWorkspace: this.referenceWorkspace });
   }
 }
 
-export const test = browserTest.extend<{ native: NativeMock }>({
-  native: async ({ page }, use) => {
-    const native = new NativeMock();
+export const test = browserTest.extend<{ native: NativeMock; referenceWorkspace: boolean }>({
+  referenceWorkspace: [true, { option: true }],
+  native: async ({ page, referenceWorkspace }, use) => {
+    const native = new NativeMock(referenceWorkspace);
     await native.install(page);
     await use(native);
     expect(native.unexpected, 'All native/model commands must be explicitly expected').toEqual([]);

@@ -5,11 +5,12 @@ import { migrateWorkspace } from './migration.ts';
 import { archiveBoundary, hasNewActivity, latestTime } from './archive.ts';
 import { threadIdSchema } from '../../service/src/schema.ts';
 import { reconcileTerminal, unknownSourceState } from './terminal.ts';
+import { defaultWorkState } from '../../service/src/work-schema.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
   new Intl.DateTimeFormat('en-US', { timeZone });
   return {
-    version: 3, runtime: 'desktop', clock: instant(now), timeZone,
+    version: 3, runtime: 'desktop', clock: instant(now), timeZone, work: defaultWorkState(),
     threads: [], tasks: [], notes: [], staged: [], handled: [], seen: [], order: [], newKeys: [],
     selectedKey: null, view: 'inbox', draft: '', operations: [], rules: [], inboxes: [],
     refresh: { lastSuccessAt: null, status: 'saved', message: 'Refresh loads GitHub activity. Notes and tasks are available without a connection.' },

@@ -15,10 +15,12 @@ const messages: Record<ServiceErrorDTO['code'], string> = {
   busy: 'The service is busy. Retry when the current operation finishes.',
   protocol: 'Invalid service protocol frame.',
   limit: 'The operation exceeded the service safety limit.',
-  unsupported: 'This GitHub source is not supported by this version.',
+  unsupported: 'This GitHub source or requested action is not supported by this version.',
   copilot_unavailable: 'Copilot is unavailable. Check CLI sign-in, subscription, and runtime compatibility.',
   copilot_output: 'Copilot returned an invalid or ungrounded preview. No suggestions were applied.',
   internal: 'The service failed. Saved local work is unchanged.',
+  mcp_configuration: 'The selected MCP connection or explicit read tools are unavailable. App connections are not shared automatically. Configure the Copilot CLI mcp-config.json or backend COPILOT_MCP_CONFIG_PATH.',
+  mcp_unavailable: 'The selected MCP read or OAuth authentication failed. Authenticate that connection through supported Copilot CLI MCP setup, then retry with explicit read tools. App sign-in may not be shared.',
 };
 export class ServiceError extends Error {
   readonly dto: ServiceErrorDTO;

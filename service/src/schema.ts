@@ -1,4 +1,8 @@
 import { z } from 'zod';
+import {
+  workCollectInputSchema, workCollectOutputSchema, workConnectionsSchema,
+  workIntakeAckSchema, workIntakeOutputSchema, workRankInputSchema, workRankOutputSchema,
+} from './work-schema.ts';
 
 export const LIMITS = {
   frameBytes: 1_048_576, responseBytes: 1_048_576, concurrent: 4, deadlineMs: 120_000,
@@ -23,6 +27,7 @@ export const errorCodeSchema = z.enum([
   'invalid_input', 'invalid_output', 'missing_cli', 'authentication', 'missing_scope',
   'access', 'rate_limit', 'unavailable', 'deadline', 'cancelled', 'busy', 'protocol',
   'limit', 'unsupported', 'copilot_unavailable', 'copilot_output', 'internal', 'source_changed',
+  'mcp_configuration', 'mcp_unavailable',
 ]);
 export const errorSchema = z.strictObject({
   code: errorCodeSchema, message: z.string().max(300), retryable: z.boolean(),
@@ -236,6 +241,11 @@ export const requestSchema = z.discriminatedUnion('op', [
   z.strictObject({ ...envelope, op: z.literal('copilot.triage'), input: triageInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.interpretCapture'), input: captureInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.reconsider'), input: reconsiderInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('work.collect'), input: workCollectInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('work.rank'), input: workRankInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('work.connections'), input: empty }),
+  z.strictObject({ ...envelope, op: z.literal('work.intake'), input: empty }),
+  z.strictObject({ ...envelope, op: z.literal('work.ackIntake'), input: workIntakeAckSchema }),
   z.strictObject({ ...envelope, op: z.literal('cancel'), input: z.strictObject({ requestId: idSchema }) }),
 ]);
 export const resultSchemas = {
@@ -248,6 +258,11 @@ export const resultSchemas = {
   'copilot.triage': triageOutputSchema,
   'copilot.interpretCapture': captureOutputSchema,
   'copilot.reconsider': reconsiderOutputSchema,
+  'work.collect': workCollectOutputSchema,
+  'work.rank': workRankOutputSchema,
+  'work.connections': workConnectionsSchema,
+  'work.intake': workIntakeOutputSchema,
+  'work.ackIntake': workIntakeAckSchema,
   cancel: z.strictObject({ requestId: idSchema, cancelled: z.boolean() }),
 } as const;
 export type Request = z.infer<typeof requestSchema>;

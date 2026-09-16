@@ -2,6 +2,7 @@ import { legacyStateSchema, stateSchema, threadSchema, type AppState } from '../
 import { archiveBoundary } from './archive.ts';
 import { pendingEvidence } from './engine.ts';
 import { validateFilters } from './filtering.ts';
+import { defaultWorkState } from '../../service/src/work-schema.ts';
 
 export function migrateWorkspace(value: unknown): AppState {
   if (typeof value === 'object' && value !== null && 'version' in value && value.version === 3) {
@@ -44,7 +45,7 @@ export function migrateWorkspace(value: unknown): AppState {
   const selectedKey = selectedTask ? `a:${selectedTask.id}` : selectedAction?.threadId
     ? `t:${selectedAction.threadId}` : legacy.selectedKey;
   return validateWorkspace({
-    ...common, version: 3, tasks, notes, selectedKey, rules: [], inboxes: [],
+    ...common, version: 3, tasks, notes, selectedKey, rules: [], inboxes: [], work: defaultWorkState(),
     view: selectedKey ? selectedTask ? 'tasks' : 'inbox' : view === 'attention' ? 'inbox' : 'tasks',
     failures: { refresh: failures.refresh, storage: failures.storage, external: failures.external },
     undo: [],

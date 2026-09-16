@@ -4,5 +4,5 @@
   "description": "Only the local workspace window can use the bounded native commands.",
   "local": true,
   "windows": ["main"],
-  "permissions": ["native-workspace"]
+  "permissions": ["native-workspace", "core:event:allow-listen", "core:event:allow-unlisten"]
 }

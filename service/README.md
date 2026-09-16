@@ -1,6 +1,6 @@
 # Trusted desktop service
 
-This backend implements manual GitHub notification operations, a rule-based Waiting on me digest, and real Copilot SDK previews. It does not connect the browser prototype, change domain state, open old app data, or implement the native RPC host.
+This backend implements GitHub notification operations, the Waiting on me digest, workstream collection and ranking, Copilot SDK previews, and durable MCP task intake. The desktop owns workspace reconciliation and saving. The service does not mark local tasks done or implement the native RPC host.
 
 ## Build and package
 
@@ -20,7 +20,7 @@ The executable embeds Bun and the SDK JavaScript. It runs outside the repository
 
 **Runtime prerequisites:** installed executable `gh` and a supported GitHub CLI sign-in. Copilot previews additionally require `copilot` and Copilot access for that GitHub account; the Waiting on me digest does not. Backend-only executable discovery uses absolute PATH directories and standard CLI install directories, including the current user's `.local/bin`. The renderer cannot choose executable paths or CLI arguments.
 
-The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was released against CLI 1.0.83. The packaged arm64 executable was exercised with the installed 1.0.84-1 CLI. Newer/older CLIs must pass the SDK handshake; failures remain explicit. The x64 build command is provided, but this implementation's real authentication/inference smoke ran on arm64.
+The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was released against CLI 1.0.83. The packaged arm64 executable was exercised with the installed 1.0.84-1 CLI; packaged ranking also succeeded with Homebrew 1.0.84-6 under a GUI-like PATH. Newer/older CLIs must pass the SDK handshake; failures remain explicit. An experimental MCP-start scratch probe is not a compatibility verdict for normal SDK inference, and successful ranking does not establish Slack authentication. Live Slack verification was skipped after OAuth timed out; no authentication success is assumed. The x64 build command is provided, but this implementation's real authentication/inference smoke ran on arm64.
 
 ## Native host contract
 
@@ -61,7 +61,7 @@ Send `cancel` with `{ "requestId": "refresh-1" }` and a new envelope ID. Its res
 
 Input cancellation and EOF cleanup do not wait for stdout progress. A broken output pipe is terminal: cancel all active operations rather than attempting another response. Native should continuously drain stdout/stderr and launch the sidecar in an owned process group. Neither the gh runner nor the SDK starts a detached process; group-level shutdown can escalate from SIGTERM to SIGKILL for the entire owned descendant tree.
 
-The host must expose only these operation names through its native command, not a generic shell/HTTP interface. It must not accept renderer-supplied commands, paths, environment, model settings, tool names, or endpoint URLs. Disable external page access to the native bridge.
+The host must expose only these operation names through its native command, not a generic shell/HTTP interface. Workstream operations accept schema-validated saved queries, model names, server names, and explicitly selected read-tool names. They never accept renderer-supplied commands, configuration JSON, credential headers, environment, filesystem paths, or executable endpoints. Disable external page access to the native bridge.
 
 ## Operation schemas
 
@@ -78,9 +78,90 @@ The host must expose only these operation names through its native command, not 
 | `copilot.triage` | `triageInputSchema` | Evidence-grounded summaries, uncertainty, next-action previews, and proposed order |
 | `copilot.interpretCapture` | `captureInputSchema` | An editable action/routine/unsupported proposal for that original capture |
 | `copilot.reconsider` | `reconsiderInputSchema` | A complete permutation of selected item IDs with reasons |
+| `work.collect` | `workCollectInputSchema` | Candidates with immutable evidence, current source observations, and bounded-coverage warnings |
+| `work.rank` | `workRankInputSchema` | Exact permutation of the active queue and one reason per task |
+| `work.connections` | `{}` | Configured MCP server/read-tool names and explicit setup instructions; no secrets |
+| `work.intake` | `{}` | Up to 200 unconsumed durable push items and `hasMore`; reading never deletes |
+| `work.ackIntake` | `{ids}` | The same acknowledgement, after the desktop has saved those items |
 | `cancel` | `{requestId}` | `{requestId, cancelled}` |
 
 All objects are strict: unknown keys fail validation. Thread IDs are positive decimal strings. Repository references are `{repo: "owner/repo", number: positiveInteger, kind: "pr" | "issue"}`. Evidence/context IDs allow up to 500 characters. The service constructs all network endpoints itself.
+
+### Workstreams
+
+[`src/work-schema.ts`](src/work-schema.ts) defines the shared workstream DTOs. Run `work.collect` separately for each enabled stream, reconcile and save its results, then call `work.rank` once for the entire active queue. `createHandler` accepts an optional fourth `WorkService` dependency. The service does not schedule runs.
+
+`work.collect` takes `{stream, model, since, knownUrls?}`. `knownUrls` defaults to `[]` and accepts at most 100 tracked source URLs. Pass tracked GitHub issue/PR URLs even when they no longer match the saved query. Those reads yield `open`, `queued`, `closed`, `merged`, or explicit `unknown` observations. An absent search result is never evidence of completion. MCP pull also performs bounded actual GitHub state reads for linked targets and tracked URLs; it never invents their state from Slack text. Canonical `/issues/N` URLs for PRs are detected through the issue API's `pull_request` field and read as PRs, including current merge queue membership.
+
+The desktop persists `work.collectionCursor` separately from `lastCompletedAt`. Collectors receive that cursor as `since`. A fully successful, durably saved run advances the cursor only to its **start**, not its completion after ranking; events arriving during collection or ranking remain eligible for the next run. `lastCompletedAt` still records actual completion for display and scheduling. Failed runs retain the prior cursor. Older saves default to a null cursor and safely rescan. Changing source streams or the collector model resets the cursor to null; an in-flight run cannot claim coverage for changed settings. Ranking instructions and cadence changes do not reset source coverage.
+
+GitHub searches use the saved expression, not notifications. Supported GitHub actions are `review`, `fix`, `reply`, `merge`, `implement`, `follow-up`, and `manual` (also exported as `githubWorkActionSchema`). The shared workstream schema rejects GitHub `review-result` at the action field, so invalid settings fail before any source request (`invalid_input` at the service boundary); MCP pull and push intake continue to support it. The backend replaces `@me` with the authenticated viewer and sends a single URL-encoded query to the search API with `is:open archived:false`. User text never becomes shell syntax. Search returns at most 50 matches; three workers enrich matched and tracked sources under a 90-second deadline. PR reads include real `mergeQueueEntry`, head SHA, review decision, mergeability, and at most 100 checks. Timeline reads cover the first and latest 100-event pages; skipped history and incomplete searches produce warnings.
+
+For `review`, a current direct viewer request or a current explicitly selected `team-review-requested:org/team` request is required. Evidence uses the real `review_requested` event ID and occurrence time. Commits, comments, source `updatedAt`, query names, and collection time never create fresh review evidence. If the original request is unavailable, a deterministic source/recipient identity uses source creation time and explicitly reports unknown request age. Fix and merge requests use actual head/check/review conditions. Reply extraction uses Copilot against bounded source comments, not notification reasons.
+
+Candidate identity belongs to source URL plus action. Canonical GitHub targets let the desktop deduplicate GitHub and Slack requests for the same action. Only recognized GitHub issue/PR references and Slack message permalinks discard query/fragment tracking context; generic MCP URLs preserve their paths, queries and fragments because those can identify distinct tasks or application routes. Stored canonical identities allow 2,014 characters: a 2,000-character URL, the longest action name, and a separator. Evidence and ranking task IDs keep their separate 500-character limits. Evidence IDs do not depend on stream IDs or query names; `streamId` records provenance. A Slack evidence URL remains its original message permalink even when the candidate targets GitHub. The desktop owns source/action Done semantics and must preserve handled evidence. Metadata's optional `availabilityObservedAt` records the last accepted source observation; reconciliation must ignore older observations so a delayed open result cannot undo newer merge-queue suppression. Older saved metadata without this field remains valid.
+
+Ranking is a separate no-tools SDK session. Owner instructions apply only to prioritization; source titles, notes, queries and tool results remain untrusted data. The selected model is optional. The service validates an exact ID permutation and exactly one reason per task. Authentication, malformed output, source failure, and model payload limits remain explicit errors—there is no demo or heuristic ranking fallback. SDK input/output is bounded to 60,000 bytes, with one formatting retry and a 90-second total deadline. Oversized queues fail explicitly rather than being silently ranked in partial batches.
+
+`normalizeWorkUrl` applies the source-specific URL rules to service candidates and evidence identities as well as intake. In particular, generic `task?id=101` and `task?id=102` cannot share an evidence identity merely because their source event IDs match. Every collector reports `collectedAt` from the start of collection, not its completion, so the next successful watermark need not skip messages arriving while reads were in flight.
+
+#### Existing Slack / MCP connections
+
+Copilot App connections are **not automatically shared** with this service. Backend discovery reads only the supported Copilot CLI `~/.copilot/mcp-config.json`, or an absolute path explicitly provided through backend `COPILOT_MCP_CONFIG_PATH`. It never reads app databases, keychains, or renderer configuration. Use **Read MCP connections** to check whether the selected server is configured.
+
+Use the [official Copilot CLI MCP setup](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-server) with `/mcp add`, or explicitly export/copy an existing configuration into a private backend file. The official Slack endpoint is `https://mcp.slack.com/mcp`. Existing `oauthClientId` and `oauthPublicClient` fields are preserved from that backend configuration through SDK serialization; no organization-specific client ID is embedded in this repository.
+
+Selected collector sessions enable the SDK's supported `mcpOAuthTokenStorage: "persistent"` option. Only those sessions use the existing user's HOME and CLI configuration directory (`~/.copilot` by default); backend `COPILOT_MCP_OAUTH_CONFIG_DIR` may name an explicit absolute shared CLI OAuth configuration directory. The runtime can therefore reuse its supported persistent OAuth store across collection runs instead of losing state in a fresh temporary configuration. The working directory remains private, and discovery, instructions, hooks, memory, session-store access, and all tools other than the selected MCP read tools remain disabled. The service itself never reads keychain tokens or imports app databases.
+
+Complete any required OAuth sign-in once through supported CLI MCP setup using the same configuration directory. App sign-in is not guaranteed to be shared with the CLI. If the SDK requests a new host-supplied OAuth token, background collection cancels that request and returns an explicit authentication/setup error rather than opening an unattended sign-in flow. Ranking and legacy preview sessions retain fully private HOME/configuration directories and in-memory-only token storage, including after an MCP collection. Environment references of the form `${NAME}` in configured arguments, headers, URLs and environment values resolve only in the backend. Missing values fail explicitly. Never paste tokens or configuration JSON into the desktop.
+
+`work.connections` lists configured server names and explicit configured tool names. It does not launch servers or claim live discovery. A wildcard configuration produces an empty displayed tool list; supply the exact known read-tool names in the stream. The SDK receives only that server and those selected names. Its permission callback additionally requires a matching server, matching tool, and `readOnly: true`. All shell, filesystem, network, write-tool and unknown permission requests are denied. Servers that do not declare read-only tools need configuration/provider changes; the service does not silently approve them.
+
+Collectors search/read full relevant threads under a 20-call / 240,000-byte tool-output budget. Structured source records must include an immutable message ID, original creation time, and source permalink. The validator binds those fields within one record, rejects edited timestamps as freshness, and rejects invented GitHub targets. It recognizes inline Markdown destinations and Slack angle links without consuming their closing delimiters; balanced or escaped parentheses within real URLs remain intact. Bare generic URL parentheses, queries and fragments are not stripped. Slack message `ts` must match the permalink's message identity. Unstructured prose without verifiable source fields is not accepted as evidence. Tool/authentication failures return `mcp_unavailable`; absent or incompatible configuration returns `mcp_configuration`.
+
+#### Durable push intake (`--mcp`)
+
+The packaged executable also runs as a real stdio MCP server. An external integration can call `add_task` while the desktop is closed. Add this server to that integration's supported MCP configuration, using the installed executable's absolute path:
+
+```json
+{
+  "mcpServers": {
+    "work-intake": {
+      "type": "stdio",
+      "command": "/absolute/path/github-projects-service-aarch64-apple-darwin",
+      "args": ["--mcp"],
+      "tools": ["add_task"]
+    }
+  }
+}
+```
+
+The x64 binary uses the corresponding `x86_64-apple-darwin` filename. No Copilot App automatic review-completion hook is assumed or installed. A producer must explicitly call the tool after its integration detects a real event.
+
+Minimal `add_task` arguments:
+
+```json
+{
+  "source": "copilot",
+  "producer": "my-review-integration",
+  "eventId": "review-run-123",
+  "occurredAt": "2026-09-16T12:00:00Z",
+  "action": "review-result",
+  "title": "Read the completed AI review",
+  "url": "https://github.com/octo/repo/pull/12",
+  "summary": "The AI review is ready for my attention."
+}
+```
+
+`source` is `copilot` or `mcp`; `producer`, immutable external `eventId`, and actual `occurredAt` are required. A completed AI review creates `review-result`, separate from a human `review` task. It remains pending until the user chooses Done. HTTPS source links cannot contain credentials; malformed, oversized or future-dated events are rejected. Do not generate event IDs from submission time when replaying the same event.
+
+The database is private and independent of the repository: on macOS, `~/Library/Application Support/io.robertcrandall.github-projects-workspace/work-intake/intake.sqlite3`. Other platforms use the same app namespace under their user application-data directory. SQLite uses WAL, full synchronization, a five-second busy timeout, a private directory and `0600` database permissions. Producer/source/event identity makes retries idempotent. Conflicting reuse fails; consumed identities remain as replay tombstones. The store refuses more than 100,000 identities rather than silently expiring them.
+
+The desktop must read `work.intake`, reconcile and successfully save the native workspace, **then** call `work.ackIntake` with only the saved item IDs. A crash before acknowledgement re-delivers the same IDs safely. ACK never completes a user's task. `hasMore` means read the next page after saving and acknowledging the current page.
+
+The MCP adapter implements newline-delimited JSON-RPC `initialize`, `notifications/initialized`, `ping`, `tools/list`, and `tools/call`. It negotiates `2025-11-25`, `2025-06-18`, `2025-03-26`, or `2024-11-05`; unknown versions receive the latest supported version. Frames are capped at 32 KiB; writes time out after two seconds. Stdout contains protocol frames only. EOF closes the database. The external caller—not the desktop—owns permission to invoke this write tool.
+
+Workstream tests inject runners, SDK clients, configuration reads and store paths. They cover immutable request identities, source grounding, ranking permutations, authentication failure, durable replay/ACK, and packaged MCP-to-desktop round trips. A real CLI/SDK smoke with a synthetic read-only MCP server produced a validated review candidate and preserved its message permalink. This verifies the collector transport, not an unavailable real Slack connection. The fallback-freshness test was mutation-checked by replacing source creation time with run time: it failed, and the original logic was restored.
 
 ### Waiting on me: manual-only rules
 

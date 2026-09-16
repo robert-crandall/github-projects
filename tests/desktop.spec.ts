@@ -796,7 +796,7 @@ test('conversation reader at desktop and narrow sizes wraps Markdown without fet
 test('empty native load waits for SQLite and capture, notes and Done persist without demo or startup requests', async ({ page, native }) => {
   native.holdRead = gate();
   await page.goto('/');
-  await expect(page.getByText('Reading saved work...')).toBeVisible();
+  await expect(page.getByText('Reading saved tasks...')).toBeVisible();
   await expect(page.getByRole('button', { name: /^Capture/ })).toHaveCount(0);
   expect(native.calls).not.toContain('workspace_save');
   expect(native.requests).toEqual([]);
@@ -1293,7 +1293,7 @@ test('corrupt SQLite never exposes a fallback and restores only an explicitly se
   await page.goto('/');
   await expect(page.getByRole('alert')).toContainText('damaged');
   await expect(page.getByRole('button', { name: /^Capture/ })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Retry reading saved work' }).click();
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('damaged');
   expect(native.calls).not.toContain('workspace_save');
   expect(native.requests).toEqual([]);
@@ -1415,7 +1415,7 @@ test('failed migration backup blocks editing and writes until preserving the ori
   expect(native.writes).toEqual([]);
   expect(native.saved).toEqual(original);
   native.failBackup = false;
-  await page.getByRole('button', { name: 'Retry reading saved work' }).click();
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await persisted(page);
   expect([...native.backups.values()]).toEqual([original]);
   expect(native.state.version).toBe(3);
