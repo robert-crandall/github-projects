@@ -4,11 +4,33 @@
 
 ## Purpose
 
-A local-first, email-like GitHub notification client with standalone task capture. The left pane holds inboxes, the middle lists threads or tasks, and the right reads the selection.
+A local-first, prioritized todo app. Bring work from GitHub searches, Slack, manual capture and MCP ingestion into one list the user can work from top to bottom.
 
-Keep the existing GitHub-dark interface, native Tauri shell, CLI authentication and current SQLite namespace. This is an evolution of the current app, not another greenfield rewrite.
+Keep the native Tauri shell, CLI authentication and current SQLite namespace. Preserve existing tasks, completion, annotations, backups and recovery. The notification workspace is retained for saved reference material, not as the primary product.
 
-## Inbox and Tasks
+## Ranked tasks
+
+**To do** is the home screen. Each task shows its rank, concrete action, source and a short explanation of its priority. Details expose notes and the actual requests that created the task. **Done** and **No action now** are separate lists, not inboxes.
+
+**Run now** and the opt-in schedule use one pipeline: collect from enabled sources, reconcile against the latest local tasks, then use the Copilot SDK to rank every actionable task. Owner-authored priority instructions and roadmap text guide ranking. Task notes may inform ranking; unrelated private thread notes never do. Source content remains untrusted data, not instructions to execute.
+
+GitHub discovery uses saved queries rather than notification volume. Slack and generic MCP sources use a selected connection with explicitly named read tools. The SDK extracts actionable requests from the source evidence. Do not silently enable broader tools, scrape credentials or pretend an unavailable connection works.
+
+Manual capture saves immediately without a network round trip. Other apps can submit tasks through a durable local MCP intake. A completed Copilot review creates a `review-result` action only when the producer submits it; launching Copilot does not prove review completion.
+
+Identity is canonical source plus action. GitHub repository casing, alternate issue/PR links and URL fragments must not duplicate the same action. Matching the same review through Slack and GitHub retains both sources as evidence on one task.
+
+**Done** records handled evidence and a completion time. Only an unseen actionable request whose source event is newer than completion can reopen the task. Repeated queries, old messages discovered later, general updates and model decisions cannot undo Done. Current merge-queue, closed or merged state suppresses action without falsely completing tasks.
+
+Each run applies results to the latest state so concurrent captures, notes and Done survive. Invalid rankings, source failures and save failures remain explicit. Preserve discoveries and the prior order when ranking fails. Missing query results do not prove completion.
+
+Scheduling is disabled until explicitly enabled. While the Mac app runs, including hidden, a native clock triggers due checks. Catch up once after sleep or relaunch; do not overlap or replay every missed interval. Quitting stops runs. Legacy reminder schedules never resume.
+
+## Retained reference workspace
+
+The sections below describe the previous conversation workspace, reachable through **Open saved thread notes**. Its explicit-only refresh, digest and notification rules apply to that reference surface, not the ranked task pipeline above.
+
+### Inbox and Tasks
 
 **Inbox** contains GitHub threads, grouped by issue or PR. Selecting a thread reads it; it never creates, chooses, or completes a task. Source activity does not imply a personal commitment. Keep request evidence and uncertainty visible without turning the reader into a task-management form.
 
@@ -16,7 +38,7 @@ Notes belong to their thread. They save locally on edit and survive navigation, 
 
 **Tasks** contains standalone captures. Capture is available from either inbox, including with Command/Ctrl+K. Save arbitrary text immediately, without a network or model round trip. Links and daily phrasing remain text; they do not automatically link a task, interpret a routine, or schedule anything.
 
-Tasks have text, notes and Done. Completed tasks remain visible in a Done section. Only an explicit user change reopens a task. Comments, review requests, merges, closure and merge-queue activity cannot do so.
+Tasks have text, notes and Done. Completed tasks remain visible in a Done section. Reference notification refresh never reopens a task; the ranked task pipeline alone reconciles fresh actionable requests.
 
 Working on, Later, routines, mandatory steps, project grouping and commitment ranking are no longer core controls. Retired routines cannot deliver invisible native reminders.
 

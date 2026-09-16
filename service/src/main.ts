@@ -4,8 +4,10 @@ import { WaitingService } from './waiting.ts';
 import { sanitized } from './errors.ts';
 import { serve, type Handler } from './protocol.ts';
 import type { ServiceErrorDTO } from './schema.ts';
+import { WorkService } from './work.ts';
+import { serveIntakeMcp } from './work-mcp-protocol.ts';
 
-export function createHandler(github = new GitHubService(), copilot = new CopilotService(), waiting = new WaitingService()): Handler {
+export function createHandler(github = new GitHubService(), copilot = new CopilotService(), waiting = new WaitingService(), work = new WorkService({ copilot })): Handler {
   return async (request, signal) => {
     switch (request.op) {
       case 'connection.check': {
@@ -24,6 +26,11 @@ export function createHandler(github = new GitHubService(), copilot = new Copilo
       case 'copilot.triage': return copilot.triage(request.input, signal);
       case 'copilot.interpretCapture': return copilot.interpretCapture(request.input, signal);
       case 'copilot.reconsider': return copilot.reconsider(request.input, signal);
+      case 'work.collect': return work.collect(request.input, signal);
+      case 'work.rank': return work.rank(request.input, signal);
+      case 'work.connections': return work.listConnections();
+      case 'work.intake': return work.pendingIntake();
+      case 'work.ackIntake': return work.ackIntake(request.input);
     }
   };
 }
@@ -31,9 +38,11 @@ if (import.meta.main) {
   process.once('SIGTERM', () => { process.stdin.destroy(); });
   process.once('SIGINT', () => { process.stdin.destroy(); });
   try {
-    await serve(process.stdin, line => new Promise<void>((resolve, reject) => {
+    const write = (line: string) => new Promise<void>((resolve, reject) => {
       process.stdout.write(line, error => error ? reject(error) : resolve());
-    }), createHandler(), {
+    });
+    if (process.argv.includes('--mcp')) await serveIntakeMcp(process.stdin, write);
+    else await serve(process.stdin, write, createHandler(), {
       onDiagnostic: code => { process.stderr.write(`service:${code}\n`); },
       closeInput: () => { process.stdin.destroy(); },
     });

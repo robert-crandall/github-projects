@@ -17,7 +17,7 @@ use storage::{Backup, RawExport, StorageStatus, Store};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, State,
+    Emitter, Manager, State,
 };
 
 type SharedStore = Arc<Mutex<Result<Store>>>;
@@ -460,6 +460,16 @@ pub fn run() {
                 })
                 .and_then(Store::new);
             install_lifecycle(app, store, runtime_directory)?;
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    if handle.emit("work-tick", ()).is_err() {
+                        eprintln!("work-clock-failed: Scheduled collection could not be triggered.");
+                        break;
+                    }
+                }
+            });
             if setup_directory.is_some() {
                 app.manage(smoke::ServiceFixture::default());
                 let handle = app.handle().clone();

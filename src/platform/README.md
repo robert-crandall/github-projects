@@ -2,7 +2,7 @@
 
 `native.ts` is the renderer's only native interface. It exports `nativePlatform`, `isDesktop`, runtime schemas, DTO types, and `NativePlatformError`. `createNativePlatform(transport)` supplies an injectable test boundary; the default transport refuses browser execution.
 
-`index.html` and `desktop.tsx` start the approved workspace through `DesktopWorkspace`, `ServiceWorkspace`, and `DesktopApp`. The shared `WorkspaceApp` never invokes the browser `useWorkspace` hook in this entry. Initial rendering waits for a validated SQLite read; it never seeds fixtures or a writable fallback on read failure.
+`index.html` and `desktop.tsx` start the ranked task interface through `DesktopWorkspace`, `WorkQueue`, and `TaskApp`. `ServiceWorkspace` and `DesktopApp` remain reachable for saved thread notes. Neither entry invokes the browser `useWorkspace` hook. Initial rendering waits for a validated SQLite read; it never seeds fixtures or a writable fallback on read failure.
 
 `service.ts` validates operation-specific envelopes and results against the authoritative service schemas. It exposes only the restricted native JSONL host, not an HTTP client or SDK runtime. GitHub/SDK implementation code and credentials stay outside the renderer.
 
@@ -24,7 +24,7 @@ nativePlatform.workspaceRead(): Promise<NativeWorkspace>;
 nativePlatform.workspaceSave(expectedRevision: string, snapshot: NativeSnapshot): Promise<NativeWorkspace>;
 ```
 
-The workspace object is a domain-owned JSON envelope (`version: 1`, `state.version: 3`, scroll offsets). State contains threads, thread-owned notes and standalone tasks; no active action or routine scheduler remains. Integration validates it before save and after load, including backups. Native validation requires a positive integer workspace version, format version 1, a JSON object, at most 8 MiB and depth 64. Version-3 snapshots must contain no schedules. Legacy schedules remain parseable for recovery, with the original timestamp/timezone/identity bounds. SQLite validates schema version and integrity; a checksum detects damaged JSON.
+The workspace object is a domain-owned JSON envelope (`version: 1`, `state.version: 3`, scroll offsets). State contains threads, thread-owned notes, tasks and a defaulted `work` object holding sources, instructions, ranking and collection cadence. Optional task `work` metadata stores identity, provenance, handled evidence and availability. Existing tasks retain their IDs, notes and completion. Integration validates before save and after load, including backups. Native validation requires a positive integer workspace version, format version 1, a JSON object, at most 8 MiB and depth 64. Version-3 snapshots must contain no native reminder schedules. Legacy reminders remain parseable for recovery. SQLite validates schema version and integrity; a checksum detects damaged JSON.
 
 Version 3 also holds bounded `rules` and `inboxes` arrays (default empty for existing snapshots), plus optional per-thread `sourceState` and `terminal` checkpoints. Rules use stable inbox IDs and strict literal criteria; validation rejects invalid or dangling references, duplicate/reserved names and unknown selected inboxes. No new database or body storage is added. Placement is derived from manual Archive, terminal state, then first enabled rule, without mutating notification/read state, notes, Tasks or operation intents.
 
@@ -67,7 +67,7 @@ Markdown uses React Markdown and GFM without raw HTML execution. Image elements 
 
 `clockNow()` returns `{now,timeZone,error}` from the actual clock and detected local zone. If detection fails, `timeZone` is null and the error is explicit.
 
-Native clock ticks and their event subscription are retired with the scheduler. The initial read supplies the timezone and clock; subsequent local transitions take a current timestamp without a network request. The footer labels this as workspace time, not a continuously ticking clock.
+The native process emits `work-tick` every 30 seconds, including while the window is hidden. `WorkQueue.tick` checks the persisted opt-in cadence and last run boundary. It starts at most one overdue run and never overlaps an active run. The frontend also checks once after loading saved state. With cadence disabled these checks do not contact sources or Copilot. The window has only listen/unlisten event capabilities, not permission to emit native events.
 
 The native app no longer dispatches reminders, requests notification permission or exposes reminder retry controls. Delivery is disabled even before the frontend loads, after a failed migration save, and after restoring an older backup. The schedule array stays in the native envelope solely to read and preserve current-format legacy data safely.
 
@@ -95,7 +95,9 @@ Errors use `{code,message,retryable}` and become `NativePlatformError` in TypeSc
 
 ## Owned service and async reconciliation
 
-The Rust host lazily starts only the fixed packaged `github-projects-service` executable beside the native executable. Tauri bundles/signs the matching arm64 or x64 binary. Its working directory is private app data, or a generated TEST directory during explicit smoke checks. No localhost service, caller-supplied executable, path, environment, model, or command is accepted.
+The Rust host lazily starts only the fixed packaged `github-projects-service` executable beside the native executable. Tauri bundles/signs the matching arm64 or x64 binary. Its working directory is private app data, or a generated TEST directory during explicit smoke checks. No localhost service or caller-supplied executable, path, environment or shell command is accepted. The work operations accept the saved query, selected model, allowed source connection and bounded task data through strict service schemas.
+
+`work.collect`, `work.rank`, `work.connections`, `work.intake` and `work.ackIntake` are explicit host operations. Collection applies evidence to the latest local state before ranking. Intake reads are nondestructive; the controller acknowledges producer events only after workspace persistence. A failed save prevents acknowledgement. Task Done never uses a GitHub notification write.
 
 Requests/replies are bounded to 1 MiB frames, four ordinary concurrent requests, a 150-second native timeout, and continuously drained bounded stderr. IDs correlate out-of-order replies; malformed or unknown responses stop the group. Quit, timeout, acknowledged active cancellation, and service-level cancelled/deadline results TERM then KILL the entire owned process group, including descendants. A no-op cancellation does not interrupt peers. Interrupted GitHub writes remain unconfirmed because they may have reached GitHub. The next request lazily starts a clean group.
 

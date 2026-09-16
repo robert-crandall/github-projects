@@ -1,6 +1,6 @@
 ---
 name: "GitHub Projects"
-description: "A GitHub-dark, three-pane notification client with separate Inbox and Tasks."
+description: "A GitHub-dark ranked task list, with source evidence and owner-defined priorities."
 ---
 
 # Design System: GitHub Projects
@@ -13,7 +13,19 @@ Preserve the incumbent GitHub-dark palette and native system typography. No new 
 
 [PRODUCT.md](PRODUCT.md) owns behavior. The [Design System](docs/Design%20System.md) and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) provide reusable interaction constraints.
 
-## Composition
+## Ranked task composition
+
+The primary desktop surface is one numbered task list. Rank is meaningful sequence, not decoration. Keep task titles and priority reasons visible together, with a direct Done control on every active row. Do not divide the active list into competing source inboxes or priority buckets.
+
+Use the incumbent GitHub-dark palette, system typography and restrained borders. A compact top bar contains Add task, Run now and Sources and priorities. To do, Done and No action now switch task state, not source. The last ranking time and cadence remain visible without dominating the list.
+
+Task details open beside the list at wide widths. Narrow windows show details with an explicit close control returning to the list. Source evidence wraps rather than clipping; links open only by explicit action. Unranked tasks and unknown source states are labeled, not presented as model-ranked certainty.
+
+Sources and priorities is a full settings page, not a large modal. Separate instructions, source queries, the opt-in schedule, connection guidance and recovery. Manual capture uses a small focused dialog and Command/Ctrl+K. Local edits stay available during collection and ranking.
+
+Keep the old conversation reader reachable as saved reference material. It does not define the primary task interface.
+
+## Reference workspace composition
 
 The app works like an email client: inboxes on the left, a compact list in the middle, and the selected reader on the right.
 
@@ -41,7 +53,7 @@ Use the native system sans stack. No webfonts. Page headings, reader titles, row
 
 Use monospace only for raw preserved records or other machine output. Display user-authored notes and captures as text with preserved whitespace.
 
-## Reader and controls
+## Reference reader and controls
 
 Thread detail starts with the source title and visible GitHub/Copilot destinations. The desktop **Conversation** reader presents full Markdown messages in chronological groups, with author, time and source links. Inline replies stay with their discussion; missing opening context remains explicit. The isolated browser prototype retains its honestly labeled synthetic source summaries.
 

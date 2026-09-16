@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { repoSchema, sourceStateSchema } from '../service/src/schema.ts';
+import { defaultWorkState, workMetadataSchema, workStateSchema } from '../service/src/work-schema.ts';
 
 const time = z.iso.datetime();
 const boundarySchema = z.object({ at: time, notificationUpdatedAt: time.optional(), evidenceAt: time.optional() });
@@ -106,6 +107,7 @@ export const historySchema = actionSchema.omit({ notes: true, title: true });
 export const taskSchema = z.object({
   id: z.string(), title: z.string(), notes: z.string(), status: z.enum(['open', 'done']),
   createdAt: time, completedAt: time.optional(), history: historySchema.optional(), threadId: z.string().optional(),
+  work: workMetadataSchema.optional(),
 });
 export const noteSchema = z.object({
   id: z.string(), threadId: z.string(), text: z.string(),
@@ -118,6 +120,7 @@ export const stateSchema = legacyStateSchema.omit({
   view: z.union([z.enum(['inbox', 'archive', 'tasks', 'filtered']), z.templateLiteral(['inbox:', localId])]),
   inboxes: z.array(inboxSchema).max(50).default([]),
   rules: z.array(ruleSchema).max(100).default([]),
+  work: workStateSchema.default(defaultWorkState),
   failures: z.object({ refresh: z.enum(['none', 'partial', 'error']), storage: z.boolean(), external: z.boolean() }),
   undo: z.array(z.object({ before: taskSchema, after: taskSchema })),
 });

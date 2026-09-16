@@ -4,6 +4,8 @@ import { archiveBoundary } from './archive.ts';
 import { LIMITS } from '../../service/src/schema.ts';
 import { placement, validateFilters } from './filtering.ts';
 import { reconcileTerminal } from './terminal.ts';
+import { defaultWorkState } from '../../service/src/work-schema.ts';
+import { completeWorkTask, restoreWorkTask } from '../work/engine.ts';
 
 const PRIMARY = 'demo-relay-101';
 const TEAM = 'demo-provider-202';
@@ -110,7 +112,7 @@ export function initialState(timeZone = 'UTC'): AppState {
     },
   ];
   return {
-    version: 3, runtime: 'demo', clock, timeZone,
+    version: 3, runtime: 'demo', clock, timeZone, work: defaultWorkState(),
     threads: threads.map(thread => {
       thread.archive = thread.id === CLOSED ? archiveBoundary(thread, clock) : null;
       thread.sourceState = { state: thread.state, observedAt: clock, updatedAt: null, error: null };
@@ -318,6 +320,11 @@ export function transition(state: AppState, command: Command): AppState {
           task.title = command.title;
         }
         if (command.notes !== undefined) task.notes = command.notes;
+      } else if (task.work) {
+        if (task.status === (command.type === 'done' ? 'done' : 'open')) break;
+        next.tasks = (command.type === 'done'
+          ? completeWorkTask(next, task.id, next.clock) : restoreWorkTask(next, task.id)).tasks;
+        next.undo.push({ before, after: structuredClone(next.tasks.find(value => value.id === task.id)!) });
       } else {
         task.status = command.type === 'done' ? 'done' : 'open';
         if (command.type === 'done') task.completedAt = next.clock;
@@ -332,8 +339,13 @@ export function transition(state: AppState, command: Command): AppState {
       const task = next.tasks.find(task => task.id === entry.after.id);
       if (!task) throw new Error('The changed task no longer exists.');
       if (task.status === entry.after.status && task.completedAt === entry.after.completedAt) {
-        task.status = entry.before.status;
-        task.completedAt = entry.before.completedAt;
+        if (task.work) {
+          next.tasks = (entry.before.status === 'done'
+            ? completeWorkTask(next, task.id, next.clock) : restoreWorkTask(next, task.id)).tasks;
+        } else {
+          task.status = entry.before.status;
+          task.completedAt = entry.before.completedAt;
+        }
       }
       break;
     }

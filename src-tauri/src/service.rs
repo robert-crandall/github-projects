@@ -67,6 +67,11 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
                 | "copilot.triage"
                 | "copilot.interpretCapture"
                 | "copilot.reconsider"
+                | "work.collect"
+                | "work.rank"
+                | "work.connections"
+                | "work.intake"
+                | "work.ackIntake"
                 | "cancel"
         )
     {

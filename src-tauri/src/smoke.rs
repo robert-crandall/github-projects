@@ -9,6 +9,7 @@ use tauri::Manager;
 pub(crate) struct ServiceFixture {
     refreshes: std::sync::atomic::AtomicUsize,
     writes: std::sync::atomic::AtomicUsize,
+    rankings: std::sync::atomic::AtomicUsize,
 }
 
 impl ServiceFixture {
@@ -17,6 +18,20 @@ impl ServiceFixture {
         let old = "2026-09-11T17:00:00Z";
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let result = match request["op"].as_str() {
+            Some("work.intake") => serde_json::json!({"items":[],"hasMore":false}),
+            Some("work.collect") => serde_json::json!({
+                "candidates":[],"observations":[],"warnings":[],"collectedAt":now
+            }),
+            Some("work.rank") => {
+                self.rankings.fetch_add(1, Ordering::SeqCst);
+                let tasks = request["input"]["tasks"].as_array().ok_or_else(failed)?;
+                serde_json::json!({
+                    "orderedIds":tasks.iter().map(|task| task["id"].clone()).collect::<Vec<_>>(),
+                    "reasons":tasks.iter().map(|task| serde_json::json!({
+                        "id":task["id"],"reason":"Native smoke priority"
+                    })).collect::<Vec<_>>()
+                })
+            }
             Some("github.refresh") => {
                 let count = self.refreshes.fetch_add(1, Ordering::SeqCst);
                 let at = if count >= 4 {
@@ -318,8 +333,12 @@ fn conversation_reader(window: &tauri::WebviewWindow) -> Result<()> {
 
 pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
     let window = app.get_webview_window("main").ok_or_else(failed)?;
+    wait_for(&window, "document.querySelector('.task-top') !== null")?;
+    evaluate(&window, "document.querySelector('button[aria-label=\"Sources and priorities\"]').click(); true")?;
+    wait_for(&window, "document.querySelector('.task-settings') !== null")?;
+    evaluate(&window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Open saved thread notes').click(); true")?;
     if relaunch {
-        wait_for(&window, "document.querySelector('#task-notes')?.value === 'Native smoke note survives relaunch' && document.querySelector('.detail h2')?.textContent === 'Native smoke capture' && document.querySelector('.task-controls input[type=checkbox]')?.checked === false")?;
+        wait_for(&window, "document.querySelector('#task-notes')?.value === 'Native smoke note survives relaunch' && document.querySelector('.detail h2')?.textContent === 'Native smoke capture' && document.querySelector('.task-controls input[type=checkbox]')?.checked === true")?;
         evaluate(&window, "[...document.querySelectorAll('nav button')].find(button => button.textContent.startsWith('Native inbox')).click(); true")?;
         wait_for(
             &window,
@@ -395,6 +414,49 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
             "Show did not return the existing window.",
         ));
     }
+    evaluate(&window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Back to ranked tasks').click(); true")?;
+    wait_for(&window, "document.querySelector('.task-title')?.textContent === 'Native smoke capture'")?;
+    evaluate(&window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Run now').click(); true")?;
+    wait_for(&window, "document.querySelector('.task-reason')?.textContent === 'Native smoke priority' && document.querySelector('.workspace-footer')?.textContent.includes('Saved on this Mac')")?;
+    evaluate(&window, "document.querySelector('button[aria-label=\"Sources and priorities\"]').click(); true")?;
+    wait_for(&window, "document.querySelector('#schedule-heading') !== null")?;
+    evaluate(&window, "document.querySelector('#schedule-heading').closest('section').querySelector('input[type=checkbox]').click(); true")?;
+    evaluate(&window, "document.querySelector('.task-settings button[type=submit]').click(); true")?;
+    wait_for(&window, "document.querySelector('.workspace-footer')?.textContent.includes('Saved on this Mac')")?;
+    evaluate(&window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Back to tasks').click(); const RealDate=Date; const future=RealDate.now()+31*60*1000; window.Date=class extends RealDate { constructor(...args){ super(...(args.length ? args : [future])); } static now(){ return future; } }; true")?;
+    window.hide().map_err(|_| failed())?;
+    tauri::Emitter::emit(&app, "work-tick", ()).map_err(|_| failed())?;
+    for _ in 0..100 {
+        if fixture.rankings.load(std::sync::atomic::Ordering::SeqCst) >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if fixture.rankings.load(std::sync::atomic::Ordering::SeqCst) != 2
+        || window.is_visible().map_err(|_| failed())?
+    {
+        return Err(NativeError::new("smoke-failed", "The opted-in schedule did not rank while the window was hidden."));
+    }
+    crate::show_window(&app);
+    wait_for(&window, "document.querySelector('.workspace-footer')?.textContent.includes('Saved on this Mac') && [...document.querySelectorAll('button')].some(button => button.textContent === 'Run now')")?;
+    evaluate(&window, "document.querySelector('button[aria-label=\"Sources and priorities\"]').click(); true")?;
+    wait_for(&window, "document.querySelector('#schedule-heading') !== null")?;
+    evaluate(&window, "document.querySelector('#schedule-heading').closest('section').querySelector('input[type=checkbox]').click(); document.querySelector('.task-settings button[type=submit]').click(); true")?;
+    wait_for(&window, "document.querySelector('.workspace-footer')?.textContent.includes('Saved on this Mac')")?;
+    evaluate(&window, "[...document.querySelectorAll('button')].find(button => button.textContent === 'Back to tasks').click(); true")?;
+    wait_for(&window, "document.querySelector('.task-complete') !== null")?;
+    evaluate(&window, "document.querySelector('.task-complete').click(); true")?;
+    wait_for(&window, "document.querySelector('.task-title') === null && document.querySelector('.workspace-footer')?.textContent.includes('Saved on this Mac')")?;
+    {
+        let native = app.state::<NativeState>();
+        let guard = native.store.lock().map_err(|_| failed())?;
+        let snapshot = guard.as_ref().map_err(|_| failed())?.read()?.snapshot.ok_or_else(failed)?;
+        if snapshot.workspace["state"]["tasks"][0]["status"] != "done"
+            || snapshot.workspace["state"]["work"]["ranking"]["rankedAt"].as_str().is_none()
+        {
+            return Err(failed());
+        }
+    }
     println!(
         "{}",
         serde_json::json!({
@@ -404,6 +466,7 @@ pub fn run(app: tauri::AppHandle, relaunch: bool) -> Result<()> {
             "nativeArchiveAndAcknowledgement": true, "identicalRefreshKeepsArchive": true,
             "oldHistoryKeepsArchive": true, "newActivityResurfacesSameThread": true,
             "nativeRulePreviewAndRouting": true, "queueEntryAndExit": true, "automaticSuppressionWrites": 0,
+            "rankedTaskHome":true,"sdkRankingTransport":true,"rankedTaskDonePersisted":true,"hiddenScheduledRun":true,
             "permissionRequested": false, "networkRequests": 0,
         })
     );
