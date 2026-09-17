@@ -7,6 +7,8 @@ import { CopilotService, type SdkClient } from '../src/copilot.ts';
 import { McpConnections, groundedRequests, normalizeWorkUrl, sourceLinks, sourceTime } from '../src/work-mcp.ts';
 import { WorkService } from '../src/work.ts';
 import type { WorkRankInput, Workstream } from '../src/work-schema.ts';
+import { LIMITS } from '../src/schema.ts';
+import { ServiceError } from '../src/errors.ts';
 
 const at = '2026-09-10T12:00:00Z';
 const stream: Workstream = {
@@ -28,7 +30,7 @@ const tasks: WorkRankInput = {
 const signal = () => new AbortController().signal;
 async function sdkHarness<T>(operation: (context: {
   sdk: CopilotService; configs: SessionConfig[]; prompts: string[];
-  clients: CopilotClientOptions[];
+  clients: CopilotClientOptions[]; timeouts: Array<number | undefined>;
   setResponse: (response: unknown) => void; setHook: (hook: (config: SessionConfig) => Promise<void>) => void;
   setAuth: (value: boolean) => void;
 }) => Promise<T>): Promise<T> {
@@ -40,14 +42,16 @@ async function sdkHarness<T>(operation: (context: {
   const configs: SessionConfig[] = [];
   const clients: CopilotClientOptions[] = [];
   const prompts: string[] = [];
+  const timeouts: Array<number | undefined> = [];
   const client: SdkClient = {
     start: async () => {}, getAuthStatus: async () => ({ isAuthenticated: authenticated }),
     createSession: async config => {
       configs.push(config);
       return {
         sessionId: 'work-session', abort: async () => {}, disconnect: async () => {},
-        sendAndWait: async options => {
+        sendAndWait: async (options, timeout) => {
           prompts.push(options.prompt);
+          timeouts.push(timeout);
           await hook?.(config);
           return { data: { content: JSON.stringify(response) } };
         },
@@ -60,7 +64,7 @@ async function sdkHarness<T>(operation: (context: {
       sdk: new CopilotService({ client: options => { clients.push(options); return client; }, cli: async () => '/fake/copilot', token: async () => 'test-only',
         diagnostic: () => {}, stateDirectory: () => directory,
         mcpOAuthScope: () => ({ homeDirectory: directory, configDirectory: join(directory, 'oauth') }) }),
-      configs, clients, prompts, setResponse: value => { response = value; }, setHook: value => { hook = value; },
+      configs, clients, prompts, timeouts, setResponse: value => { response = value; }, setHook: value => { hook = value; },
       setAuth: value => { authenticated = value; },
     });
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -77,20 +81,22 @@ async function sourceRead(config: SessionConfig, value: unknown = source) {
 describe('isolated Copilot work operations', () => {
   test('rank gets selected model and owner instructions, no tools, exact permutation and reasons', async () => {
     await sdkHarness(async ({ sdk, configs, prompts, setResponse }) => {
-      setResponse({ orderedIds: ['b', 'a'], reasons: [{ id: 'a', reason: 'Second' }, { id: 'b', reason: 'First' }] });
-      expect((await sdk.rankWork(tasks, signal())).orderedIds).toEqual(['b', 'a']);
+      setResponse({ ranking: [{ id: 'T2', reason: 'First' }, { id: 'T1', reason: 'Second' }] });
+      expect(await sdk.rankWork(tasks, signal())).toEqual({
+        orderedIds: ['b', 'a'], reasons: [{ id: 'b', reason: 'First' }, { id: 'a', reason: 'Second' }],
+      });
       expect(configs[0]).toMatchObject({ model: 'selected-model', availableTools: [], mcpServers: {}, tools: [], mcpOAuthTokenStorage: 'in-memory' });
       expect(configs[0]!.systemMessage).toMatchObject({ content: expect.stringContaining(tasks.instructions) });
-      expect(JSON.parse(prompts[0]!).input.tasks).toEqual(tasks.tasks);
+      expect(JSON.parse(prompts[0]!).input.tasks).toEqual(tasks.tasks.map((task, index) => ({ ...task, id: `T${index + 1}` })));
       expect(configs[0]!.systemMessage).toMatchObject({ content: expect.not.stringContaining(tasks.tasks[0]!.notes) });
     });
   });
   test('rank rejects missing IDs, duplicate IDs, fabricated reasons, and duplicate input IDs', async () => {
     for (const result of [
-      { orderedIds: ['a'], reasons: [{ id: 'a', reason: 'x' }] },
-      { orderedIds: ['a', 'a'], reasons: [{ id: 'a', reason: 'x' }, { id: 'b', reason: 'y' }] },
-      { orderedIds: ['a', 'b'], reasons: [{ id: 'a', reason: 'x' }, { id: 'invented', reason: 'y' }] },
-      { orderedIds: ['a', 'b'], reasons: [{ id: 'a', reason: ' ' }, { id: 'b', reason: 'y' }] },
+      { ranking: [{ id: 'T1', reason: 'x' }] },
+      { ranking: [{ id: 'T1', reason: 'x' }, { id: 'T1', reason: 'y' }] },
+      { ranking: [{ id: 'T1', reason: 'x' }, { id: 'invented', reason: 'y' }] },
+      { ranking: [{ id: 'T1', reason: ' ' }, { id: 'T2', reason: 'y' }] },
     ]) await sdkHarness(async ({ sdk, setResponse }) => {
       setResponse(result);
       await expect(sdk.rankWork(tasks, signal())).rejects.toMatchObject({ dto: { code: 'copilot_output' } });
@@ -98,6 +104,100 @@ describe('isolated Copilot work operations', () => {
     await sdkHarness(async ({ sdk }) => {
       await expect(sdk.rankWork({ ...tasks, tasks: [tasks.tasks[0]!, tasks.tasks[0]!] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
     });
+  });
+  test('200 tasks above the old payload limit are ranked together with a bounded work deadline', async () => {
+    await sdkHarness(async ({ sdk, configs, prompts, timeouts, setResponse }) => {
+      const large: WorkRankInput = { ...tasks, tasks: Array.from({ length: 200 }, (_, index) => ({
+        ...tasks.tasks[0]!, id: `persistent-task-${index}`, notes: 'Important source context. '.repeat(20),
+      })) };
+      expect(Buffer.byteLength(JSON.stringify({ tasks: large.tasks }))).toBeGreaterThan(LIMITS.modelBytes);
+      expect(Buffer.byteLength(JSON.stringify({ tasks: large.tasks }))).toBeLessThan(LIMITS.workModelBytes);
+      setResponse({ ranking: large.tasks.map((_, index) => ({ id: `T${index + 1}`, reason: `Priority ${index + 1}` })).reverse() });
+      const result = await sdk.rankWork(large, signal());
+      expect(result.orderedIds).toEqual(large.tasks.map(task => task.id).reverse());
+      expect(result.reasons.map(reason => reason.id)).toEqual(result.orderedIds);
+      expect(JSON.parse(prompts[0]!).input.tasks).toHaveLength(200);
+      expect(JSON.parse(prompts[0]!).input.tasks[199].notes).toBe(large.tasks[199]!.notes);
+      expect(configs).toHaveLength(1);
+      expect(timeouts).toEqual([LIMITS.workModelMs]);
+    });
+  });
+  test('ranking still refuses oversized input before SDK startup, without silently dropping tasks', async () => {
+    await sdkHarness(async ({ sdk, configs }) => {
+      const large = { ...tasks, tasks: Array.from({ length: 200 }, (_, index) => ({
+        ...tasks.tasks[0]!, id: String(index), notes: 'x'.repeat(2000),
+      })) };
+      await expect(sdk.rankWork(large, signal())).rejects.toMatchObject({ dto: { code: 'limit' } });
+      expect(configs).toEqual([]);
+    });
+  });
+  test('one correction can recover a schema-valid but duplicated ranking reference', async () => {
+    await sdkHarness(async ({ sdk, prompts, setResponse, setHook }) => {
+      setHook(async () => {
+        setResponse({ ranking: [
+          { id: 'T1', reason: 'First' }, { id: prompts.length === 1 ? 'T1' : 'T2', reason: 'Second' },
+        ] });
+      });
+      expect((await sdk.rankWork(tasks, signal())).orderedIds).toEqual(['a', 'b']);
+      expect(prompts).toHaveLength(2);
+    });
+  });
+  test('reply references restore verbatim evidence rather than asking the model to copy IDs and links', async () => {
+    await sdkHarness(async ({ sdk, prompts, configs, setResponse }) => {
+      const messages = [0, 1].map(index => ({
+        eventId: `github:octo/repo:${index + 1}:commented:${index + 100}`, sourceTimestamp: at,
+        sourceUrl: `https://github.com/octo/repo/issues/${index + 1}#issuecomment-${index + 100}`,
+        body: '@viewer please clarify.',
+      }));
+      setResponse({ replies: [{ message: 1, title: 'Reply to the second issue', summary: 'A question for the viewer.' }], warnings: [] });
+      const result = await sdk.extractReplies({ viewer: 'viewer', query: 'mentions:@me', messages }, '', signal());
+      expect(result.requests).toEqual([{
+        eventId: messages[1]!.eventId, sourceTimestamp: at, sourceUrl: messages[1]!.sourceUrl,
+        title: 'Reply to the second issue', summary: 'A question for the viewer.', targetUrl: null, action: 'reply',
+      }]);
+      expect(JSON.parse(prompts[0]!).input.messages[0]).not.toHaveProperty('eventId');
+      expect(JSON.parse(prompts[0]!).input.messages[1].message).toBe(1);
+      expect(configs[0]).toMatchObject({ availableTools: [], mcpServers: {} });
+    });
+  });
+  test('reply extraction rejects fabricated, fractional and duplicate message references', async () => {
+    const message = { eventId: 'event-1', sourceTimestamp: at, sourceUrl: 'https://github.com/octo/repo/issues/1', body: 'Question' };
+    for (const references of [[2], [-1], [0.5], [0, 0]]) await sdkHarness(async ({ sdk, setResponse, prompts }) => {
+      setResponse({ replies: references.map(message => ({ message, title: 'Reply', summary: 'Question' })), warnings: [] });
+      await expect(sdk.extractReplies({
+        viewer: 'viewer', query: 'mentions:@me', messages: [message, { ...message, eventId: 'event-2' }],
+      }, '', signal()))
+        .rejects.toMatchObject({ dto: { code: 'copilot_output' } });
+      expect(prompts).toHaveLength(2);
+    });
+  });
+  test('ranking deadlines describe a read-only failure, not a possibly completed GitHub write', async () => {
+    await sdkHarness(async ({ sdk, setHook }) => {
+      setHook(async () => { throw new ServiceError('deadline', true); });
+      await expect(sdk.rankWork(tasks, signal())).rejects.toMatchObject({
+        dto: { code: 'deadline', message: expect.stringContaining('read-only') },
+      });
+    });
+  });
+  test('extra tracked-source batches observe GitHub without repeating either collector', async () => {
+    for (const kind of ['github', 'slack', 'mcp'] as const) {
+      let observed = 0;
+      const service = new WorkService({ github: {
+        collect: async () => { throw new Error('Search must not repeat'); },
+        observe: async urls => {
+          observed++;
+          expect(urls).toEqual(['https://github.com/octo/repo/issues/12']);
+          return [{ url: urls[0]!, state: 'closed', observedAt: at, reason: '' }];
+        },
+      }, connections: new McpConnections({ path: '/not-read', read: async () => { throw new Error('MCP must not repeat'); } }) });
+      const result = await service.collect({
+        stream: { ...stream, kind }, model: '', since: null, observeOnly: true,
+        knownUrls: ['https://github.com/octo/repo/issues/12'],
+      }, signal());
+      expect(observed).toBe(1);
+      expect(result.candidates).toEqual([]);
+      expect(result.observations[0]!.state).toBe('closed');
+    }
   });
   test('MCP collector grants only selected server read tools and never owner rank instructions', async () => {
     await sdkHarness(async ({ sdk, configs, clients, prompts, setHook }) => {
@@ -132,7 +232,7 @@ describe('isolated Copilot work operations', () => {
       expect(clients[0]!.env!.HOME).toBe(clients[1]!.env!.HOME);
       expect(configs[0]!.workingDirectory).not.toBe(configs[1]!.workingDirectory);
       setHook(async () => {});
-      setResponse({ orderedIds: ['a', 'b'], reasons: [{ id: 'a', reason: 'First' }, { id: 'b', reason: 'Second' }] });
+      setResponse({ ranking: [{ id: 'T1', reason: 'First' }, { id: 'T2', reason: 'Second' }] });
       await sdk.rankWork(tasks, signal());
       expect(clients[2]!.env!.HOME).not.toBe(clients[0]!.env!.HOME);
       expect(clients[2]!.baseDirectory).not.toBe(clients[0]!.baseDirectory);

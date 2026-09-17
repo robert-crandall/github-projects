@@ -303,6 +303,7 @@ describe('runs and persistence barriers', () => {
     });
     await mock.queue.run();
     expect(checked.map(page => page.length)).toEqual([100, 1]);
+    expect(mock.requests.filter(request => request.op === 'work.collect').map(request => request.input.observeOnly)).toEqual([false, true]);
     expect(new Set(checked.flat()).size).toBe(101);
     expect(mock.saved().tasks).toHaveLength(101);
     expect(rankedTasks(mock.saved())).toEqual([]);

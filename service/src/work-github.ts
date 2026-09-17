@@ -76,7 +76,7 @@ const graphQuery = `query WorkSource($owner:String!,$name:String!,$number:Int!) 
 }`;
 const searchSchema = z.object({
   total_count: z.number().int().nonnegative(), incomplete_results: z.boolean(),
-  items: z.array(z.object({ html_url: z.url(), number: z.number().int().positive().safe() })).max(50),
+  items: z.array(z.object({ html_url: z.url(), number: z.number().int().positive().safe() })).max(100),
 });
 const observationGraphSchema = z.object({
   data: z.object({ repository: z.object({ pullRequest: z.object({
@@ -140,7 +140,7 @@ export class WorkGitHub {
     if (!githubWorkActionSchema.safeParse(input.data.stream.action).success) throw new ServiceError('unsupported');
     const deadline = new AbortController();
     const combined = AbortSignal.any([signal, deadline.signal]);
-    const timer = setTimeout(() => deadline.abort(new ServiceError('deadline', true, 'read')), LIMITS.refreshMs);
+    const timer = setTimeout(() => deadline.abort(new ServiceError('deadline', true, 'read')), LIMITS.refreshMs + LIMITS.workModelMs);
     try { return await this.read(input.data, combined); }
     finally { clearTimeout(timer); }
   }
@@ -225,18 +225,29 @@ export class WorkGitHub {
     const viewer = parse(z.object({ login: loginSchema }), (await this.api('/user', signal)).body).login;
     // The saved expression is data in a single URL-encoded query value; never a command or shell fragment.
     const query = `${stream.query.replace(/@me\b/g, viewer)} is:open archived:false`;
-    const search = parse(searchSchema, (await this.api(`/search/issues?q=${encodeURIComponent(query)}&per_page=50&page=1`, signal)).body);
     const warnings: string[] = [];
-    if (search.total_count > search.items.length || search.incomplete_results || search.items.length === 50) {
-      warnings.push('GitHub search is capped at 50 matches or incomplete. Missing matches are not completion.');
-    }
     const urls = new Map<string, { ref: Reference; matched: boolean }>();
-    for (const item of search.items) {
-      const url = canonicalGithubUrl(item.html_url);
-      if (!url) throw new ServiceError('invalid_output');
-      const ref = reference(url);
-      if (ref.number !== item.number) throw new ServiceError('invalid_output');
-      urls.set(url, { ref, matched: true });
+    let total = 0;
+    let incomplete = false;
+    for (let page = 1; !input.observeOnly && page <= 2; page++) {
+      const search = parse(searchSchema, (await this.api(
+        `/search/issues?q=${encodeURIComponent(query)}&per_page=100&page=${page}`, signal,
+      )).body);
+      total = Math.max(total, search.total_count);
+      incomplete ||= search.incomplete_results;
+      for (const item of search.items) {
+        const url = canonicalGithubUrl(item.html_url);
+        if (!url) throw new ServiceError('invalid_output');
+        const ref = reference(url);
+        if (ref.number !== item.number) throw new ServiceError('invalid_output');
+        urls.set(url, { ref, matched: true });
+      }
+      if (search.items.length < 100 || page * 100 >= total) break;
+    }
+    if (total > urls.size || incomplete) {
+      warnings.push(urls.size === 200 && total > 200
+        ? 'GitHub search is capped at 200 matches. Missing matches are not completion.'
+        : 'GitHub search returned incomplete results. Missing matches are not completion.');
     }
     for (const raw of input.knownUrls) {
       const url = canonicalGithubUrl(raw);
@@ -291,29 +302,56 @@ export class WorkGitHub {
     const results = await Promise.allSettled(workers);
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
+    type ReplyMessage = Parameters<CopilotService['extractReplies']>[0]['messages'][number];
+    const batches: ReplyMessage[][] = [];
+    const owners = new Map<string, { source: z.infer<typeof sourceSchema>; url: string }>();
+    const bytes = (messages: ReplyMessage[]) => Buffer.byteLength(JSON.stringify({ viewer, query: stream.query, messages }));
+    let batch: ReplyMessage[] = [];
     for (const { source, events, url, ref } of replyInputs) {
       const comments = events.filter(event => event.event === 'commented' && event.body && (event.id ?? event.node_id) && event.created_at);
       if (comments.length > 15 || comments.some(comment => comment.body!.length > 2000)) {
         warnings.push(`${ref.repo}#${ref.number}: reply extraction is limited to 15 comments and 2,000 characters per comment; context may be incomplete.`);
       }
-      const messages = comments
+      const messages = [...new Map(comments
         .slice(-15).map(event => ({
           eventId: identity(ref, event.event, event.id ?? event.node_id!),
           sourceTimestamp: event.created_at!, sourceUrl: event.html_url ?? url, body: event.body!.slice(0, 2000),
-        }));
+        })).map(message => [message.eventId, message])).values()];
       if (!messages.length) {
         warnings.push(`${ref.repo}#${ref.number}: no immutable comment evidence for reply extraction.`);
         continue;
       }
-      const result = await this.copilot.extractReplies({ viewer, query: stream.query, messages }, input.model, signal);
-      warnings.push(...result.warnings);
-      for (const request of result.requests) {
-        if (request.action !== 'reply') continue;
-        candidates.push({
-          title: request.title || source.title, action: 'reply', url,
-          evidence: [{ id: request.eventId, source: 'github', streamId: stream.id,
-            at: request.sourceTimestamp, url: request.sourceUrl, summary: request.summary }],
+      if (bytes(messages) > LIMITS.modelBytes) {
+        warnings.push(`${ref.repo}#${ref.number}: reply context exceeds the model input limit; no reply was inferred.`);
+        continue;
+      }
+      if (batch.length && bytes([...batch, ...messages]) > LIMITS.modelBytes) {
+        batches.push(batch);
+        batch = [];
+      }
+      batch.push(...messages);
+      for (const message of messages) owners.set(message.eventId, { source, url });
+    }
+    if (batch.length) batches.push(batch);
+    for (const messages of batches) {
+      try {
+        const result = await this.copilot.extractReplies({ viewer, query: stream.query, messages }, input.model, signal);
+        const extracted = result.requests.map((request): WorkCandidate => {
+          const owner = owners.get(request.eventId);
+          if (!owner || request.action !== 'reply') throw new ServiceError('copilot_output');
+          return {
+            title: request.title || owner.source.title, action: 'reply', url: owner.url,
+            evidence: [{ id: request.eventId, source: 'github', streamId: stream.id,
+              at: request.sourceTimestamp, url: request.sourceUrl, summary: request.summary }],
+          };
         });
+        candidates.push(...extracted);
+        warnings.push(...result.warnings);
+      } catch (error) {
+        checkAbort(signal);
+        const failure = sanitized(error);
+        if (!['copilot_output', 'limit'].includes(failure.code)) throw error;
+        warnings.push(`Reply extraction failed for ${new Set(messages.map(message => owners.get(message.eventId)!.url)).size} sources: ${failure.message}`);
       }
     }
     const merged = new Map<string, WorkCandidate>();

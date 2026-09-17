@@ -3,6 +3,8 @@ import { WorkGitHub } from '../src/work-github.ts';
 import { defaultWorkState, githubWorkActionSchema, workMetadataSchema, workSettingsSchema, workstreamSchema, type Workstream } from '../src/work-schema.ts';
 import type { Runner } from '../src/process.ts';
 import type { CopilotService } from '../src/copilot.ts';
+import { LIMITS } from '../src/schema.ts';
+import { ServiceError } from '../src/errors.ts';
 
 const at = '2026-09-01T12:00:00Z';
 const requestedAt = '2026-09-10T12:00:00Z';
@@ -63,7 +65,120 @@ function harness(options: {
 const input = (override: Partial<Workstream> = {}) => ({ stream: { ...stream, ...override }, model: '', since: null });
 const signal = () => new AbortController().signal;
 
+function issues(options: {
+  total: number; incomplete?: boolean; overlap?: boolean; body?: string;
+  copilot?: Pick<CopilotService, 'extractReplies'>;
+}) {
+  const pages: number[] = [];
+  const issueUrl = (number: number) => `https://github.com/octo/repo/issues/${number}`;
+  const runner: Runner = async (_, args) => {
+    const path = args.find(arg => arg.startsWith('/'))!;
+    let body: unknown;
+    if (path === '/user') body = { login: 'viewer' };
+    else if (path.startsWith('/search/issues?')) {
+      const params = new URL(`https://api.github.com${path}`).searchParams;
+      expect(params.get('per_page')).toBe('100');
+      const page = Number(params.get('page'));
+      pages.push(page);
+      const start = (page - 1) * 100;
+      body = {
+        total_count: options.total, incomplete_results: options.incomplete ?? false,
+        items: Array.from({ length: Math.min(100, Math.max(0, options.total - start)) }, (_, index) => {
+          const number = options.overlap && page === 2 && index === 0 ? 1 : start + index + 1;
+          return { number, html_url: issueUrl(number) };
+        }),
+      };
+    } else {
+      const match = /^\/repos\/octo\/repo\/issues\/(\d+)(\/timeline\?per_page=100&page=1)?$/.exec(path);
+      if (!match) throw new Error(`Unexpected path: ${path}`);
+      const number = Number(match[1]);
+      body = match[2] ? [{
+        id: number, event: 'commented', created_at: requestedAt,
+        html_url: `${issueUrl(number)}#issuecomment-${number}`, body: options.body ?? '@viewer please clarify.',
+      }] : { id: number, number, title: `Issue ${number}`, state: 'open', created_at: at };
+    }
+    return { code: 0, stdout: `HTTP/2 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(body)}` };
+  };
+  return { pages, issueUrl, service: new WorkGitHub({ runner, resolve: async () => '/synthetic/gh', copilot: options.copilot }) };
+}
+
 describe('saved GitHub workstream reads', () => {
+  test.each([0, 50, 51, 92, 100, 101, 200, 201, 400])('collects up to 200 of %i issues without false cap warnings', async total => {
+    const { service, pages, issueUrl } = issues({ total });
+    const result = await service.collect(input({ action: 'implement', query: 'repo:octo/repo is:issue no:assignee' }), signal());
+    const count = Math.min(total, 200);
+    expect(result.candidates.map(candidate => candidate.url).sort()).toEqual(
+      Array.from({ length: count }, (_, index) => issueUrl(index + 1)).sort(),
+    );
+    expect(result.observations).toHaveLength(count);
+    expect(pages).toEqual(total > 100 ? [1, 2] : [1]);
+    expect(result.warnings).toEqual(total > 200
+      ? ['GitHub search is capped at 200 matches. Missing matches are not completion.'] : []);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(LIMITS.responseBytes);
+  });
+  test('overlapping pages dedupe candidates and incomplete search results stay visible', async () => {
+    for (const options of [{ total: 150, overlap: true }, { total: 92, incomplete: true }]) {
+      const result = await issues(options).service.collect(input({ action: 'implement' }), signal());
+      expect(result.candidates).toHaveLength(options.overlap ? 149 : 92);
+      expect(new Set(result.candidates.map(candidate => candidate.url)).size).toBe(result.candidates.length);
+      expect(result.warnings.join(' ')).toContain('incomplete results');
+    }
+  });
+  test('200 matches retain another 100 tracked observations outside the query', async () => {
+    const { service, issueUrl } = issues({ total: 200 });
+    const result = await service.collect({
+      ...input({ action: 'implement' }),
+      knownUrls: Array.from({ length: 100 }, (_, index) => issueUrl(index + 201)),
+    }, signal());
+    expect(result.candidates).toHaveLength(200);
+    expect(result.observations).toHaveLength(300);
+    expect(result.observations.some(observation => observation.url === issueUrl(300))).toBe(true);
+    expect(result.warnings).toEqual([]);
+  });
+  test('37 reply sources share one model call and retain their own source identities', async () => {
+    let calls = 0;
+    const { service, issueUrl } = issues({ total: 37, copilot: {
+      extractReplies: async data => {
+        calls++;
+        expect(data.messages).toHaveLength(37);
+        return { requests: [...data.messages].reverse().map(message => ({
+          ...message, title: `Reply ${message.eventId}`, summary: 'An explicit question.', action: 'reply', targetUrl: null,
+        })), warnings: [] };
+      },
+    } });
+    const result = await service.collect(input({ action: 'reply', query: 'is:issue mentions:@me' }), signal());
+    expect(calls).toBe(1);
+    expect(result.candidates).toHaveLength(37);
+    for (let number = 1; number <= 37; number++) {
+      expect(result.candidates.find(candidate => candidate.url === issueUrl(number))!.evidence[0]).toMatchObject({
+        id: `github:octo/repo:${number}:commented:${number}`,
+        at: requestedAt, url: `${issueUrl(number)}#issuecomment-${number}`,
+      });
+    }
+    expect(result.warnings).toEqual([]);
+  });
+  test('reply batches respect UTF-8 byte limits and a rejected batch does not discard other discoveries', async () => {
+    const seen: string[] = [];
+    let calls = 0;
+    const { service } = issues({ total: 37, body: '界'.repeat(1900), copilot: {
+      extractReplies: async data => {
+        expect(Buffer.byteLength(JSON.stringify(data))).toBeLessThanOrEqual(LIMITS.modelBytes);
+        seen.push(...data.messages.map(message => message.eventId));
+        if (++calls === 1) throw new ServiceError('copilot_output');
+        return { requests: data.messages.map(message => ({
+          ...message, title: 'Reply to the question', summary: 'A question.', action: 'reply', targetUrl: null,
+        })), warnings: [] };
+      },
+    } });
+    const result = await service.collect(input({ action: 'reply' }), signal());
+    expect(calls).toBeGreaterThan(1);
+    expect(calls).toBeLessThan(10);
+    expect(new Set(seen).size).toBe(37);
+    expect(result.candidates.length).toBeGreaterThan(0);
+    expect(result.candidates.length).toBeLessThan(37);
+    expect(result.observations).toHaveLength(37);
+    expect(result.warnings.join(' ')).toContain('Reply extraction failed');
+  });
   test('unsupported GitHub review-result action fails explicitly before any source request', async () => {
     const { service, calls } = harness();
     await expect(service.collect(input({ action: 'review-result' }), signal()))
@@ -190,7 +305,7 @@ describe('saved GitHub workstream reads', () => {
   });
   test('search and history caps remain explicit; authentication fails rather than empty success', async () => {
     const result = await harness({ total: 400, lastPage: 5 }).service.collect(input(), signal());
-    expect(result.warnings.join(' ')).toContain('capped at 50');
+    expect(result.warnings.join(' ')).toContain('incomplete results');
     expect(result.warnings.join(' ')).toContain('timeline is capped');
     await expect(harness({ failAuth: true }).service.collect(input(), signal())).rejects.toMatchObject({ dto: { code: 'authentication' } });
   });

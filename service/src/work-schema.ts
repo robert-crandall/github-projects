@@ -64,6 +64,7 @@ export const workCollectInputSchema = z.strictObject({
   stream: workstreamSchema, model: z.string().max(100),
   since: time.nullable(),
   knownUrls: z.array(url).max(100).default([]),
+  observeOnly: z.boolean().default(false),
 });
 export const workCollectOutputSchema = z.strictObject({
   candidates: z.array(workCandidateSchema).max(200),

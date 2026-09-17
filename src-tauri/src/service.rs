@@ -18,7 +18,16 @@ use std::{
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(150);
+const WORK_TIMEOUT: Duration = Duration::from_secs(330);
 type Pending = Arc<Mutex<HashMap<String, SyncSender<Result<Value>>>>>;
+
+fn request_timeout(op: &str) -> Duration {
+    if matches!(op, "work.collect" | "work.rank") {
+        WORK_TIMEOUT
+    } else {
+        TIMEOUT
+    }
+}
 
 pub struct ServiceHost {
     binary: PathBuf,
@@ -131,7 +140,9 @@ impl ServiceHost {
     }
 
     pub fn request(&self, request: Value) -> Result<Value> {
-        self.request_with_timeout(request, TIMEOUT)
+        let (_, op) = validate_request(&request)?;
+        let timeout = request_timeout(op);
+        self.request_with_timeout(request, timeout)
     }
 
     fn request_with_timeout(&self, request: Value, timeout: Duration) -> Result<Value> {
@@ -378,6 +389,21 @@ impl ServiceProcess {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn work_timeouts_leave_room_for_collection_and_model_cleanup() {
+        for op in ["work.collect", "work.rank"] {
+            assert_eq!(request_timeout(op), Duration::from_secs(330));
+        }
+        for op in [
+            "github.refresh",
+            "github.waiting",
+            "github.acknowledge",
+            "copilot.triage",
+        ] {
+            assert_eq!(request_timeout(op), Duration::from_secs(150));
+        }
+    }
 
     #[test]
     fn rejects_unknown_operations_and_malformed_envelopes() {

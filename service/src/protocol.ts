@@ -82,7 +82,9 @@ export async function serve(
     }
     if (active.size >= LIMITS.concurrent) { fail(request.id, new ServiceError('busy', true)); return; }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new ServiceError('deadline', true)), options.deadlineMs ?? LIMITS.deadlineMs);
+    const workRead = request.op === 'work.collect' || request.op === 'work.rank';
+    const timer = setTimeout(() => controller.abort(new ServiceError('deadline', true, workRead ? 'read' : 'general')),
+      options.deadlineMs ?? (workRead ? LIMITS.workDeadlineMs : LIMITS.deadlineMs));
     const finished = (async () => {
       try {
         const value = await handler(request, controller.signal);
@@ -91,6 +93,9 @@ export async function serve(
         if (!result.success) throw new ServiceError('invalid_output');
         emit({ v: 1, id: request.id, ok: true, result: result.data });
       } catch (error) {
+        if (workRead && error instanceof ServiceError && ['deadline', 'cancelled'].includes(error.dto.code)) {
+          error = new ServiceError(error.dto.code, error.dto.retryable, 'read');
+        }
         options.onDiagnostic?.(sanitized(error).code);
         fail(request.id, error);
       } finally {
