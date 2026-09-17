@@ -22,6 +22,12 @@ h3 { font-size: 13px; font-weight: 600; line-height: 1.5; }
 p { line-height: 1.65; }
 .muted, .field-help { color: var(--muted); }
 .field-help { display: block; font-size: 12px; line-height: 1.6; margin-top: 7px; }
+.appearance p { color: var(--secondary); margin: 12px 0; }
+.appearance-fields { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 18px; }
+.appearance-fields select { min-width: 0; }
+.appearance-error { padding: 14px 20px; background: var(--subtle); color: var(--danger); }
+.appearance-error button { margin-top: 8px; }
+@media (max-width: 540px) { .appearance-fields { grid-template-columns: minmax(0, 1fr); } }
 .primary, .secondary { min-height: 33px; padding: 7px 12px; font-weight: 500; }
 .primary { background: var(--primary); color: var(--on-primary); border-color: var(--primary-border); }
 .primary:not(:disabled):hover { background: var(--primary-hover); }

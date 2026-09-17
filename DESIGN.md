@@ -1,6 +1,6 @@
 ---
 name: "GitHub Projects"
-description: "A GitHub-dark ranked task list, with source evidence and owner-defined priorities."
+description: "A themeable ranked task list, with source evidence and owner-defined priorities."
 ---
 
 # Design System: GitHub Projects
@@ -9,7 +9,7 @@ description: "A GitHub-dark ranked task list, with source evidence and owner-def
 
 **One primary thing. Calm surface.**
 
-Preserve the incumbent GitHub-dark palette and native system typography. No new visual world, theme workshop, decorative typography, or greenfield replacement.
+Preserve the incumbent layout and native system typography. GitHub dark remains the default; Appearance offers the Copilot App catalog with Light, Dark and System modes. No decorative typography or greenfield replacement.
 
 [PRODUCT.md](PRODUCT.md) owns behavior. The [Design System](docs/Design%20System.md) and [Cognitive Interface Model](docs/Cognitive%20Interface%20Model.md) provide reusable interaction constraints.
 
@@ -17,11 +17,11 @@ Preserve the incumbent GitHub-dark palette and native system typography. No new 
 
 The primary desktop surface is one numbered task list. Rank is meaningful sequence, not decoration. Keep task titles and priority reasons visible together, with a direct Done control on every active row. Do not divide the active list into competing source inboxes or priority buckets.
 
-Use the incumbent GitHub-dark palette, system typography and restrained borders. A compact top bar contains Add task, Run now and Sources and priorities. To do, Done and No action now switch task state, not source. The last ranking time and cadence remain visible without dominating the list.
+Use the selected semantic palette, system typography and restrained borders. A compact top bar contains Add task, Run now and Sources and priorities. To do, Done and No action now switch task state, not source. The last ranking time and cadence remain visible without dominating the list.
 
 Task details open beside the list at wide widths. Narrow windows show details with an explicit close control returning to the list. Source evidence wraps rather than clipping; links open only by explicit action. Unranked tasks and unknown source states are labeled, not presented as model-ranked certainty.
 
-Sources and priorities is a full settings page, not a large modal. Separate instructions, source queries, the opt-in schedule, connection guidance and recovery. Manual capture uses a small focused dialog and Command/Ctrl+K. Local edits stay available during collection and ranking.
+Sources and priorities is a full settings page, not a large modal. Separate appearance, instructions, source queries, the opt-in schedule, connection guidance and recovery. Appearance applies and saves immediately, independently of the work-settings form. Manual capture uses a small focused dialog and Command/Ctrl+K. Local edits stay available during collection and ranking.
 
 Keep the old conversation reader reachable as saved reference material. It does not define the primary task interface.
 
@@ -47,7 +47,7 @@ Use rows and hairline dividers, not a wall of cards. Long titles and destination
 
 ## Palette and type
 
-Use semantic tokens from `src/theme.css`; [theme.md](docs/theme.md) records their source. Large surfaces stay neutral. Color accompanies labels and icons, never replacing them.
+Use semantic tokens from `src/themes/catalog.json`, applied to the document root; `src/theme.css` preserves the GitHub-dark startup fallback. [theme.md](docs/theme.md) records their source. Colors change without changing layout. Color accompanies labels and icons, never replacing them.
 
 Use the native system sans stack. No webfonts. Page headings, reader titles, row text and metadata supply a small hierarchy. Keep supporting text legible, focus visible and controls readable at rest.
 

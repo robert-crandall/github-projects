@@ -1,3 +1,4 @@
+mod appearance;
 mod conversation;
 mod error;
 mod launch;
@@ -6,6 +7,7 @@ mod service;
 mod smoke;
 mod storage;
 
+use appearance::{AppearanceMode, AppearancePreferences, AppearanceStore, AppearanceTone};
 use conversation::{ConversationCache, ConversationPage, ConversationReference, ConversationStore};
 use error::{NativeError, Result};
 use launch::{GitHubIdentity, LaunchResult};
@@ -94,6 +96,48 @@ async fn with_store<T: Send + 'static>(
 #[tauri::command]
 async fn workspace_read(state: State<'_, NativeState>) -> Result<WorkspaceRead> {
     with_store(state, |store| store.read()).await
+}
+
+async fn with_appearance<T: Send + 'static>(
+    state: State<'_, Arc<Mutex<AppearanceStore>>>,
+    operation: impl FnOnce(&AppearanceStore) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let store = state.inner().clone();
+    background(move || {
+        let store = store.lock().map_err(|_| {
+            NativeError::new(
+                "native-worker-failed",
+                "The appearance worker stopped unexpectedly. Restart before saving preferences.",
+            )
+        })?;
+        operation(&store)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn appearance_read(
+    state: State<'_, Arc<Mutex<AppearanceStore>>>,
+) -> Result<Option<AppearancePreferences>> {
+    with_appearance(state, AppearanceStore::read).await
+}
+
+#[tauri::command]
+async fn appearance_save(
+    state: State<'_, Arc<Mutex<AppearanceStore>>>,
+    preferences: AppearancePreferences,
+) -> Result<()> {
+    with_appearance(state, move |store| store.save(preferences)).await
+}
+
+#[tauri::command]
+fn appearance_apply(
+    app: tauri::AppHandle,
+    tone: AppearanceTone,
+    background: String,
+    mode: AppearanceMode,
+) -> Result<()> {
+    appearance::apply(&app, tone, &background, mode)
 }
 
 #[tauri::command]
@@ -263,6 +307,9 @@ fn install_lifecycle(
     runtime_directory: std::path::PathBuf,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     app.manage(NativeState::new(store));
+    app.manage(Arc::new(Mutex::new(AppearanceStore::new(
+        runtime_directory.clone(),
+    ))));
     app.manage(Arc::new(Mutex::new(ConversationStore::new(
         runtime_directory.clone(),
     ))));
@@ -423,6 +470,9 @@ pub fn run() {
     let setup_failed = smoke_failed.clone();
     let exit_code = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            appearance_read,
+            appearance_save,
+            appearance_apply,
             workspace_read,
             workspace_save,
             workspace_storage_status,

@@ -1,42 +1,41 @@
-# Theme direction: GitHub and Fox
+# Theme support
 
-The browser prototype uses **GitHub dark**. I chose that default to proceed with the build; it is not a user-confirmed preference over Fox.
+**Sources and priorities → Appearance** offers all 57 named themes in the Copilot App catalog inspected on September 17, 2026. GitHub and Fox are included. The reference workspace and browser prototype have an **Appearance** sidebar control.
 
-The values are verified against Copilot App's bundled **Primer 11.10.0** semantic tokens. The [public Primer package](https://www.npmjs.com/package/@primer/primitives/v/11.10.0) supplies the underlying palette. These are UI colors, not a terminal palette or a guessed GitHub look.
+Theme and color mode are independent. **Light** and **Dark** select that palette; **System** follows the operating system while the app is open. A theme with only one palette uses its available palette and labels that limitation. GitHub dark remains the default for existing behavior.
 
-Exact parity with the user's installed app release is not established. The prototype implements a small semantic projection, not Copilot App's components.
+Changes apply immediately, without submitting or discarding unsaved source settings. The task list, details, dialogs, reader, inputs, selection colors and native window appearance use the same selection. The saved palette is applied before React mounts.
 
-## Implemented palette
+## Palette sources
 
-[`src/theme.css`](../src/theme.css) is the implementation authority.
+[`src/themes/catalog.json`](../src/themes/catalog.json) is a generated, compact projection of Copilot App's named themes into this app's semantic roles. It contains colors, not Copilot App components or runtime code.
 
-| Role | GitHub dark |
-| --- | --- |
-| Workspace / input | `#0d1117` |
-| Sidebar / subtle surface | `#151b23` |
-| Control / hover | `#212830` / `#262c36` |
-| Primary / secondary text | `#f0f6fc` / `#9198a1` |
-| Default / muted border | `#3d444d` / `#3d444db3` |
-| Emphasized control boundary | `#656c76` |
-| Link / focus | `#4493f8` |
-| Primary action / foreground | `#1f6feb` / `#ffffff` |
-| Selected row background | `#388bfd1a` |
-| Text selection / foreground | `#1f6feb` / `#ffffff` |
-| Success / warning / error text | `#3fb950` / `#d29922` / `#f85149` |
+- **GitHub:** [Primer primitives 11.10.0](https://www.npmjs.com/package/@primer/primitives/v/11.10.0) light and dark semantic tokens. The dark projection preserves every existing value in `src/theme.css`, including alpha values.
+- **Other themes:** the catalog's background, foreground and ANSI seeds, with Copilot App's default 12-step Lab/ease-in-out ramps and 18% blue tint for neutral controls, generated using [Rampa SDK 5.0.0](https://www.npmjs.com/package/@basiclines/rampa-sdk/v/5.0.0).
 
-Preserve alpha in the muted border and selected-row values. Do not substitute an opaque approximation.
+This is not pixel-for-pixel parity with every Copilot App surface. The projection uses this app's controls and roles. External palettes adjust low-contrast foregrounds and control surfaces to keep text at 4.5:1 and input boundaries at 3:1. GitHub light slightly darkens warning and success text on selected surfaces; GitHub dark preserves the incumbent palette, including its existing lower-contrast danger controls. Primary actions keep a stable background on hover; external-theme text selection uses the readable foreground over the theme background in reverse. Copilot App's dim, high-contrast and colorblind variants are not included.
 
-## Fox remains a preferred alternative
+Regenerate from a local Copilot App checkout:
 
-The user also likes Fox in Copilot App. Its app catalog and generated color roles were located during research, but this prototype does not implement a theme switcher or claim to render Fox.
+```bash
+bun run themes:import ~/repos/copilot-app/src/lib/themes/themes.json
+```
 
-A later Fox option should use those actual app roles, not an unrelated similarly named theme. Light, high-contrast, and other variants are not part of this first browser prototype.
+The importer validates its source and uses pinned development dependencies. Normal builds and the installed app need neither that checkout nor a color-generation engine. Review the generated catalog diff when importing a later catalog.
+
+## Persistence and recovery
+
+Desktop preferences live in `appearance.json` inside the app data directory. Native writes are atomic and serialized; the desktop never reads browser storage. The browser prototype stores preferences under `github-projects:appearance:v1` in its own local storage.
+
+Preferences stay separate from workspace snapshots, task settings, credentials, source collection and backups. Theme changes never contact GitHub or Copilot.
+
+An unreadable preference or an unavailable theme leaves the app usable in GitHub dark and shows an error without overwriting the original selection. **Retry appearance** rereads it. Selecting a theme explicitly replaces it. Failed writes leave the new theme visible but explicitly unsaved, with a retry. Native appearance errors are reported separately from persistence errors.
 
 ## Invariants
 
-- No Dusk tokens, lavender/fern fallback, or invented named-theme values.
-- Theme roles stay independent of layout, stored commitments, and source activity.
-- Check contrast on rendered foreground/background pairings, including alpha surfaces.
-- Labels, icons, and structure accompany color. Focus remains visible without changing geometry.
-
-[`PRODUCT.md`](../PRODUCT.md) owns behavior. [`DESIGN.md`](../DESIGN.md) and the [Design System](Design%20System.md) own composition and accessibility constraints. Old CSS and generated sidecars remain historical, not fallback sources.
+- Use semantic roles rather than hardcoded component colors.
+- Apply the saved choice before rendering app content.
+- System changes must not rewrite the saved preference or pin the native window to an explicit mode.
+- A slow save must never overwrite a newer selection.
+- Keep focus visible, native controls readable, and layouts unchanged across themes.
+- Labels and icons accompany status colors.
