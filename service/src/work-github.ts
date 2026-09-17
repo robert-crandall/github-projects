@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { CopilotService } from './copilot.ts';
+import { CopilotService, type GitHubRequestContext } from './copilot.ts';
 import { checkAbort, sanitized, ServiceError } from './errors.ts';
-import { pageLink, parse, parseResponse, pullRequestStateQuery, requireStatus, type ApiResponse } from './github.ts';
+import { pageLink, parse, parseResponse, pullRequestStateQuery, requireStatus, sourceReference, type ApiResponse } from './github.ts';
 import { executable, run, type Runner } from './process.ts';
-import { LIMITS, loginSchema, referenceSchema, type Reference } from './schema.ts';
+import { LIMITS, loginSchema, referenceSchema, repoSchema, threadIdSchema, type Reference } from './schema.ts';
 import { canonicalGithubUrl } from './work-mcp.ts';
 import {
-  githubWorkActionSchema, workCollectInputSchema, workCollectOutputSchema,
+  githubWorkActionSchema, isGitHubStream, workCollectInputSchema, workCollectOutputSchema,
   type WorkCandidate, type WorkCollection, type WorkEvidence, type WorkObservation, type Workstream,
 } from './work-schema.ts';
 
@@ -18,6 +18,7 @@ const sourceSchema = z.object({
   id: z.number().int().positive().safe(), number: z.number().int().positive().safe(),
   title: z.string().min(1).max(1000), body: z.string().nullable().optional(),
   state: z.enum(['open', 'closed']), created_at: time,
+  user: actor.nullable().optional(),
   merged: z.boolean().optional(), draft: z.boolean().optional(),
   requested_reviewers: z.array(actor).max(100).optional(),
   requested_teams: z.array(team).max(100).optional(),
@@ -35,6 +36,21 @@ const eventSchema = z.object({
   body: z.string().nullable().optional(), html_url: z.url().optional(),
 });
 type Event = z.infer<typeof eventSchema>;
+type Source = z.infer<typeof sourceSchema>;
+type Notification = NonNullable<WorkCandidate['notification']>;
+type Target = { ref: Reference; matched: boolean; notification?: Notification };
+const notificationSourceLimit = Math.floor(200 / githubWorkActionSchema.options.length);
+const notificationWindowProbes = 32;
+const notificationSchema = z.object({
+  id: threadIdSchema, repository: z.object({ full_name: repoSchema, archived: z.boolean() }),
+  subject: z.object({ type: z.string().max(100), url: z.string().nullable(), title: z.string() }),
+  reason: z.string().max(100), unread: z.boolean(), updated_at: time, last_read_at: time.nullable(),
+});
+const discussionSchema = z.object({
+  id: z.number().int().positive().safe(), user: actor.nullable(), body: z.string().nullable(),
+  created_at: time.optional(), submitted_at: time.nullable().optional(), state: z.string().optional(),
+  html_url: z.url().optional(),
+});
 const checkSchema = z.discriminatedUnion('__typename', [
   z.object({
     __typename: z.literal('CheckRun'), id: z.string().min(1), name: z.string(),
@@ -109,9 +125,10 @@ export class WorkGitHub {
   private readonly runner: Runner;
   private readonly resolve: typeof executable;
   private readonly now: () => Date;
-  private readonly copilot: Pick<CopilotService, 'extractReplies'>;
+  private readonly copilot: Pick<CopilotService, 'extractReplies'> & Partial<Pick<CopilotService, 'extractGitHubRequests'>>;
   constructor(options: {
-    runner?: Runner; resolve?: typeof executable; now?: () => Date; copilot?: Pick<CopilotService, 'extractReplies'>;
+    runner?: Runner; resolve?: typeof executable; now?: () => Date;
+    copilot?: Pick<CopilotService, 'extractReplies'> & Partial<Pick<CopilotService, 'extractGitHubRequests'>>;
   } = {}) {
     this.runner = options.runner ?? run;
     this.resolve = options.resolve ?? executable;
@@ -136,7 +153,7 @@ export class WorkGitHub {
   }
   async collect(raw: z.input<typeof workCollectInputSchema>, signal: AbortSignal): Promise<WorkCollection> {
     const input = workCollectInputSchema.safeParse(raw);
-    if (!input.success || input.data.stream.kind !== 'github') throw new ServiceError('invalid_input');
+    if (!input.success || !isGitHubStream(input.data.stream)) throw new ServiceError('invalid_input');
     if (!githubWorkActionSchema.safeParse(input.data.stream.action).success) throw new ServiceError('unsupported');
     const deadline = new AbortController();
     const combined = AbortSignal.any([signal, deadline.signal]);
@@ -198,13 +215,16 @@ export class WorkGitHub {
       return observations;
     } finally { clearTimeout(timer); }
   }
-  private async timeline(ref: Reference, signal: AbortSignal, warnings: string[]): Promise<Event[]> {
+  private async timeline(ref: Reference, signal: AbortSignal, warnings: string[], coverageInfo = warnings): Promise<Event[]> {
     const path = `/repos/${ref.repo}/issues/${ref.number}/timeline`;
     const first = await this.api(`${path}?per_page=100&page=1`, signal);
     const last = pageLink(first, 'last', path) ?? 1;
     const pages = [first];
     if (last > 1) pages.push(await this.api(`${path}?per_page=100&page=${last}`, signal));
-    if (last > 2) warnings.push(`${ref.repo}#${ref.number}: timeline is capped to first and latest pages; missing evidence is not completion.`);
+    if (last > 2) coverageInfo.push(`${ref.repo}#${ref.number}: timeline is capped to first and latest pages; missing evidence is not completion.`);
+    if (last === 1 && pageLink(first, 'next', path)) {
+      coverageInfo.push(`${ref.repo}#${ref.number}: timeline is capped because GitHub omitted its last page link; context may be incomplete.`);
+    }
     const events: Event[] = [];
     let malformed = false;
     for (const response of pages) {
@@ -217,6 +237,207 @@ export class WorkGitHub {
     if (malformed) warnings.push(`${ref.repo}#${ref.number}: some source events could not be validated.`);
     return events.sort((a, b) => (a.created_at ?? a.submitted_at ?? '').localeCompare(b.created_at ?? b.submitted_at ?? ''));
   }
+  private async notifications(since: string | null, collectedAt: string, signal: AbortSignal): Promise<{
+    urls: Map<string, Target>; warnings: string[]; coverageInfo: string[]; coveredThrough?: string;
+  }> {
+    const scanStart = Date.parse(collectedAt);
+    const lower = since ? Date.parse(since) : scanStart - 30 * 86_400_000;
+    if (lower >= scanStart) throw new ServiceError('invalid_input');
+    const lowerSecond = Math.floor(lower / 1000);
+    const boundary = new Date((lowerSecond - 1) * 1000).toISOString();
+    const fullUpperSecond = Math.floor(scanStart / 1000) + 1;
+    let upperSecond = fullUpperSecond;
+    for (let probe = 0; probe < notificationWindowProbes; probe++) {
+      const before = new Date(upperSecond * 1000).toISOString();
+      // Only accept a complete first page. Offset pagination can skip unchanged rows
+      // when other notifications are deleted or updated between requests.
+      const response = await this.api(`/notifications?all=true&per_page=50&page=1&since=${encodeURIComponent(boundary)}&before=${encodeURIComponent(before)}`, signal);
+      const rows = parse(z.array(z.unknown()).max(50), response.body);
+      const urls = new Map<string, Target>();
+      const warnings: string[] = [];
+      const coverageInfo: string[] = [];
+      for (const raw of rows) {
+        const parsed = notificationSchema.safeParse(raw);
+        if (!parsed.success) { warnings.push('A GitHub notification could not be validated; notification coverage is incomplete.'); continue; }
+        const notification = parsed.data;
+        const updated = Date.parse(notification.updated_at);
+        if (updated <= (lowerSecond - 1) * 1000 || updated >= upperSecond * 1000) continue;
+        if (notification.repository.archived) {
+          coverageInfo.push('Archived repositories are excluded from notification discovery.');
+          continue;
+        }
+        if (!['PullRequest', 'Issue'].includes(notification.subject.type)) {
+          coverageInfo.push(`Unsupported GitHub notification subject type ${notification.subject.type} is excluded; no work was inferred.`);
+          continue;
+        }
+        try {
+          const source = sourceReference(notification);
+          const url = `https://github.com/${source.repo.toLowerCase()}/${source.kind === 'pr' ? 'pull' : 'issues'}/${source.number}`;
+          const ref = reference(url);
+          const existing = urls.get(url);
+          if (!existing?.notification || Date.parse(notification.updated_at) > Date.parse(existing.notification.updatedAt)) {
+            urls.set(url, { ref, matched: true, notification: {
+              threadId: notification.id, reference: ref, updatedAt: notification.updated_at,
+            } });
+          }
+        } catch {
+          warnings.push(`Notification ${notification.id}: invalid GitHub subject identity; no source URL was followed.`);
+        }
+      }
+      const next = pageLink(response, 'next', '/notifications');
+      if (next && next !== 2) throw new ServiceError('invalid_output');
+      if (!next && urls.size <= notificationSourceLimit) {
+        const coveredThrough = upperSecond < fullUpperSecond ? before : undefined;
+        if (coveredThrough) coverageInfo.unshift(
+          `Processed notification history before ${coveredThrough}; more history remains through ${collectedAt}. The next run resumes from this boundary.`,
+        );
+        return { urls, warnings, coverageInfo, ...(coveredThrough ? { coveredThrough } : {}) };
+      }
+      const midpoint = Math.floor((lowerSecond + upperSecond) / 2);
+      if (midpoint * 1000 <= lower || midpoint * 1000 > scanStart) {
+        return {
+          urls: new Map(), coverageInfo: [], warnings: [
+            `Notification history cannot safely split this timestamp bucket: more than ${notificationSourceLimit} sources or 50 notifications. No sources were skipped; the history cursor must not advance.`,
+          ],
+        };
+      }
+      upperSecond = midpoint;
+    }
+    return { urls: new Map(), coverageInfo: [], warnings: [
+      `Notification history reached its ${notificationWindowProbes}-probe limit; no sources were skipped and the history cursor must not advance.`,
+    ] };
+  }
+  private async memberTeams(signal: AbortSignal, warnings: string[], coverageInfo: string[]) {
+    const teams = new Set<string>();
+    try {
+      for (let page = 1; page <= 2; page++) {
+        const response = await this.api(`/user/teams?per_page=100&page=${page}`, signal);
+        const rows = parse(z.array(team.extend({ organization: z.object({ login: loginSchema }) })).max(100), response.body);
+        rows.forEach(value => teams.add(`${value.organization.login}/${value.slug}`.toLowerCase()));
+        const next = pageLink(response, 'next', '/user/teams');
+        if (!next) return teams;
+        if (next !== page + 1) throw new ServiceError('invalid_output');
+      }
+      coverageInfo.push('GitHub team membership is capped at 200 teams; unconfirmed team requests were not inferred.');
+    } catch (error) {
+      checkAbort(signal);
+      const failure = sanitized(error);
+      if (['authentication', 'rate_limit'].includes(failure.code)) throw error;
+      warnings.push(`GitHub team membership could not be fully read: ${failure.message}`);
+    }
+    return teams;
+  }
+  private async discussions(ref: Reference, signal: AbortSignal, warnings: string[], coverageInfo: string[]): Promise<Event[]> {
+    if (ref.kind !== 'pr') return [];
+    const events: Event[] = [];
+    for (const kind of ['reviews', 'comments'] as const) {
+      const path = `/repos/${ref.repo}/pulls/${ref.number}/${kind}`;
+      const first = await this.api(`${path}?per_page=100&page=1`, signal);
+      const last = pageLink(first, 'last', path) ?? 1;
+      const pages = [first];
+      if (last > 1) pages.push(await this.api(`${path}?per_page=100&page=${last}`, signal));
+      if (last > 2 || (last === 1 && pageLink(first, 'next', path))) {
+        coverageInfo.push(`${ref.repo}#${ref.number}: ${kind} are capped to first and latest pages; context may be incomplete.`);
+      }
+      for (const response of pages) {
+        for (const raw of parse(z.array(z.unknown()).max(100), response.body)) {
+          const parsed = discussionSchema.safeParse(raw);
+          if (!parsed.success) { warnings.push(`${ref.repo}#${ref.number}: a ${kind} record could not be validated.`); continue; }
+          if (kind === 'reviews' && (!parsed.data.submitted_at || parsed.data.state === 'PENDING')) continue;
+          events.push({ ...parsed.data, event: kind === 'reviews' ? 'reviewed' : 'review_comment' });
+        }
+      }
+    }
+    return events;
+  }
+  private requestContext(source: Source, events: Event[], url: string, ref: Reference, coverageInfo: string[], graph?: Graph): GitHubRequestContext {
+    const messages: GitHubRequestContext['messages'] = [{
+      eventId: identity(ref, 'created', source.id), sourceTimestamp: source.created_at, sourceUrl: url,
+      author: source.user?.login ?? null, kind: 'description', body: (source.body ?? '').slice(0, 8000),
+    }];
+    const comments = [...new Map(events.filter(event =>
+      ['commented', 'reviewed', 'review_comment'].includes(event.event) && (event.body || event.event === 'reviewed' && event.state)
+      && (event.id ?? event.node_id) && (event.created_at ?? event.submitted_at),
+    ).map(event => [identity(ref, event.event, event.id ?? event.node_id!), event])).values()]
+      .sort((a, b) => (a.created_at ?? a.submitted_at!).localeCompare(b.created_at ?? b.submitted_at!));
+    if ((source.body?.length ?? 0) > 8000 || comments.length > 30 || comments.some(event => (event.body?.length ?? 0) > 2000)) {
+      coverageInfo.push(`${ref.repo}#${ref.number}: request context is capped to an 8,000-character description and 30 recent 2,000-character messages; context may be incomplete.`);
+    }
+    if (!source.user || comments.some(event => !event.user && !event.actor)) {
+      coverageInfo.push(`${ref.repo}#${ref.number}: some request authors are unavailable; requests with unknown authors were not inferred.`);
+    }
+    for (const event of comments.slice(-30)) {
+      const eventId = event.id ?? event.node_id!;
+      // Construct permalinks from validated source IDs, never follow source-supplied links.
+      const anchor = typeof event.id === 'number'
+        ? `${event.event === 'commented' ? 'issuecomment' : event.event === 'reviewed' ? 'pullrequestreview' : 'discussion_r'}${event.event === 'review_comment' ? '' : '-'}${event.id}` : '';
+      messages.push({
+        eventId: identity(ref, event.event, eventId), sourceTimestamp: event.created_at ?? event.submitted_at!,
+        sourceUrl: anchor ? `${url}#${anchor}` : url, author: event.user?.login ?? event.actor?.login ?? null,
+        kind: event.event, body: (event.body ?? '').slice(0, 2000), ...(event.state ? { state: event.state } : {}),
+      });
+    }
+    return {
+      url, title: source.title, author: source.user?.login ?? null,
+      reviewDecision: graph?.reviewDecision ?? null, draft: source.draft ?? graph?.isDraft ?? false,
+      assignees: (source.assignees ?? []).map(user => user.login),
+      reviewRecipients: [
+        ...(source.requested_reviewers ?? []).map(user => user.login),
+        ...(source.requested_teams ?? []).map(team => `${ref.repo.split('/')[0]}/${team.slug}`),
+      ], messages,
+    };
+  }
+  private async extractRequests(
+    contexts: GitHubRequestContext[], viewer: string, teams: string[], input: z.infer<typeof workCollectInputSchema>,
+    signal: AbortSignal, warnings: string[], coverageInfo: string[],
+  ): Promise<WorkCandidate[]> {
+    const candidates: WorkCandidate[] = [];
+    const batches: GitHubRequestContext[][] = [];
+    const bytes = (sources: GitHubRequestContext[]) => Buffer.byteLength(JSON.stringify({ viewer, teams, sources }));
+    let batch: GitHubRequestContext[] = [];
+    for (const source of contexts) {
+      if (!source.messages.some(message => (message.body || message.kind === 'description' && source.title)
+        && message.author && !same(message.author, viewer))) continue;
+      if (bytes([source]) > LIMITS.workModelBytes) {
+        coverageInfo.push(`${source.url}: request context exceeds model input limit; no request was inferred.`);
+        continue;
+      }
+      if (batch.length && bytes([...batch, source]) > LIMITS.workModelBytes) { batches.push(batch); batch = []; }
+      batch.push(source);
+    }
+    if (batch.length) batches.push(batch);
+    for (const sources of batches) {
+      const messages = new Map(sources.flatMap(source => source.messages.map(message => [message.eventId, { source, message }] as const)));
+      try {
+        if (!this.copilot.extractGitHubRequests) throw new ServiceError('copilot_unavailable');
+        const result = await this.copilot.extractGitHubRequests({ viewer, teams, sources }, input.model, signal);
+        const extracted = result.requests.map((request): WorkCandidate => {
+          const original = messages.get(request.eventId);
+          if (!original || !githubWorkActionSchema.safeParse(request.action).success
+            || !original.message.author || same(original.message.author, viewer)
+            || (!original.message.body.trim() && original.message.kind !== 'description')) throw new ServiceError('copilot_output');
+          const { message, source } = original;
+          if (Date.parse(message.sourceTimestamp) > this.now().getTime() + 300_000) throw new ServiceError('copilot_output');
+          return {
+            title: request.title, action: request.action, url: source.url,
+            evidence: [{
+              id: message.eventId, source: 'github', streamId: input.stream.id,
+              at: message.sourceTimestamp, url: message.sourceUrl, summary: request.summary,
+            }],
+          };
+        });
+        candidates.push(...extracted);
+        warnings.push(...result.warnings);
+        if (result.requests.length === 200) coverageInfo.push('GitHub request extraction reached its 200-request limit; source context coverage may be incomplete.');
+      } catch (error) {
+        checkAbort(signal);
+        const failure = sanitized(error);
+        if (!['copilot_output', 'limit'].includes(failure.code)) throw error;
+        warnings.push(`Request extraction failed for ${sources.length} sources: ${failure.message}`);
+      }
+    }
+    return candidates;
+  }
   private async read(input: z.infer<typeof workCollectInputSchema>, signal: AbortSignal): Promise<WorkCollection> {
     const stop = new AbortController();
     signal = AbortSignal.any([signal, stop.signal]);
@@ -226,10 +447,16 @@ export class WorkGitHub {
     // The saved expression is data in a single URL-encoded query value; never a command or shell fragment.
     const query = `${stream.query.replace(/@me\b/g, viewer)} is:open archived:false`;
     const warnings: string[] = [];
-    const urls = new Map<string, { ref: Reference; matched: boolean }>();
+    const coverageInfo: string[] = [];
+    const notificationStream = stream.kind === 'github-notifications';
+    const discovery = notificationStream && !input.observeOnly
+      ? await this.notifications(input.since, collectedAt, signal) : undefined;
+    const urls = discovery?.urls ?? new Map<string, Target>();
+    warnings.push(...discovery?.warnings ?? []);
+    coverageInfo.push(...discovery?.coverageInfo ?? []);
     let total = 0;
     let incomplete = false;
-    for (let page = 1; !input.observeOnly && page <= 2; page++) {
+    for (let page = 1; !notificationStream && !input.observeOnly && page <= 2; page++) {
       const search = parse(searchSchema, (await this.api(
         `/search/issues?q=${encodeURIComponent(query)}&per_page=100&page=${page}`, signal,
       )).body);
@@ -257,7 +484,11 @@ export class WorkGitHub {
     const candidates: WorkCandidate[] = [];
     const observations: WorkCollection['observations'] = [];
     const replyInputs: { source: z.infer<typeof sourceSchema>; events: Event[]; url: string; ref: Reference }[] = [];
+    const requestInputs: GitHubRequestContext[] = [];
+    let teamLookup: Promise<Set<string>> | undefined;
+    const memberships = () => teamLookup ??= this.memberTeams(signal, warnings, coverageInfo);
     const entries = [...urls.entries()];
+    if (notificationStream) entries.sort((a, b) => (a[1].notification?.updatedAt ?? '').localeCompare(b[1].notification?.updatedAt ?? ''));
     let cursor = 0;
     const workers = Array.from({ length: Math.min(3, entries.length) }, async () => {
       while (cursor < entries.length) {
@@ -281,12 +512,34 @@ export class WorkGitHub {
           observations.push({ url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '' });
           observed = true;
           if (!matched || state !== 'open') continue;
-          const events = await this.timeline(ref, signal, warnings);
-          const evidence = this.evidence(source, graph, events, ref, stream, viewer, url, warnings);
-          if (evidence.length) candidates.push({
-            title: source.title, action: stream.action, url, evidence: evidence.slice(-200),
-          });
-          if (stream.action === 'reply') {
+          const events = await this.timeline(sourceRef, signal, warnings, notificationStream ? coverageInfo : warnings);
+          if (notificationStream) {
+            const sourceEvents = [
+              ...events, ...await this.discussions(sourceRef, signal, warnings, coverageInfo),
+            ].sort((a, b) => (a.created_at ?? a.submitted_at ?? '').localeCompare(b.created_at ?? b.submitted_at ?? ''));
+            const context = this.requestContext(source, sourceEvents, url, sourceRef, coverageInfo, graph);
+            const needsTeams = (source.requested_teams?.length ?? 0) > 0
+              || /@[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+/.test(source.title)
+              || context.messages.some(message => /@[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+/.test(message.body));
+            const teams = needsTeams ? await memberships() : new Set<string>();
+            const actions: Workstream['action'][] = ['review'];
+            if (source.assignees?.some(user => same(user.login, viewer))) actions.push('implement');
+            if (sourceRef.kind === 'pr' && source.user && same(source.user.login, viewer)) actions.push('fix', 'merge');
+            for (const action of actions) {
+              const inferredStream = { ...stream, action, query: [...teams].map(team => `team-review-requested:${team}`).join(' ') };
+              const evidence = this.evidence(source, graph, sourceEvents, sourceRef, inferredStream, viewer, url, warnings, coverageInfo);
+              if (evidence.length > 200) coverageInfo.push(`${sourceRef.repo}#${sourceRef.number}: ${action} evidence is capped at 200 events.`);
+              if (evidence.length) candidates.push({ title: source.title, action, url, evidence: evidence.slice(-200) });
+            }
+            requestInputs.push(context);
+          } else {
+            const evidence = this.evidence(source, graph, events, ref, stream, viewer, url, warnings);
+            if (evidence.length > 200) warnings.push(`${ref.repo}#${ref.number}: evidence is capped at 200 events.`);
+            if (evidence.length) candidates.push({
+              title: source.title, action: stream.action, url, evidence: evidence.slice(-200),
+            });
+          }
+          if (!notificationStream && stream.action === 'reply') {
             // Model extraction is serialized after parallel source reads below.
             replyInputs.push({ source, events, url, ref });
           }
@@ -302,6 +555,9 @@ export class WorkGitHub {
     const results = await Promise.allSettled(workers);
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;
+    if (notificationStream) candidates.push(...await this.extractRequests(
+      requestInputs, viewer, [...(await teamLookup ?? [])], input, signal, warnings, coverageInfo,
+    ));
     type ReplyMessage = Parameters<CopilotService['extractReplies']>[0]['messages'][number];
     const batches: ReplyMessage[][] = [];
     const owners = new Map<string, { source: z.infer<typeof sourceSchema>; url: string }>();
@@ -338,11 +594,12 @@ export class WorkGitHub {
         const result = await this.copilot.extractReplies({ viewer, query: stream.query, messages }, input.model, signal);
         const extracted = result.requests.map((request): WorkCandidate => {
           const owner = owners.get(request.eventId);
-          if (!owner || request.action !== 'reply') throw new ServiceError('copilot_output');
+          const original = messages.find(message => message.eventId === request.eventId);
+          if (!owner || !original || request.action !== 'reply') throw new ServiceError('copilot_output');
           return {
             title: request.title || owner.source.title, action: 'reply', url: owner.url,
             evidence: [{ id: request.eventId, source: 'github', streamId: stream.id,
-              at: request.sourceTimestamp, url: request.sourceUrl, summary: request.summary }],
+              at: original.sourceTimestamp, url: original.sourceUrl, summary: request.summary }],
           };
         });
         candidates.push(...extracted);
@@ -356,23 +613,38 @@ export class WorkGitHub {
     }
     const merged = new Map<string, WorkCandidate>();
     for (const candidate of candidates) {
+      const notification = urls.get(candidate.url)?.notification;
+      if (notification) candidate.notification = notification;
       const key = `${candidate.url}:${candidate.action}`;
       const existing = merged.get(key);
       if (!existing) merged.set(key, candidate);
-      else existing.evidence = [...new Map([...existing.evidence, ...candidate.evidence].map(event => [event.id, event])).values()].slice(-200);
+      else {
+        const evidence = [...new Map([...existing.evidence, ...candidate.evidence].map(event => [event.id, event])).values()];
+        if (evidence.length > 200) (notificationStream ? coverageInfo : warnings).push(`${candidate.url}: merged ${candidate.action} evidence is capped at 200 events.`);
+        existing.evidence = evidence.slice(-200);
+      }
+    }
+    if (merged.size > 200) {
+      if (notificationStream) throw new ServiceError('limit');
+      warnings.push('GitHub candidates are capped at 200 source/action pairs; coverage is incomplete and missing requests are not completion.');
     }
     const uniqueWarnings = [...new Set(warnings)];
+    const uniqueInfo = [...new Set(coverageInfo)];
     return parse(workCollectOutputSchema, {
       candidates: [...merged.values()].slice(0, 200), observations,
       warnings: uniqueWarnings.length > 30
         ? [...uniqueWarnings.slice(0, 29), `${uniqueWarnings.length - 29} additional source warnings omitted; coverage remains incomplete.`]
         : uniqueWarnings,
+      ...(notificationStream ? { coverageInfo: uniqueInfo.length > 30
+        ? [...uniqueInfo.slice(0, 29), `${uniqueInfo.length - 29} additional bounded-context or exclusion notes omitted.`]
+        : uniqueInfo } : {}),
+      ...(discovery?.coveredThrough ? { coveredThrough: discovery.coveredThrough } : {}),
       collectedAt,
     });
   }
   private evidence(
     source: z.infer<typeof sourceSchema>, graph: Graph | undefined, events: Event[],
-    ref: Reference, stream: Workstream, viewer: string, url: string, warnings: string[],
+    ref: Reference, stream: Workstream, viewer: string, url: string, warnings: string[], coverageInfo = warnings,
   ): WorkEvidence[] {
     const fallback = (condition: string, summary: string, at = source.created_at): WorkEvidence => ({
       id: identity(ref, 'condition', hash(condition)), source: 'github', streamId: stream.id, at, url, summary,
@@ -397,7 +669,7 @@ export class WorkGitHub {
         const actual = latest?.event === 'review_requested'
           ? eventEvidence(latest, ref, stream, url, `Current review request for ${recipient}.`) : undefined;
         if (actual) return actual;
-        warnings.push(`${ref.repo}#${ref.number}: current review request confirmed, but original request event is outside available history; age is unknown.`);
+        coverageInfo.push(`${ref.repo}#${ref.number}: current review request confirmed, but original request event is outside available history; age is unknown.`);
         // Source creation is stable evidence time, not a claim about request freshness.
         return fallback(`review:${recipient}`, `Current review request for ${recipient}; original request time unavailable. Source created ${source.created_at}.`);
       });
@@ -407,7 +679,7 @@ export class WorkGitHub {
       const commit = graph.commits.nodes[0]!.commit;
       const contexts = commit.statusCheckRollup?.contexts;
       if (contexts?.pageInfo.hasNextPage) {
-        warnings.push(`${ref.repo}#${ref.number}: checks are capped; readiness cannot be established.`);
+        coverageInfo.push(`${ref.repo}#${ref.number}: checks are capped; readiness cannot be established.`);
         if (stream.action === 'merge') return [];
       }
       const checks = contexts?.nodes ?? [];

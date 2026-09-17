@@ -8,7 +8,7 @@ import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { ServiceWorkspace } from '../runtime/service-workspace.ts';
 import type { Task } from '../types.ts';
 import { WorkQueue } from './controller.ts';
-import { rankedTasks } from './engine.ts';
+import { canonicalSource, rankedTasks } from './engine.ts';
 import { Settings } from './Settings.tsx';
 import './tasks.css';
 
@@ -43,6 +43,11 @@ function Capture({ queue, close }: { queue: WorkQueue; close: () => void }) {
 function TaskDetail({ task, reason, queue, controller, close }: {
   task: Task; reason?: string; queue: WorkQueue; controller: DesktopWorkspace; close: () => void;
 }) {
+  const [confirmUnsubscribe, setConfirmUnsubscribe] = useState(false);
+  const [unsubscribeError, setUnsubscribeError] = useState('');
+  const status = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
+  const unsubscribing = !!task.work && status.unsubscribing.includes(canonicalSource(task.work.url));
+  const subscription = task.work?.unsubscribe;
   const run = (operation: () => void | Promise<unknown>) => {
     try { Promise.resolve(operation()).catch(error => controller.report(error)); }
     catch (error) { controller.report(error); }
@@ -56,16 +61,36 @@ function TaskDetail({ task, reason, queue, controller, close }: {
       {task.work && <button className="secondary" onClick={() => run(() => controller.platform.launchWebUrl(task.work!.url))}><ExternalLink size={14} />Open source</button>}
     </div>
     {task.status === 'done' && <p className="task-detail-notice">Done {date(task.completedAt ?? null)}. Only a fresh actionable request can bring this task back.</p>}
+    {task.work?.notification && <section><h3>Conversation notifications</h3>
+      <p>Done handles the current request. Unsubscribe stops following the conversation without changing this task or closing the source.</p>
+      {subscription?.status === 'confirmed' ? <p role="status">Unsubscribed on GitHub {date(subscription.confirmedAt ?? null)}. Direct mentions, team mentions and review requests can still notify you.</p>
+        : <><button className="secondary" disabled={unsubscribing} onClick={() => { setUnsubscribeError(''); setConfirmUnsubscribe(true); }}>
+          {unsubscribing ? 'Unsubscribing...' : subscription ? 'Retry unsubscribe on GitHub' : 'Unsubscribe on GitHub'}</button>
+          {subscription && !unsubscribing && <p className="task-detail-notice" role="status">
+            {subscription.error || 'Unsubscribe is not confirmed. Retry explicitly; this app never resends it automatically.'}
+          </p>}</>}
+    </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
     <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
       onChange={event => run(() => queue.edit(task.id, task.title, event.target.value))} /></label>
     <p className="field-help">Task notes inform Copilot's ranking.</p>
     {!!task.work?.evidence.length && <section><h3>What brought this task here</h3>
-      <ol className="task-evidence">{task.work.evidence.map(item => <li key={`${item.source}:${item.id}`}>
+      <ol className="task-evidence">{task.work.evidence.map(item => <li key={`${item.source}:${item.streamId}:${item.id}`}>
         <p>{item.summary}</p><span>{item.source} · {date(item.at)}</span>
         <button className="text-button" onClick={() => run(() => controller.platform.launchWebUrl(item.url))}>Open request<ExternalLink size={12} /></button>
       </li>)}</ol></section>}
+    {confirmUnsubscribe && <Modal title="Unsubscribe on GitHub" close={() => { if (!unsubscribing) setConfirmUnsubscribe(false); }}>
+      <p>Stop following this conversation on GitHub? Your task, Done status and notes will stay unchanged.</p>
+      <p>Direct mentions, team mentions and review requests can still notify you again.</p>
+      {unsubscribeError && <p className="task-error" role="alert">{unsubscribeError}</p>}
+      <footer className="modal-footer"><button className="secondary" disabled={unsubscribing} onClick={() => setConfirmUnsubscribe(false)}>Cancel</button>
+        <button className="primary" disabled={unsubscribing} onClick={() => {
+          setUnsubscribeError('');
+          void queue.unsubscribe(task.id).then(() => setConfirmUnsubscribe(false))
+            .catch(error => setUnsubscribeError(error instanceof Error ? error.message : 'Unsubscribe is not confirmed.'));
+        }}>{unsubscribing ? 'Unsubscribing...' : 'Unsubscribe'}</button></footer>
+    </Modal>}
   </aside>;
 }
 
@@ -132,6 +157,9 @@ export function TaskApp({ controller, queue, reference }: {
       reference={() => { window.history.replaceState(null, '', '#reference'); setOldWorkspace(true); }} /> : <>
       <div className="task-context"><p>{run.running ? run.phase : state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
         <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>
+      {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
+        && Date.parse(state.work.collectionCursor) < Date.parse(state.work.lastStartedAt)
+        && <p className="task-detail-notice" role="status">More notification history remains. The next run continues after {date(state.work.collectionCursor)}.</p>}
       {!!run.warnings.length && <details className="task-run-details"><summary>Coverage and run details ({run.warnings.length})</summary>
         <ul>{run.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
       <div className={`task-body ${selected ? 'task-with-detail' : ''}`}>
@@ -160,11 +188,11 @@ export function TaskApp({ controller, queue, reference }: {
               <button className="quiet" onClick={() => setSettings(true)}>Choose sources and priorities</button></div>}
           </div>}
         </main>
-        {selected && <TaskDetail task={selected} reason={reasons.get(selected.id)} queue={queue} controller={controller} close={() => setSelection(null)} />}
+        {selected && <TaskDetail key={selected.id} task={selected} reason={reasons.get(selected.id)} queue={queue} controller={controller} close={() => setSelection(null)} />}
       </div>
     </>}
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved' : 'Saved on this Mac'}</span>
-      <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last complete run: ${date(state.work.lastCompletedAt)}`}</span></footer>
+      <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last successful run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
   </div>;

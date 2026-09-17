@@ -14,13 +14,17 @@ Keep the native Tauri shell, CLI authentication and current SQLite namespace. Pr
 
 **Run now** and the opt-in schedule use one pipeline: collect from enabled sources, reconcile against the latest local tasks, then use the Copilot SDK to rank every actionable task. Owner-authored priority instructions and roadmap text guide ranking. Task notes may inform ranking; unrelated private thread notes never do. Source content remains untrusted data, not instructions to execute.
 
-GitHub discovery uses saved queries rather than notification volume. Slack and generic MCP sources use a selected connection with explicitly named read tools. The SDK extracts actionable requests from the source evidence. Do not silently enable broader tools, scrape credentials or pretend an unavailable connection works.
+GitHub discovery combines saved backlog queries with an opt-in notification source. Notifications identify conversations to inspect, never obligations by themselves. Inspect actual requests before choosing an action; deduplicate them with requests found through saved searches. Preserve project backlog queries, including Usersd, separately from activity discovery. Slack and generic MCP sources use a selected connection with explicitly named read tools. The SDK extracts actionable requests from the source evidence. Do not silently enable broader tools, scrape credentials or pretend an unavailable connection works.
+
+The notification source initially inspects 30 days of issue/PR activity, then changes since the last successful run. Fetch read and unread notifications: reading elsewhere is not Done. Process large backlogs oldest-first across bounded runs and show when history remains, including after relaunch. Advance the saved collection cursor only after successful collection, ranking and durable saving, through inspected history and never past the run's start. Repeated notification reasons and notification timestamps are discovery metadata, not fresh request evidence.
 
 Manual capture saves immediately without a network round trip. Other apps can submit tasks through a durable local MCP intake. A completed Copilot review creates a `review-result` action only when the producer submits it; launching Copilot does not prove review completion.
 
 Identity is canonical source plus action. GitHub repository casing, alternate issue/PR links and URL fragments must not duplicate the same action. Matching the same review through Slack and GitHub retains both sources as evidence on one task.
 
 **Done** records handled evidence and a completion time. Only an unseen actionable request whose source event is newer than completion can reopen the task. Repeated queries, old messages discovered later, general updates and model decisions cannot undo Done. Current merge-queue, closed or merged state suppresses action without falsely completing tasks.
+
+**Unsubscribe on GitHub** is a separate confirmed action in notification-backed task details. It stops following the conversation without closing the source, changing Done or deleting tasks and notes. Mentions, team mentions and review requests can still notify again. Save the captured source and write intent before dispatch, verify the matching response, and retain unconfirmed writes for explicit retry. Never replay writes on launch, reconnect or collection.
 
 Each run applies results to the latest state so concurrent captures, notes and Done survive. Invalid rankings, source failures and save failures remain explicit. Preserve discoveries and the prior order when ranking fails. Missing query results do not prove completion.
 

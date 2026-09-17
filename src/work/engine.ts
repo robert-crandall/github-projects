@@ -75,13 +75,30 @@ function observe(work: WorkMetadata, observation?: WorkObservation): WorkMetadat
   };
 }
 
+function notificationSource(notification: NonNullable<WorkMetadata['notification']>): string {
+  return canonicalSource(`https://github.com/${notification.reference.repo}/issues/${notification.reference.number}`);
+}
+
 /** Completion belongs to the owner; collection can only reopen on unseen, newer actionable evidence. */
 export function reconcileWork(state: AppState, collection: WorkCollection, now: string | Date): AppState {
   const batch = workCollectOutputSchema.parse(collection);
   const createdAt = timestamp(now);
   const observations = latestObservations(batch.observations);
+  const notifications = new Map<string, NonNullable<WorkMetadata['notification']>>();
+  for (const item of [...state.tasks.flatMap(task => task.work ? [task.work] : []), ...batch.candidates]) {
+    if (!item.notification) continue;
+    const source = canonicalSource(item.url);
+    if (notificationSource(item.notification) !== source) throw new Error('The notification does not match its task source.');
+    const previous = notifications.get(source);
+    if (!previous || Date.parse(item.notification.updatedAt) > Date.parse(previous.updatedAt)) {
+      notifications.set(source, item.notification);
+    }
+  }
   const tasks = state.tasks.map(task => task.work
-    ? { ...task, work: observe(task.work, observations.get(canonicalSource(task.work.url))) } : task);
+    ? { ...task, work: observe({
+      ...task.work, ...(notifications.has(canonicalSource(task.work.url))
+        ? { notification: notifications.get(canonicalSource(task.work.url)) } : {}),
+    }, observations.get(canonicalSource(task.work.url))) } : task);
   for (const candidate of batch.candidates) {
     const identity = taskIdentity(candidate.url, candidate.action);
     const url = canonicalSource(candidate.url);
@@ -95,9 +112,11 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
       availability: linked?.availability ?? (affirmative ? 'actionable' : 'unknown'),
       availabilityReason: linked?.availabilityReason ?? (affirmative ? 'The source supplied an action.' : 'The source state has not been confirmed.'),
       availabilityObservedAt: linked?.availabilityObservedAt,
+      ...(linked?.unsubscribe ? { unsubscribe: linked.unsubscribe } : {}),
     };
     const work = workMetadataSchema.parse(observe({
       ...base, identity, url, evidence: mergeEvidence(base.evidence, candidate.evidence),
+      ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
     }, observation));
     const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
     const reopen = previous?.status === 'done' && previous.completedAt !== undefined

@@ -178,6 +178,116 @@ test('completed-review extraction is offered only for MCP sources', async ({ pag
   expect(native.state.work.settings.streams[0]?.action).toBe('reply');
 });
 
+test('notification source is opt-in, automatic, and keeps backlog searches', async ({ page, native }, testInfo) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  const before = structuredClone(native.state.work.settings.streams);
+  await page.getByRole('button', { name: 'Add GitHub notifications' }).click();
+  const notification = page.locator('.task-stream').last();
+  await expect(notification.getByLabel('Source type')).toHaveValue('github-notifications');
+  await expect(notification.getByText('The first scan covers 30 days.', { exact: false })).toBeVisible();
+  await expect(notification.getByLabel('MCP server name')).toHaveCount(0);
+  await expect(notification.getByRole('combobox')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  expect(native.state.work.settings.streams.slice(0, 2)).toEqual(before);
+  expect(native.state.work.settings.streams[2]).toMatchObject({ kind: 'github-notifications', enabled: true });
+  expect(native.requests).toEqual([]);
+  await notification.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('notification-settings-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await notification.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('notification-settings-narrow.png') });
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await run(page);
+  const collectors = native.requests.filter(request => request.op === 'work.collect');
+  expect(collectors.map(request => request.input.stream.kind)).toEqual(['github', 'github', 'github-notifications']);
+  await page.reload();
+  expect(native.state.work.settings.streams[2]!.kind).toBe('github-notifications');
+});
+
+test('partial notification coverage persists through relaunch and continues without a failure banner', async ({ page, native }) => {
+  native.workCollection.coveredThrough = '2026-09-10T00:00:00.000Z';
+  native.workCollection.coverageInfo = ['More notification history remains; the next run continues from this boundary.'];
+  await page.goto('/');
+  await run(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByText('More notification history remains. The next run continues after', { exact: false })).toBeVisible();
+  expect(native.state.work.collectionCursor).toBe('2026-09-10T00:00:00.000Z');
+  await page.reload();
+  await expect(page.getByText('More notification history remains. The next run continues after', { exact: false })).toBeVisible();
+  delete native.workCollection.coveredThrough;
+  delete native.workCollection.coverageInfo;
+  await run(page);
+  await expect(page.getByText('More notification history remains. The next run continues after', { exact: false })).toHaveCount(0);
+  const collections = native.requests.filter(request => request.op === 'work.collect');
+  expect(collections.at(-1)!.input.since).toBe('2026-09-10T00:00:00.000Z');
+});
+
+test('unsubscribe confirms separately from Done and survives relaunch', async ({ page, native }, testInfo) => {
+  native.workCollection.candidates[0]!.notification = {
+    threadId: '456', reference: { repo: 'octo/project', number: 123, kind: 'pr' }, updatedAt: native.now,
+  };
+  await page.goto('/');
+  await run(page);
+  await page.locator('.task-row').first().click();
+  await page.getByLabel('Task notes').fill('Keep these notes');
+  await page.getByRole('button', { name: 'Mark done', exact: true }).click();
+  await persisted(page);
+  const before = structuredClone(native.state.tasks[0]!);
+  await page.getByRole('button', { name: 'Unsubscribe on GitHub', exact: true }).click();
+  const modal = page.getByRole('dialog', { name: 'Unsubscribe on GitHub' });
+  await expect(modal).toContainText('Your task, Done status and notes will stay unchanged.');
+  expect(native.requests.filter(request => request.op === 'github.unsubscribe')).toHaveLength(0);
+  await modal.getByRole('button', { name: 'Cancel', exact: true }).click();
+  expect(native.requests.filter(request => request.op === 'github.unsubscribe')).toHaveLength(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Unsubscribe on GitHub', exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('unsubscribe-confirmation-narrow.png') });
+  await modal.getByRole('button', { name: 'Unsubscribe', exact: true }).click();
+  await expect(modal).toHaveCount(0);
+  await expect(page.getByText('Unsubscribed on GitHub', { exact: false })).toBeVisible();
+  await persisted(page);
+  expect(native.state.tasks[0]).toMatchObject({ id: before.id, status: 'done', notes: 'Keep these notes', completedAt: before.completedAt });
+  expect(native.state.tasks[0]!.work!.evidence).toEqual(before.work!.evidence);
+  expect(native.requests.filter(request => request.op.startsWith('github.')).map(request => request.op)).toEqual(['github.unsubscribe']);
+  await page.reload();
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await page.locator('.task-row').first().click();
+  await expect(page.getByText('Unsubscribed on GitHub', { exact: false })).toBeVisible();
+});
+
+test('failed unsubscribe remains visible and requires explicit retry after relaunch', async ({ page, native }) => {
+  native.workCollection.candidates[0]!.notification = {
+    threadId: '456', reference: { repo: 'octo/project', number: 123, kind: 'pr' }, updatedAt: native.now,
+  };
+  await page.goto('/');
+  await run(page);
+  await page.locator('.task-row').first().click();
+  native.failWrite = true;
+  await page.getByRole('button', { name: 'Unsubscribe on GitHub', exact: true }).click();
+  const modal = page.getByRole('dialog', { name: 'Unsubscribe on GitHub' });
+  await modal.getByRole('button', { name: 'Unsubscribe', exact: true }).click();
+  await expect(modal.getByRole('alert')).toContainText('not confirmed');
+  await persisted(page);
+  const first = native.requests.find(request => request.op === 'github.unsubscribe')!;
+  await page.reload();
+  expect(native.requests.filter(request => request.op === 'github.unsubscribe')).toHaveLength(1);
+  await page.locator('.task-row').first().click();
+  await expect(page.getByText('Unsubscribe is not confirmed.', { exact: false })).toBeVisible();
+  native.failWrite = false;
+  await page.getByRole('button', { name: 'Retry unsubscribe on GitHub', exact: true }).click();
+  await modal.getByRole('button', { name: 'Unsubscribe', exact: true }).click();
+  await expect(modal).toHaveCount(0);
+  await persisted(page);
+  const writes = native.requests.filter(request => request.op === 'github.unsubscribe');
+  expect(writes).toHaveLength(2);
+  expect(writes[1]!.input).toEqual(first.input);
+  expect(native.state.tasks[0]!.status).toBe('open');
+});
+
 test('ranked list and details stay readable on desktop and narrow screens', async ({ page, native }, testInfo) => {
   native.workCollection.candidates[0]!.title = '<img src=x> Review a long usersd task with a source that needs context';
   await page.goto('/');

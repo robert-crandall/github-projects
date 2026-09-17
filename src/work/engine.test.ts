@@ -28,6 +28,51 @@ function done(): AppState {
   return completeWorkTask(initial, initial.tasks[0]!.id, completed);
 }
 
+describe('notification discovery metadata', () => {
+  const notification = { threadId: '123', reference: { repo: 'Owner/Repo', number: 42, kind: 'pr' as const }, updatedAt: after };
+
+  test('notification updates attach to the same query task without reopening Done', () => {
+    const initial = done();
+    const incoming = batch([{ ...evidence(), streamId: 'notifications' }]);
+    incoming.candidates[0]!.notification = notification;
+    const result = reconcileWork(initial, incoming, after);
+    expect(result.tasks).toHaveLength(1);
+    expect(result.tasks[0]).toMatchObject({
+      id: initial.tasks[0]!.id, status: 'done', completedAt: completed, work: { notification },
+    });
+    expect(result.tasks[0]!.work!.evidence).toHaveLength(2);
+    expect(stateSchema.parse(JSON.parse(JSON.stringify(result))).tasks[0]!.work!.notification).toEqual(notification);
+    const older = structuredClone(incoming);
+    older.candidates[0]!.notification!.updatedAt = before;
+    expect(reconcileWork(result, older, after).tasks[0]!.work!.notification).toEqual(notification);
+  });
+
+  test('new action on an unsubscribed source retains subscription without suppressing a genuine request', () => {
+    const initial = done();
+    initial.tasks[0]!.work!.notification = notification;
+    const unsubscribe = {
+      operationId: 'unsubscribe:1', notification, status: 'confirmed' as const, error: '', confirmedAt: completed,
+    };
+    initial.tasks[0]!.work!.unsubscribe = unsubscribe;
+    const incoming = batch([evidence('new-mention', after)]);
+    incoming.candidates[0]!.notification = notification;
+    const reopened = reconcileWork(initial, incoming, after);
+    expect(reopened.tasks[0]!.status).toBe('open');
+    expect(reopened.tasks[0]!.work!.unsubscribe).toEqual(unsubscribe);
+    incoming.candidates[0]!.action = 'reply';
+    const secondAction = reconcileWork(initial, incoming, after);
+    expect(secondAction.tasks).toHaveLength(2);
+    expect(secondAction.tasks[1]!.work).toMatchObject({ notification, unsubscribe });
+    expect(secondAction.tasks[0]!.status).toBe('done');
+  });
+
+  test('a notification cannot attach unsubscribe controls for another source', () => {
+    const incoming = batch();
+    incoming.candidates[0]!.notification = { ...notification, reference: { ...notification.reference, number: 99 } };
+    expect(() => reconcileWork(state(), incoming, after)).toThrow('notification does not match');
+  });
+});
+
 describe('source identity', () => {
   test('GitHub case, number, issue/pull aliases, subpaths, query and anchor share one identity', () => {
     expect(canonicalSource('https://GITHUB.com/OWNER/RePo/pull/0042/files?x=1#discussion')).toBe('https://github.com/owner/repo/issues/42');
