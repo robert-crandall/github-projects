@@ -6,6 +6,7 @@ import { snapshotSchema, type NativeSnapshot, type NativeWorkspace } from '../sr
 import { desktopEnvelopeSchema } from '../src/runtime/desktop-workspace.ts';
 import { at, test as browserTest } from './workspace-fixtures.ts';
 import type { WorkCollection } from '../service/src/work-schema.ts';
+import { preferencesSchema, type Preferences } from '../src/themes/controller.ts';
 
 export function evidence(id = 'request-1', kind: Evidence['kind'] = 'review-request'): Evidence {
   return {
@@ -32,6 +33,11 @@ class ExpectedFailure extends Error {}
 
 export class NativeMock {
   constructor(private readonly referenceWorkspace = true) {}
+  appearance: Preferences | null = null;
+  failAppearanceRead = false;
+  failAppearanceSave = false;
+  failAppearanceApply = false;
+  appliedAppearance: { tone: string; background: string; mode: string }[] = [];
   workCollection: WorkCollection = {
     candidates: [{
       title: 'Review the usersd rollout', action: 'review', url: 'https://github.com/octo/project/pull/123',
@@ -104,6 +110,20 @@ export class NativeMock {
 
   private async invoke(command: string, args: Record<string, unknown>) {
     this.calls.push(command);
+    if (command === 'appearance_read') {
+      if (this.failAppearanceRead) throw new ExpectedFailure('Appearance settings are unreadable.');
+      return structuredClone(this.appearance);
+    }
+    if (command === 'appearance_save') {
+      if (this.failAppearanceSave) throw new ExpectedFailure('Appearance disk unavailable.');
+      this.appearance = preferencesSchema.parse(args.preferences);
+      return null;
+    }
+    if (command === 'appearance_apply') {
+      if (this.failAppearanceApply) throw new ExpectedFailure('Window appearance unavailable.');
+      this.appliedAppearance.push({ tone: String(args.tone), background: String(args.background), mode: String(args.mode) });
+      return null;
+    }
     if (command === 'conversation_reset') {
       if (this.holdConversationReset) await this.holdConversationReset.promise;
       this.conversations.clear(); this.corruptCache = false; this.fullCache = false; return null;

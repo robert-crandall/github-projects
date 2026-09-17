@@ -1,6 +1,9 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "appearance_read",
+            "appearance_save",
+            "appearance_apply",
             "workspace_read",
             "workspace_save",
             "workspace_storage_status",

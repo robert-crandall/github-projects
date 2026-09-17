@@ -2,7 +2,11 @@
 
 A local-first macOS todo app. GitHub searches, Slack, manual capture and MCP intake feed **one ranked task list**. Each run uses the Copilot SDK to prioritize the whole list using your instructions.
 
-The desktop keeps the native Mac shell, GitHub-dark colors, CLI authentication and revisioned SQLite storage. Existing tasks, completion and thread notes are retained.
+The desktop keeps the native Mac shell, CLI authentication and revisioned SQLite storage. Existing tasks, completion and thread notes are retained.
+
+**Sources and priorities → Appearance** offers all 57 themes from the Copilot App catalog, including GitHub and Fox, with Light, Dark and System modes. Changes apply immediately and persist across relaunch. GitHub dark remains the default. The reference workspace and browser prototype expose the same controls through **Appearance** in the sidebar.
+
+Appearance stays separate from tasks and their backups. Desktop preferences use a local `appearance.json` file; the prototype uses browser storage. See [theme support](docs/theme.md) for palette sources and catalog updates.
 
 ## Work top to bottom
 
@@ -49,6 +53,8 @@ For the standalone app:
 bun run native:build
 open "src-tauri/target/release/bundle/macos/GitHub Projects.app"
 ```
+
+The release profile preserves metadata in build-time dependencies to avoid Rust's `E0463` procedural-macro errors on macOS. No environment override is needed.
 
 To build and install into `/Applications`, quit any running copy first:
 

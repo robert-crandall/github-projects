@@ -1,7 +1,8 @@
 [[permission]]
 identifier = "native-workspace"
-description = "Bounded workspace and conversation persistence, local clock, and validated web destinations."
+description = "Bounded workspace, conversation, and appearance persistence, window appearance, local clock, and validated web destinations."
 commands.allow = [
+  "appearance_read", "appearance_save", "appearance_apply",
   "workspace_read", "workspace_save", "workspace_storage_status",
   "workspace_create_backup", "workspace_list_backups", "workspace_read_backup",
   "workspace_export_json", "workspace_export_raw", "workspace_recover",

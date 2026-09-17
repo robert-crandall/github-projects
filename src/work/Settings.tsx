@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { githubWorkActionSchema, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
 import type { WorkQueue } from './controller.ts';
+import { Appearance } from '../themes/Appearance.tsx';
 
 const actions = [
   ['review', 'Review a PR'], ['fix', 'Fix a PR'], ['reply', 'Reply'],
@@ -47,6 +48,7 @@ export function Settings({ settings, queue, close, recover, reference }: {
     <header className="task-settings-heading"><button className="quiet" onClick={close}><ArrowLeft size={16} />Back to tasks</button><h1>How I find and rank your work</h1>
       <p>Choose the sources. Tell Copilot what matters. Every run ranks the whole task list.</p>
     </header>
+    <Appearance />
     <form onSubmit={save}>
       <section aria-labelledby="instructions-heading"><h2 id="instructions-heading">Priority instructions</h2>
         <p>Your rules and roadmap guide the order, not which requests you have already completed.</p>
