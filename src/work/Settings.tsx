@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
-import { githubWorkActionSchema, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
+import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
 import type { WorkQueue } from './controller.ts';
 import { Appearance } from '../themes/Appearance.tsx';
 
@@ -28,7 +28,7 @@ export function Settings({ settings, queue, close, recover, reference }: {
       ...draft, streams: draft.streams.map(stream => ({ ...stream, tools: stream.tools.map(tool => tool.trim()).filter(Boolean) })),
     });
     if (!parsed.success) { setError(parsed.error.issues.map(issue => issue.message).join(' ')); return; }
-    const invalidMcp = parsed.data.streams.find(stream => stream.enabled && stream.kind !== 'github'
+    const invalidMcp = parsed.data.streams.find(stream => stream.enabled && !isGitHubStream(stream)
       && (!stream.server.trim() || !stream.tools.length || stream.tools.includes('*')));
     if (invalidMcp) { setError(`${invalidMcp.name}: choose a server and name its allowed read tools. Wildcards are not allowed.`); return; }
     try { queue.saveSettings(parsed.data); setSaved(true); }
@@ -67,7 +67,10 @@ export function Settings({ settings, queue, close, recover, reference }: {
             query: '', action: 'follow-up', server: '', tools: [],
           }],
         })}><Plus size={15} />Add source</button></div>
-        <p>GitHub searches find work independently of notifications. Slack and MCP sources use only the read tools you allow.</p>
+        <p>Keep backlog searches for assigned work and projects. Notifications find requests those searches miss, including mentions.</p>
+        {!draft.streams.some(stream => stream.kind === 'github-notifications') && <button type="button" className="secondary"
+          disabled={draft.streams.length >= 30} onClick={() => change({ ...draft, streams: [...draft.streams, notificationWorkstream()] })}>
+          <Plus size={15} />Add GitHub notifications</button>}
         <div className="task-streams">{draft.streams.map((stream, index) => <fieldset key={stream.id} className="task-stream">
           <legend>Source {index + 1}</legend>
           <div className="task-stream-top"><label className="checkbox-label"><input type="checkbox" checked={stream.enabled}
@@ -77,10 +80,16 @@ export function Settings({ settings, queue, close, recover, reference }: {
             })}><Trash2 size={15} />Remove</button></div>
           <div className="task-field-pair"><label>Name<input value={stream.name} maxLength={100}
             onChange={event => streamChange(stream.id, { name: event.target.value })} /></label>
-            <label>Source type<select value={stream.kind} onChange={event => streamChange(stream.id, { kind: event.target.value as Workstream['kind'] })}>
-              <option value="github">GitHub search</option><option value="slack">Slack through MCP</option><option value="mcp">MCP search</option>
+            <label>Source type<select value={stream.kind} onChange={event => streamChange(stream.id, event.target.value === 'github-notifications'
+              ? { kind: 'github-notifications', query: notificationWorkstream().query, action: 'follow-up', server: '', tools: [] }
+              : { kind: event.target.value as Workstream['kind'] })}>
+              <option value="github">GitHub search</option><option value="github-notifications">GitHub notifications</option>
+              <option value="slack">Slack through MCP</option><option value="mcp">MCP search</option>
             </select></label></div>
-          <label>{stream.kind === 'github' ? 'GitHub query' : 'What should Copilot look for?'}
+          {stream.kind === 'github-notifications' ? <p className="field-help">
+            Inspect issue and PR notifications updated since the last successful run, whether read or unread.
+            The first scan covers 30 days. Copilot identifies actual requests before adding tasks; ordinary activity does not reopen Done.
+          </p> : <><label>{stream.kind === 'github' ? 'GitHub query' : 'What should Copilot look for?'}
             <textarea rows={2} value={stream.query} maxLength={4000} placeholder={stream.kind === 'github'
               ? 'is:pr is:open archived:false user-review-requested:@me'
               : 'Find requests for me in the team channel. Read the thread and extract only work I need to do.'}
@@ -91,8 +100,8 @@ export function Settings({ settings, queue, close, recover, reference }: {
                 && <option value={stream.action} disabled>Choose a supported GitHub action</option>}
               {actions.filter(([value]) => stream.kind !== 'github' || githubWorkActionSchema.safeParse(value).success)
                 .map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-            </select></label>
-          {stream.kind !== 'github' && <div className="task-field-pair"><label>MCP server name<input value={stream.server}
+            </select></label></>}
+          {!isGitHubStream(stream) && <div className="task-field-pair"><label>MCP server name<input value={stream.server}
             placeholder="slack" onChange={event => streamChange(stream.id, { server: event.target.value })} /></label>
             <label>Allowed read tools, comma-separated<input value={stream.tools.join(',')}
               placeholder="search_messages, get_thread"
@@ -122,7 +131,8 @@ export function Settings({ settings, queue, close, recover, reference }: {
       <p className="field-help">Run the packaged <code>github-projects-service --mcp</code> as a local MCP server in the producing app. This does not automatically install a completion hook.</p>
     </section>
     <section aria-labelledby="storage-heading"><h2 id="storage-heading">Your saved work</h2>
-      <p>Done is local. It never closes a GitHub issue, submits a review or marks a notification read.</p>
+      <p>Done is local. It never closes a GitHub issue, submits a review or marks a notification read.
+        Unsubscribe is a separate action in task details. Direct mentions, team mentions and review requests can still notify you again.</p>
       <div className="button-row"><button className="secondary" onClick={recover}>Backups & recovery</button>
         <button className="quiet" onClick={reference}>Open saved thread notes</button></div>
     </section>

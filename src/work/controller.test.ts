@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { defaultWorkState, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
+import { defaultWorkState, notificationWorkstream, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
 import type { Request } from '../../service/src/schema.ts';
 import { emptyWorkspace } from '../domain/live.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
@@ -330,23 +330,93 @@ describe('runs and persistence barriers', () => {
 });
 
 describe('conservative source coverage', () => {
-  test('an event arriving during ranking is collected after reload using the successful run start cursor', async () => {
+  test('successful notification batches persist progress and neutral exclusions do not block the next batch', async () => {
+    const saved = initial();
+    saved.work.collectionCursor = before;
+    saved.work.settings.streams = [notificationWorkstream(), defaultWorkState().settings.streams[1]!];
+    let batches = 0;
+    const cursors: Array<string | null> = [];
+    const mock = await fixture(saved, request => {
+      if (request.op !== 'work.collect' || request.input.stream.kind !== 'github-notifications') return;
+      cursors.push(request.input.since);
+      return {
+        ...collection(), collectedAt: new Date().toISOString(),
+        ...(batches++ === 0 ? { coveredThrough: previousCompleted } : {}),
+        coverageInfo: ['Commit notifications are outside issue/PR discovery.'],
+      };
+    });
+    await mock.queue.run();
+    expect(mock.saved().work.collectionCursor).toBe(previousCompleted);
+    expect(mock.saved().work.lastError).toBe('');
+    expect(mock.queue.getSnapshot().warnings.join()).toContain('outside issue/PR');
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    await new WorkQueue(reloaded, mock.service).run();
+    expect(cursors).toEqual([before, previousCompleted]);
+    expect(mock.saved().work.collectionCursor).toBe(mock.saved().work.lastStartedAt);
+    expect(mock.saved().tasks).toHaveLength(1);
+  });
+
+  test('multiple notification sources advance only through their earliest covered boundary', async () => {
+    const saved = initial();
+    saved.work.collectionCursor = before;
+    saved.work.settings.streams = [notificationWorkstream(), notificationWorkstream()];
+    const earlier = '2026-09-15T10:30:00.000Z';
+    const mock = await fixture(saved, request => request.op === 'work.collect' ? {
+      ...collection(), collectedAt: new Date().toISOString(),
+      coveredThrough: request.input.stream.id === saved.work.settings.streams[0]!.id ? previousCompleted : earlier,
+    } : undefined);
+    await mock.queue.run();
+    expect(mock.saved().work.collectionCursor).toBe(earlier);
+  });
+
+  test.each(['ranking', 'coverage', 'storage'] as const)('%s failures never advance a partial notification scan', async failure => {
+    const saved = initial();
+    saved.work.collectionCursor = before;
+    saved.work.settings.streams = [notificationWorkstream()];
+    const mock = await fixture(saved, request => {
+      if (request.op === 'work.collect') return {
+        ...collection(), collectedAt: new Date().toISOString(), coveredThrough: previousCompleted,
+        warnings: failure === 'coverage' ? ['One notification could not be inspected.'] : [],
+      };
+      if (request.op === 'work.rank' && failure === 'ranking') throw new Error('Ranking unavailable');
+    });
+    if (failure === 'storage') mock.fail(state => state.work.collectionCursor === previousCompleted);
+    await mock.queue.run();
+    expect(mock.saved().work.collectionCursor).toBe(before);
+    expect(mock.workspace.state.work.collectionCursor).toBe(before);
+    expect(mock.queue.getSnapshot().error).not.toBe('');
+  });
+
+  test.each([before, '2026-09-14T10:00:00.000Z', '2099-01-01T00:00:00.000Z'])('rejects nonprogressing or future scan boundary %s', async coveredThrough => {
+    const saved = initial();
+    saved.work.collectionCursor = before;
+    saved.work.settings.streams = [notificationWorkstream()];
+    const mock = await fixture(saved, request => request.op === 'work.collect'
+      ? { ...collection(), collectedAt: new Date().toISOString(), coveredThrough } : undefined);
+    await mock.queue.run();
+    expect(mock.saved().work.collectionCursor).toBe(before);
+    expect(mock.queue.getSnapshot().error).toContain('invalid scan boundary');
+  });
+
+  test.each(['slack', 'github-notifications'] as const)('%s activity during ranking survives reload using the successful run start cursor', async kind => {
     const saved = initial();
     saved.tasks.push({ id: 'manual', title: 'Rank this task', notes: '', status: 'open', createdAt: before });
     saved.work.settings.schedule.enabled = true;
     saved.work.settings.streams = [{
-      ...defaultWorkState().settings.streams[0]!, kind: 'slack', server: 'slack', query: 'mentions:me',
+      ...defaultWorkState().settings.streams[0]!, kind, server: kind === 'slack' ? 'slack' : '', query: 'mentions:me',
     }];
     const entered = deferred<Extract<Request, { op: 'work.rank' }>>();
     const result = deferred<unknown>();
     const eventAt = '2026-09-15T10:01:00.000Z';
+    const eventId = `${kind}:during-ranking`;
     let published = false;
     let rankingCalls = 0;
     const cursors: Array<string | null> = [];
     const mock = await fixture(saved, request => {
       if (request.op === 'work.collect') {
         cursors.push(request.input.since);
-        const newEvent = candidate('slack:during-ranking', 'slack');
+        const newEvent = candidate(eventId, kind === 'slack' ? 'slack' : 'github');
         newEvent.evidence[0]!.at = eventAt;
         return collection(published && (!request.input.since || eventAt > request.input.since) ? [newEvent] : []);
       }
@@ -355,6 +425,7 @@ describe('conservative source coverage', () => {
         return result.promise;
       }
     });
+
     const run = mock.queue.tick(new Date(before));
     const request = await entered.promise;
     published = true;
@@ -366,12 +437,175 @@ describe('conservative source coverage', () => {
     const reloaded = new DesktopWorkspace(mock.platform);
     await reloaded.load();
     await new WorkQueue(reloaded, mock.service).run();
-    expect(mock.saved().tasks.some(task => task.work?.evidence.some(item => item.id === 'slack:during-ranking'))).toBe(true);
+    expect(mock.saved().tasks.some(task => task.work?.evidence.some(item => item.id === eventId))).toBe(true);
     expect(cursors).toEqual([null, before]);
     expect(firstCursor).toBe(before);
     expect(firstCursor).not.toBe(completedAt);
   });
+});
 
+describe('notification task controls', () => {
+  const notification = { threadId: '123', reference: { repo: 'Owner/Repo', number: 42, kind: 'pr' as const }, updatedAt: before };
+  function taskState() {
+    const incoming = collection();
+    incoming.candidates[0]!.notification = notification;
+    const state = reconcileWork(initial(), incoming, before);
+    state.tasks[0]!.notes = 'Private task notes';
+    return state;
+  }
+  const confirmation = (request: Extract<Request, { op: 'github.unsubscribe' }>) => ({
+    ...request.input, action: 'unsubscribe', status: 'confirmed', confirmedAt: previousCompleted,
+  });
+
+  test('enabling notifications preserves saved backlog searches and resets the successful scan boundary', async () => {
+    const saved = initial();
+    saved.work.settings.streams = [{
+      ...defaultWorkState().settings.streams[1]!, name: 'Usersd backlog', query: 'repo:github/usersd is:issue',
+    }];
+    saved.work.collectionCursor = before;
+    const mock = await fixture(saved);
+    mock.queue.saveSettings({
+      ...mock.workspace.state.work.settings, streams: [...saved.work.settings.streams, notificationWorkstream()],
+    });
+    await mock.workspace.flush();
+    expect(mock.saved().work.settings.streams[0]).toEqual(saved.work.settings.streams[0]);
+    expect(mock.saved().work.settings.streams[1]!.kind).toBe('github-notifications');
+    expect(mock.saved().work.collectionCursor).toBeNull();
+    expect(mock.requests).toEqual([]);
+    await mock.queue.run();
+    expect(mock.requests.filter(request => request.op === 'work.collect').map(request => request.input.stream.kind))
+      .toEqual(['github', 'github-notifications']);
+  });
+
+  test('unsubscribe persists intent before dispatch and never changes Done, notes, or evidence', async () => {
+    const saved = taskState();
+    const id = saved.tasks[0]!.id;
+    const mock = await fixture(saved, request => {
+      if (request.op !== 'github.unsubscribe') return;
+      const task = mock.saved().tasks[0]!;
+      expect(task.work!.unsubscribe).toMatchObject({ status: 'pending', operationId: request.input.operationId, notification });
+      expect(request.input).toEqual({
+        operationId: task.work!.unsubscribe!.operationId, threadId: '123', reference: notification.reference,
+        notificationUpdatedAt: before, displayedEvidenceIds: [],
+      });
+      return confirmation(request);
+    });
+    mock.queue.complete(id);
+    await mock.workspace.flush();
+    const beforeWrite = structuredClone(mock.saved().tasks[0]!);
+    await mock.queue.unsubscribe(id);
+    const { unsubscribe, ...metadata } = mock.saved().tasks[0]!.work!;
+    expect(metadata).toEqual(beforeWrite.work!);
+    expect(unsubscribe).toMatchObject({ status: 'confirmed', confirmedAt: previousCompleted });
+    expect(mock.saved().tasks[0]).toMatchObject({ status: 'done', completedAt: beforeWrite.completedAt, notes: 'Private task notes' });
+    expect(mock.requests.map(request => request.op)).toEqual(['github.unsubscribe']);
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    expect(reloaded.state.tasks[0]!.work!.unsubscribe!.status).toBe('confirmed');
+  });
+
+  test('failed local intent storage prevents unsubscribe dispatch', async () => {
+    const mock = await fixture(taskState());
+    mock.fail(() => true);
+    await expect(mock.queue.unsubscribe(mock.workspace.state.tasks[0]!.id)).rejects.toThrow('was not sent');
+    expect(mock.requests).toEqual([]);
+    expect(mock.workspace.state.tasks[0]!.work!.unsubscribe!.status).toBe('unconfirmed');
+    expect(mock.queue.getSnapshot().unsubscribing).toEqual([]);
+  });
+
+  test('unconfirmed writes survive relaunch without replay and retry the original context', async () => {
+    let fail = true;
+    const mock = await fixture(taskState(), request => {
+      if (request.op !== 'github.unsubscribe') return;
+      if (fail) throw new Error('Connection lost after sending');
+      return confirmation(request);
+    });
+    const id = mock.workspace.state.tasks[0]!.id;
+    await expect(mock.queue.unsubscribe(id)).rejects.toThrow('not confirmed');
+    const original = mock.requests[0]!;
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    const queue = new WorkQueue(reloaded, mock.service);
+    await queue.tick();
+    expect(mock.requests).toHaveLength(1);
+    expect(reloaded.state.tasks[0]!.work!.unsubscribe!.status).toBe('unconfirmed');
+    fail = false;
+    await queue.unsubscribe(id);
+    expect(mock.requests[1]!.input).toEqual(original.input);
+    expect(mock.saved().tasks[0]!.work!.unsubscribe!.status).toBe('confirmed');
+  });
+
+  test('an interrupted pending intent is inspectable after relaunch without automatic replay', async () => {
+    const saved = taskState();
+    saved.tasks[0]!.work!.unsubscribe = { operationId: 'interrupted:1', notification, status: 'pending', error: '' };
+    const mock = await fixture(saved, request => request.op === 'github.unsubscribe' ? confirmation(request) : undefined);
+    await mock.queue.tick();
+    expect(mock.requests).toEqual([]);
+    expect(mock.queue.getSnapshot().unsubscribing).toEqual([]);
+    expect(mock.saved().tasks[0]!.work!.unsubscribe!.status).toBe('pending');
+    await mock.queue.unsubscribe(saved.tasks[0]!.id);
+    const request = mock.requests[0]!;
+    expect(request.op).toBe('github.unsubscribe');
+    expect(request.input).toMatchObject({ operationId: 'interrupted:1', notificationUpdatedAt: before });
+  });
+
+  test('a failed confirmation save retains an explicit retry instead of reporting durable success', async () => {
+    const mock = await fixture(taskState(), request => request.op === 'github.unsubscribe' ? confirmation(request) : undefined);
+    mock.fail(state => state.tasks[0]!.work!.unsubscribe?.status === 'confirmed');
+    await expect(mock.queue.unsubscribe(mock.workspace.state.tasks[0]!.id)).rejects.toThrow('not confirmed');
+    expect(mock.saved().tasks[0]!.work!.unsubscribe!.status).toBe('pending');
+    expect(mock.workspace.state.tasks[0]!.work!.unsubscribe!.status).toBe('unconfirmed');
+    expect(mock.workspace.getSnapshot().persistence.error).toContain('Disk unavailable');
+    mock.fail(() => false);
+    await mock.workspace.retryStorage();
+    expect(mock.saved().tasks[0]!.work!.unsubscribe!.status).toBe('unconfirmed');
+    expect(mock.saved().tasks[0]!.work!.unsubscribe!.error).toContain('Disk unavailable');
+    expect(mock.requests).toHaveLength(1);
+  });
+
+  test.each(['threadId', 'operationId', 'notificationUpdatedAt', 'reference', 'displayedEvidenceIds', 'action'] as const)(
+    'mismatched %s never confirms an unsubscribe', async field => {
+      const mock = await fixture(taskState(), request => {
+        if (request.op !== 'github.unsubscribe') return;
+        return {
+          ...confirmation(request),
+          [field]: field === 'reference' ? { ...notification.reference, number: 99 }
+            : field === 'displayedEvidenceIds' ? ['unexpected']
+            : field === 'notificationUpdatedAt' ? previousCompleted : field === 'action' ? 'acknowledge' : '999',
+        };
+      });
+      await expect(mock.queue.unsubscribe(mock.workspace.state.tasks[0]!.id)).rejects.toThrow('mismatched');
+      expect(mock.saved().tasks[0]!.work!.unsubscribe!.status).toBe('unconfirmed');
+    },
+  );
+
+  test('one in-flight unsubscribe covers all actions on a source and preserves concurrent Done', async () => {
+    const saved = taskState();
+    saved.tasks.push({
+      ...structuredClone(saved.tasks[0]!), id: 'reply-task',
+      work: { ...saved.tasks[0]!.work!, action: 'reply', identity: `reply:${saved.tasks[0]!.work!.url}` },
+    });
+    const entered = deferred<Extract<Request, { op: 'github.unsubscribe' }>>();
+    const result = deferred<unknown>();
+    const mock = await fixture(saved, request => {
+      if (request.op !== 'github.unsubscribe') return;
+      entered.resolve(request);
+      return result.promise;
+    });
+    const pending = mock.queue.unsubscribe(saved.tasks[0]!.id);
+    const request = await entered.promise;
+    await expect(mock.queue.unsubscribe('reply-task')).rejects.toThrow('already in progress');
+    mock.queue.complete('reply-task');
+    mock.queue.edit('reply-task', 'Edited during unsubscribe', 'Keep this note');
+    result.resolve(confirmation(request));
+    await pending;
+    expect(mock.saved().tasks.every(task => task.work!.unsubscribe!.status === 'confirmed')).toBe(true);
+    expect(mock.saved().tasks[1]).toMatchObject({ status: 'done', title: 'Edited during unsubscribe', notes: 'Keep this note' });
+    expect(mock.requests).toHaveLength(1);
+  });
+});
+
+describe('conservative source coverage', () => {
   test('pre-cursor saves rescan safely rather than treating a past completion as source coverage', async () => {
     const saved = initial();
     saved.work.settings.streams = defaultWorkState().settings.streams.slice(0, 1);

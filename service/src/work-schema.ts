@@ -9,6 +9,19 @@ const url = z.url().max(2000).refine(value => {
 
 export const workActionSchema = z.enum(['review', 'fix', 'reply', 'merge', 'implement', 'review-result', 'follow-up', 'manual']);
 export const githubWorkActionSchema = z.enum(['review', 'fix', 'reply', 'merge', 'implement', 'follow-up', 'manual']);
+export const workNotificationSchema = z.strictObject({
+  threadId: z.string().regex(/^[1-9]\d{0,19}$/),
+  reference: z.strictObject({
+    repo: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,99}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/),
+    number: z.number().int().positive().safe(), kind: z.enum(['pr', 'issue']),
+  }),
+  updatedAt: time,
+});
+export const workUnsubscribeSchema = z.strictObject({
+  operationId: id, notification: workNotificationSchema,
+  status: z.enum(['pending', 'unconfirmed', 'confirmed']),
+  error: z.string().max(1000), confirmedAt: time.optional(),
+});
 export const workEvidenceSchema = z.strictObject({
   id, source: z.enum(['github', 'slack', 'manual', 'mcp', 'copilot']),
   streamId: id, at: time, url, summary: z.string().min(1).max(2000),
@@ -20,15 +33,17 @@ export const workMetadataSchema = z.strictObject({
   availability: z.enum(['actionable', 'waiting', 'unknown']),
   availabilityReason: z.string().max(1000),
   availabilityObservedAt: time.optional(),
+  notification: workNotificationSchema.optional(),
+  unsubscribe: workUnsubscribeSchema.optional(),
 });
 export const workstreamSchema = z.strictObject({
   id, name: z.string().trim().min(1).max(100), enabled: z.boolean(),
-  kind: z.enum(['github', 'slack', 'mcp']),
+  kind: z.enum(['github', 'github-notifications', 'slack', 'mcp']),
   query: z.string().trim().min(1).max(4000),
   action: workActionSchema,
   server: z.string().max(200),
   tools: z.array(z.string().min(1).max(200)).max(20),
-}).refine(stream => stream.kind !== 'github' || githubWorkActionSchema.safeParse(stream.action).success, {
+}).refine(stream => !isGitHubStream(stream) || githubWorkActionSchema.safeParse(stream.action).success, {
   path: ['action'],
   message: 'Choose a supported GitHub action. Review-result is supported only by Slack/MCP sources and push intake.',
 });
@@ -55,6 +70,7 @@ export const workCandidateSchema = z.strictObject({
   title: z.string().trim().min(1).max(1000),
   action: workActionSchema, url,
   evidence: z.array(workEvidenceSchema).min(1).max(200),
+  notification: workNotificationSchema.optional(),
 });
 export const workObservationSchema = z.strictObject({
   url, state: z.enum(['open', 'queued', 'closed', 'merged', 'unknown']),
@@ -70,6 +86,8 @@ export const workCollectOutputSchema = z.strictObject({
   candidates: z.array(workCandidateSchema).max(200),
   observations: z.array(workObservationSchema).max(300),
   warnings: z.array(z.string().max(1000)).max(30),
+  coverageInfo: z.array(z.string().max(1000)).max(30).optional(),
+  coveredThrough: time.optional(),
   collectedAt: time,
 });
 export const workRankInputSchema = z.strictObject({
@@ -104,6 +122,18 @@ export type WorkCandidate = z.infer<typeof workCandidateSchema>;
 export type WorkObservation = z.infer<typeof workObservationSchema>;
 export type WorkCollection = z.infer<typeof workCollectOutputSchema>;
 export type WorkRankInput = z.infer<typeof workRankInputSchema>;
+
+export function isGitHubStream(stream: { kind: string }): boolean {
+  return stream.kind === 'github' || stream.kind === 'github-notifications';
+}
+
+export function notificationWorkstream(): Workstream {
+  return {
+    id: crypto.randomUUID(), name: 'GitHub notifications', enabled: true,
+    kind: 'github-notifications', query: 'Inspect updated notifications for actionable requests addressed to me.',
+    action: 'follow-up', server: '', tools: [],
+  };
+}
 
 export function defaultWorkState(): WorkState {
   return {

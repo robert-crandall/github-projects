@@ -5,7 +5,7 @@ import { checkAbort, ServiceError } from './errors.ts';
 import { WorkGitHub } from './work-github.ts';
 import { WorkIntake } from './work-intake.ts';
 import { canonicalGithubUrl, McpConnections, normalizeWorkUrl, sourceTime } from './work-mcp.ts';
-import { workCollectInputSchema, workCollectOutputSchema, type WorkCandidate } from './work-schema.ts';
+import { isGitHubStream, workCollectInputSchema, workCollectOutputSchema, type WorkCandidate } from './work-schema.ts';
 
 export class WorkService {
   private readonly github: Pick<WorkGitHub, 'collect' | 'observe'>;
@@ -37,7 +37,7 @@ export class WorkService {
           ? ['Some tracked GitHub sources could not be observed. Inspect their source-state errors.'] : [],
       });
     }
-    if (input.stream.kind === 'github') return this.github.collect(input, signal);
+    if (isGitHubStream(input.stream)) return this.github.collect(input, signal);
     const collectedAt = this.now().toISOString();
     const server = await this.connections.selected(input.stream);
     checkAbort(signal);

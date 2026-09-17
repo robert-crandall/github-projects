@@ -248,8 +248,15 @@ export class NativeMock {
       case 'github.acknowledge':
       case 'github.unsubscribe': {
         const intent = this.state.operations.find(operation => operation.id === request.input.operationId);
-        expect(intent?.status, 'Persist the operation before dispatch').toBe('pending');
-        expect(intent?.eventIds).toEqual(request.input.displayedEvidenceIds);
+        const taskIntent = this.state.tasks.find(task => task.work?.unsubscribe?.operationId === request.input.operationId)?.work?.unsubscribe;
+        expect(intent?.status ?? taskIntent?.status, 'Persist the operation before dispatch').toBe('pending');
+        expect(intent?.eventIds ?? []).toEqual(request.input.displayedEvidenceIds);
+        if (taskIntent) {
+          expect(request.op).toBe('github.unsubscribe');
+          expect(taskIntent.notification.threadId).toBe(request.input.threadId);
+          expect(taskIntent.notification.reference).toEqual(request.input.reference);
+          expect(taskIntent.notification.updatedAt).toBe(request.input.notificationUpdatedAt);
+        }
         if (this.holdWrite) await this.holdWrite.promise;
         if (this.failWrite) throw new ExpectedFailure('GitHub write unavailable; no success was confirmed.');
         result = { ...request.input, action: request.op === 'github.acknowledge' ? 'acknowledge' : 'unsubscribe',

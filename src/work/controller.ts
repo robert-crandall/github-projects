@@ -1,16 +1,17 @@
 import type { z } from 'zod';
 import {
   defaultWorkState, workRankOutputSchema, workSettingsSchema,
-  type workConnectionsSchema, type WorkCollection, type WorkRankInput, type WorkSettings,
+  type workConnectionsSchema, type WorkCollection, type WorkMetadata, type WorkRankInput, type WorkSettings,
 } from '../../service/src/work-schema.ts';
 import { ServiceClient } from '../platform/service.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
-import { completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
+import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type WorkQueueSnapshot = {
   running: boolean; phase: string; error: string; warnings: string[]; connections?: WorkConnections;
+  unsubscribing: string[];
 };
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'The work run failed without usable results.';
@@ -30,6 +31,7 @@ export class WorkQueue {
   constructor(private readonly controller: DesktopWorkspace, private readonly service = new ServiceClient()) {
     this.status = {
       running: false, phase: 'idle', error: controller.getSnapshot().workspace?.state.work?.lastError ?? '', warnings: [],
+      unsubscribing: [],
     };
   }
 
@@ -64,6 +66,52 @@ export class WorkQueue {
   }
   restore(id: string): void {
     this.update(current => restoreWorkTask(current, id));
+  }
+  async unsubscribe(id: string): Promise<void> {
+    const task = this.controller.state.tasks.find(task => task.id === id);
+    if (!task?.work?.notification) throw new Error('Collect this task from notifications before unsubscribing.');
+    const source = canonicalSource(task.work.url);
+    if (this.status.unsubscribing.includes(source)) throw new Error('Unsubscribe is already in progress for this conversation.');
+    if (task.work.unsubscribe?.status === 'confirmed') return;
+    const previous = task.work.unsubscribe;
+    const intent: NonNullable<WorkMetadata['unsubscribe']> = {
+      operationId: previous?.operationId ?? crypto.randomUUID(),
+      notification: previous?.notification ?? task.work.notification, status: 'pending', error: '',
+    };
+    const updateIntent = (next: NonNullable<WorkMetadata['unsubscribe']>) => this.update(current => ({
+      ...current, tasks: current.tasks.map(task => task.work && canonicalSource(task.work.url) === source
+        && (!task.work.unsubscribe || task.work.unsubscribe.operationId === intent.operationId)
+        ? { ...task, work: { ...task.work, unsubscribe: next } } : task),
+    }));
+    this.publish({ unsubscribing: [...this.status.unsubscribing, source] });
+    let dispatched = false;
+    try {
+      updateIntent(intent);
+      await this.controller.flush();
+      const input = {
+        operationId: intent.operationId, threadId: intent.notification.threadId,
+        reference: intent.notification.reference, notificationUpdatedAt: intent.notification.updatedAt,
+        displayedEvidenceIds: [],
+      };
+      dispatched = true;
+      const result = await this.service.call('github.unsubscribe', input);
+      if (result.action !== 'unsubscribe' || result.operationId !== input.operationId
+        || result.threadId !== input.threadId || result.reference.repo !== input.reference.repo
+        || result.reference.kind !== input.reference.kind || result.reference.number !== input.reference.number
+        || result.notificationUpdatedAt !== input.notificationUpdatedAt || result.displayedEvidenceIds.length) {
+        throw new Error('GitHub returned a mismatched unsubscribe confirmation.');
+      }
+      updateIntent({ ...intent, status: 'confirmed', confirmedAt: result.confirmedAt });
+      await this.controller.flush();
+    } catch (error) {
+      const detail = `${dispatched ? 'Unsubscribe is not confirmed.' : 'Unsubscribe was not sent.'} ${message(error)}`;
+      updateIntent({ ...intent, status: 'unconfirmed', error: detail.slice(0, 1000) });
+      try { await this.controller.flush(); }
+      catch (saveError) { this.controller.report(saveError); }
+      throw new Error(detail);
+    } finally {
+      this.publish({ unsubscribing: this.status.unsubscribing.filter(url => url !== source) });
+    }
   }
   edit(id: string, title: string, notes: string): void {
     this.validateText(title, notes);
@@ -171,6 +219,7 @@ export class WorkQueue {
     const warnings: string[] = [];
     let previousCompletedAt: string | null | undefined;
     let previousCursor: string | null = null;
+    let coveredThrough = now.toISOString();
     let scannedSettings = '';
     let completionWritten = false;
     try {
@@ -199,7 +248,16 @@ export class WorkQueue {
               stream, model: settings.model, since: collectionCursor, knownUrls: knownUrls.slice(offset, offset + 100),
               observeOnly: offset > 0,
             });
+            if (result.coveredThrough) {
+              const boundary = Date.parse(result.coveredThrough);
+              if (boundary > Math.min(now.getTime(), Date.parse(result.collectedAt))
+                || (collectionCursor && boundary <= Date.parse(collectionCursor))) {
+                throw new Error('The source returned an invalid scan boundary. Previous coverage is retained.');
+              }
+              if (boundary < Date.parse(coveredThrough)) coveredThrough = result.coveredThrough;
+            }
             await this.persist(result);
+            warnings.push(...(result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`));
             for (const warning of result.warnings) {
               warnings.push(`${stream.name}: ${warning}`);
               errors.push(`${stream.name}: ${warning}`);
@@ -222,7 +280,7 @@ export class WorkQueue {
         return {
           ...current, work: {
             ...current.work, lastError: errors.join('\n').slice(0, 4000),
-            ...(completionWritten ? { lastCompletedAt: new Date().toISOString(), collectionCursor: now.toISOString() } : {}),
+            ...(completionWritten ? { lastCompletedAt: new Date().toISOString(), collectionCursor: coveredThrough } : {}),
           },
         };
       });
@@ -235,7 +293,7 @@ export class WorkQueue {
             ...current.work, lastError: errors.join('\n').slice(0, 4000),
             ...(completionWritten ? { lastCompletedAt: previousCompletedAt ?? null } : {}),
             ...(completionWritten && sourceSettings(current.work.settings) === scannedSettings
-              && current.work.collectionCursor === now.toISOString() ? { collectionCursor: previousCursor } : {}),
+              && current.work.collectionCursor === coveredThrough ? { collectionCursor: previousCursor } : {}),
           },
         }));
         await this.controller.flush();
