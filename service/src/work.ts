@@ -28,6 +28,15 @@ export class WorkService {
     if (!parsed.success) throw new ServiceError('invalid_input');
     const input = parsed.data;
     checkAbort(signal);
+    if (input.observeOnly) {
+      const collectedAt = this.now().toISOString();
+      const observations = await this.github.observe(input.knownUrls, signal);
+      return workCollectOutputSchema.parse({
+        candidates: [], observations, collectedAt,
+        warnings: observations.some(observation => observation.state === 'unknown')
+          ? ['Some tracked GitHub sources could not be observed. Inspect their source-state errors.'] : [],
+      });
+    }
     if (input.stream.kind === 'github') return this.github.collect(input, signal);
     const collectedAt = this.now().toISOString();
     const server = await this.connections.selected(input.stream);

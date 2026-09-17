@@ -17,6 +17,8 @@ Appearance stays separate from tasks and their backups. Desktop preferences use 
 
 Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks and the failure visible. Source failures never masquerade as successful empty results.
 
+Each saved GitHub query collects up to **200 matches**, using pages of 100. Larger or incomplete searches show a coverage warning; missing matches never mark tasks Done. Reply extraction batches source comments, and ranking still considers the whole active queue together.
+
 ### Identity and Done
 
 A task identifies **source + action**, not a notification or search result. The same GitHub PR review discovered in Slack and two GitHub queries is one task, with all its evidence. Reviewing a PR and reading a completed Copilot review are different actions.

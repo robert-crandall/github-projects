@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { PassThrough } from 'node:stream';
 import { serve, type Handler } from '../src/protocol.ts';
 import { LIMITS } from '../src/schema.ts';
 import { ServiceError } from '../src/errors.ts';
+import { defaultWorkState } from '../src/work-schema.ts';
 
 const success = { github: { available: true, scopes: ['repo'], viewer: 'synthetic' }, copilot: { available: true } };
 const request = (id: string, op = 'connection.check', input: unknown = {}) => JSON.stringify({ v: 1, id, op, input }) + '\n';
@@ -72,6 +73,39 @@ test('invalid service output and duplicate request IDs are rejected', async () =
     await tick();
   }, async () => ({ token: 'secret' }));
   expect(replies.map(reply => reply.error)).toMatchObject([{ code: 'invalid_output' }, { code: 'protocol' }]);
+});
+test('work deadline and cancellation errors never imply an external GitHub write', async () => {
+  for (const code of ['deadline', 'cancelled'] as const) {
+    const replies = await harness(async input => {
+      input.write(request('rank', 'work.rank', { instructions: '', model: '', tasks: [] }));
+      await tick();
+    }, async () => { throw new ServiceError(code, true); });
+    expect(replies[0]!.error).toMatchObject({ code, message: expect.stringContaining('read-only') });
+    expect(JSON.stringify(replies)).not.toContain('external write');
+  }
+});
+test('work operations get five minutes without extending legacy operation deadlines', async () => {
+  const timeout = spyOn(globalThis, 'setTimeout');
+  const input = new PassThrough();
+  const replies: unknown[] = [];
+  const task = serve(input, async line => { replies.push(JSON.parse(line)); }, async request => {
+    if (request.op === 'work.rank') return { orderedIds: [], reasons: [] };
+    if (request.op === 'work.collect') return { candidates: [], observations: [], warnings: [], collectedAt: new Date().toISOString() };
+    return success;
+  });
+  try {
+    input.write(request('rank', 'work.rank', { instructions: '', model: '', tasks: [] }));
+    input.write(request('collect', 'work.collect', { stream: defaultWorkState().settings.streams[0], model: '', since: null }));
+    input.write(request('legacy'));
+    await tick();
+    expect(replies).toHaveLength(3);
+    expect(timeout.mock.calls.filter(call => call[1] === 300_000)).toHaveLength(2);
+    expect(timeout.mock.calls.filter(call => call[1] === 120_000)).toHaveLength(1);
+  } finally {
+    input.end();
+    await task;
+    timeout.mockRestore();
+  }
 });
 test('closing stdin cancels active work and incomplete lines are errors', async () => {
   let cancelled = false;

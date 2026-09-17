@@ -197,6 +197,7 @@ export class WorkQueue {
           try {
             const result = await this.service.call('work.collect', {
               stream, model: settings.model, since: collectionCursor, knownUrls: knownUrls.slice(offset, offset + 100),
+              observeOnly: offset > 0,
             });
             await this.persist(result);
             for (const warning of result.warnings) {
