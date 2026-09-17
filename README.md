@@ -54,6 +54,8 @@ bun run native:build
 open "src-tauri/target/release/bundle/macos/GitHub Projects.app"
 ```
 
+The release profile preserves metadata in build-time dependencies to avoid Rust's `E0463` procedural-macro errors on macOS. No environment override is needed.
+
 To build and install into `/Applications`, quit any running copy first:
 
 ```bash
