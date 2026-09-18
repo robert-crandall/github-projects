@@ -23,6 +23,8 @@ Assessments expire within **24 hours**, earlier for time-sensitive work. Compara
 
 Each saved GitHub query collects up to **200 matches**, using pages of 100. Larger or incomplete searches show a coverage warning; missing matches never mark tasks Done. Reply extraction batches source comments, and ranking still considers the whole active queue together.
 
+Saved searches cache timelines and reply extraction across restarts. After a complete baseline, safe queries fetch issues **updated** since the saved scan boundary, with a five-minute overlap and full reconciliation every six hours. Every cached source still receives a live permission/state check, and PR checks and merge queues stay live. Relative or complex queries keep full searches; failed or unsaved runs retain discoveries for replay.
+
 ### Identity and Done
 
 A GitHub task identifies **one issue or PR**, using its normalized URL, not its action, notification or search result. Assignment, follow-up, reply and review requests for the same source join one task, including requests discovered through Slack or MCP. All requests share one Done state. Non-GitHub sources still identify **source + action**; manually captured tasks remain separate.
