@@ -6,6 +6,7 @@ import { archiveBoundary, hasNewActivity, latestTime } from './archive.ts';
 import { threadIdSchema } from '../../service/src/schema.ts';
 import { reconcileTerminal, unknownSourceState } from './terminal.ts';
 import { defaultWorkState } from '../../service/src/work-schema.ts';
+import { consolidateWorkTasks } from '../work/engine.ts';
 
 export function emptyWorkspace(now: string, timeZone: string): AppState {
   new Intl.DateTimeFormat('en-US', { timeZone });
@@ -30,7 +31,7 @@ export function restoreDesktop(value: unknown, now: string): AppState {
       operation.message = 'The app closed before confirmation was saved. Check GitHub or retry explicitly; nothing was replayed.';
     }
   }
-  return transition(state, { type: 'clock', now });
+  return transition(consolidateWorkTasks(state), { type: 'clock', now });
 }
 
 export type RefreshBatch = {

@@ -20,7 +20,7 @@ The notification source initially inspects 30 days of issue/PR activity, then ch
 
 Manual capture saves immediately without a network round trip. Other apps can submit tasks through a durable local MCP intake. A completed Copilot review creates a `review-result` action only when the producer submits it; launching Copilot does not prove review completion.
 
-Identity is canonical source plus action. GitHub repository casing, alternate issue/PR links and URL fragments must not duplicate the same action. Matching the same review through Slack and GitHub retains both sources as evidence on one task.
+GitHub task identity is the canonical issue/PR URL, regardless of action. Repository casing, alternate issue/PR links and URL fragments must not duplicate a task. Assignment, follow-up, reply and review requests for the same issue or PR share one task and Done state, retaining evidence from every source. Non-GitHub identity remains canonical source plus action; manual captures stay separate. Consolidate existing duplicates on load after backing up the saved workspace, preserving notes, evidence, completion and ranking. Keep the task open if any duplicate is unfinished.
 
 **Done** records handled evidence and a completion time. Only an unseen actionable request whose source event is newer than completion can reopen the task. Repeated queries, old messages discovered later, general updates and model decisions cannot undo Done. Current merge-queue, closed or merged state suppresses action without falsely completing tasks.
 

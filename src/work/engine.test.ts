@@ -1,11 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  defaultWorkState, workCollectOutputSchema, workRankInputSchema, type WorkCollection, type WorkEvidence,
+  defaultWorkState, workCollectOutputSchema, workRankInputSchema, type WorkAction, type WorkCollection, type WorkEvidence,
 } from '../../service/src/work-schema.ts';
 import { emptyWorkspace } from '../domain/live.ts';
 import { transition } from '../domain/engine.ts';
 import { stateSchema, type AppState, type Task } from '../types.ts';
-import { canonicalSource, completeWorkTask, rankInput, rankedTasks, reconcileWork, restoreWorkTask, taskIdentity } from './engine.ts';
+import { canonicalSource, completeWorkTask, consolidateWorkTasks, rankInput, rankedTasks, reconcileWork, restoreWorkTask, taskIdentity } from './engine.ts';
 
 const before = '2026-09-15T10:00:00.000Z';
 const completed = '2026-09-15T11:00:00.000Z';
@@ -26,6 +26,12 @@ function batch(events = [evidence()], sourceState: WorkCollection['observations'
 function done(): AppState {
   const initial = reconcileWork(state(), batch(), before);
   return completeWorkTask(initial, initial.tasks[0]!.id, completed);
+}
+function legacyTask(id: string, action: WorkAction): Task & { work: NonNullable<Task['work']> } {
+  const incoming = batch([evidence(id)]);
+  incoming.candidates[0]!.action = action;
+  const task = reconcileWork(state(), incoming, before).tasks[0]!;
+  return { ...task, id, work: { ...task.work!, identity: `${action}:${canonicalSource(url)}` } };
 }
 
 describe('notification discovery metadata', () => {
@@ -61,9 +67,9 @@ describe('notification discovery metadata', () => {
     expect(reopened.tasks[0]!.work!.unsubscribe).toEqual(unsubscribe);
     incoming.candidates[0]!.action = 'reply';
     const secondAction = reconcileWork(initial, incoming, after);
-    expect(secondAction.tasks).toHaveLength(2);
-    expect(secondAction.tasks[1]!.work).toMatchObject({ notification, unsubscribe });
-    expect(secondAction.tasks[0]!.status).toBe('done');
+    expect(secondAction.tasks).toHaveLength(1);
+    expect(secondAction.tasks[0]!.work).toMatchObject({ notification, unsubscribe });
+    expect(secondAction.tasks[0]!.status).toBe('open');
   });
 
   test('a notification cannot attach unsubscribe controls for another source', () => {
@@ -77,7 +83,8 @@ describe('source identity', () => {
   test('GitHub case, number, issue/pull aliases, subpaths, query and anchor share one identity', () => {
     expect(canonicalSource('https://GITHUB.com/OWNER/RePo/pull/0042/files?x=1#discussion')).toBe('https://github.com/owner/repo/issues/42');
     expect(taskIdentity(url, 'review')).toBe(taskIdentity('https://github.com/owner/repo/issues/42#issuecomment-8', 'review'));
-    expect(taskIdentity(url, 'review')).not.toBe(taskIdentity(url, 'review-result'));
+    expect(taskIdentity(url, 'review')).toBe(taskIdentity(url, 'review-result'));
+    expect(taskIdentity(url, 'review')).toBe('https://github.com/owner/repo/issues/42');
     expect(() => canonicalSource('https://user:pass@github.com/owner/repo/pull/42')).toThrow();
   });
 
@@ -85,6 +92,7 @@ describe('source identity', () => {
     expect(canonicalSource(`${slack}/?thread_ts=123#reply`)).toBe(slack);
     expect(canonicalSource('https://TEAM.slack.com/archives/C123/p1789473600.000000')).toBe(slack);
     expect(taskIdentity(slack, 'reply')).not.toBe(taskIdentity(slack.replace('000000', '000001'), 'reply'));
+    expect(taskIdentity(slack, 'reply')).not.toBe(taskIdentity(slack, 'follow-up'));
   });
 
   test.each([
@@ -146,7 +154,7 @@ describe('source identity', () => {
     expect(workCollectOutputSchema.safeParse(incoming).success).toBe(false);
   });
 
-  test('queries and cross-source requests merge once, preserve provenance, and keep review results separate', () => {
+  test('queries and cross-source requests merge once across actions and preserve provenance', () => {
     const first = reconcileWork(state(), batch(), before);
     const incoming = batch([evidence('slack:message:1', before, 'slack'), { ...evidence(), streamId: 'another-github-query' }]);
     incoming.candidates[0]!.url = 'https://github.com/owner/repo/issues/42?source=slack';
@@ -157,12 +165,158 @@ describe('source identity', () => {
     expect(next.tasks[0]!.work!.evidence.map(item => item.source)).toEqual(['github', 'slack', 'github']);
     expect(next.tasks[0]!.work!.evidence[1]!.url).toBe(slack);
     incoming.candidates[0]!.action = 'review-result';
-    expect(reconcileWork(next, incoming, after).tasks).toHaveLength(2);
+    expect(reconcileWork(next, incoming, after).tasks).toHaveLength(1);
     expect(first.tasks[0]!.work!.evidence).toHaveLength(1);
   });
 });
 
+describe('saved task consolidation', () => {
+  test('different actions on one GitHub issue share a row while other sources and captures remain separate', () => {
+    const incoming = batch();
+    incoming.candidates = [
+      { ...incoming.candidates[0]!, url: 'https://github.com/github/usersd/issues/1897', action: 'implement' },
+      { ...incoming.candidates[0]!, url: 'https://github.com/GitHub/Usersd/issues/01897#issuecomment-1', action: 'follow-up' },
+      { ...incoming.candidates[0]!, url: 'https://github.com/github/usersd/issues/1982', action: 'implement' },
+      { ...incoming.candidates[0]!, url: 'https://tracker.example/task?id=1897', action: 'implement' },
+      { ...incoming.candidates[0]!, url: 'https://tracker.example/task?id=1897', action: 'follow-up' },
+    ];
+    const initial = state();
+    initial.tasks.push({ id: 'capture', title: incoming.candidates[0]!.url, notes: '', status: 'open', createdAt: before });
+    const next = reconcileWork(initial, incoming, after);
+    expect(next.tasks).toHaveLength(5);
+    expect(next.tasks.filter(task => task.work?.url.includes('/usersd/issues/1897'))).toHaveLength(1);
+    expect(next.tasks[0]).toEqual(initial.tasks[0]);
+  });
+
+  test('saved duplicates combine notes and evidence, stay open, remap references and persist idempotently', () => {
+    const initial = state();
+    const first = legacyTask('first', 'implement');
+    const second = legacyTask('second', 'follow-up');
+    first.title = 'Owner title';
+    first.notes = 'Keep my implementation notes';
+    first.status = 'done';
+    first.completedAt = completed;
+    first.work.handledEvidenceIds = ['first'];
+    second.title = 'Resolve overdue repair item';
+    second.notes = 'Keep my follow-up notes\n  ';
+    second.work.evidence.push(first.work.evidence[0]!);
+    const capture: Task = { id: 'capture', title: 'Manual task', notes: 'Separate', status: 'open', createdAt: before };
+    initial.tasks = [first, second, capture];
+    initial.selectedKey = 'a:second';
+    initial.order = ['a:second', 'a:capture', 'a:first'];
+    initial.newKeys = ['a:second', 'a:first'];
+    initial.undo = [first, second, capture].map(task => ({ before: task, after: task }));
+    initial.work.ranking = {
+      orderedIds: ['second', 'capture', 'first'],
+      reasons: [{ id: 'second', reason: 'Overdue' }, { id: 'capture', reason: 'Next' }, { id: 'first', reason: 'Assigned' }],
+      rankedAt: before,
+    };
+    const next = reconcileWork(initial, { ...batch(), candidates: [], observations: [] }, after);
+    expect(next.tasks).toHaveLength(2);
+    expect(next.tasks[0]).toMatchObject({
+      id: 'first', title: 'Owner title', status: 'open', completedAt: completed,
+      notes: 'Keep my implementation notes\n\nResolve overdue repair item\nKeep my follow-up notes\n  ',
+      work: { identity: canonicalSource(url), handledEvidenceIds: ['first'] },
+    });
+    expect(next.tasks[0]!.work!.evidence.map(item => item.id)).toEqual(['first', 'second']);
+    expect(next.selectedKey).toBe('a:first');
+    expect(next.order).toEqual(['a:first', 'a:capture']);
+    expect(next.newKeys).toEqual(['a:first']);
+    expect(next.work.ranking).toEqual({
+      orderedIds: ['first', 'capture'], reasons: [{ id: 'first', reason: 'Overdue' }, { id: 'capture', reason: 'Next' }], rankedAt: before,
+    });
+    expect(next.undo).toEqual([{ before: capture, after: capture }]);
+    expect(next.tasks[1]).toEqual(capture);
+    expect(initial.tasks).toHaveLength(3);
+    expect(initial.tasks[0]!.notes).toBe('Keep my implementation notes');
+    const reloaded = stateSchema.parse(JSON.parse(JSON.stringify(next)));
+    expect(consolidateWorkTasks(reloaded)).toBe(reloaded);
+    expect(rankInput(reloaded).tasks.map(task => task.id)).toEqual(['first', 'capture']);
+  });
+
+  test.each([false, true])('all-Done groups keep completion and handled evidence, including missing boundaries: %s', missing => {
+    const initial = state();
+    const first = legacyTask('first', 'implement');
+    const second = legacyTask('second', 'follow-up');
+    const third = legacyTask('third', 'reply');
+    for (const task of [first, second, third]) {
+      task.status = 'done';
+      task.completedAt = completed;
+      task.work.handledEvidenceIds = [task.id];
+    }
+    second.completedAt = after;
+    if (missing) delete first.completedAt;
+    initial.tasks = [first, second, third];
+    const next = consolidateWorkTasks(initial);
+    expect(next.tasks).toHaveLength(1);
+    expect(next.tasks[0]!.status).toBe('done');
+    expect(next.tasks[0]!.completedAt).toBe(missing ? undefined : after);
+    expect(next.tasks[0]!.work!.handledEvidenceIds).toEqual(['first', 'second', 'third']);
+    const incoming = batch([evidence('older-new-action', completed)]);
+    incoming.candidates[0]!.action = 'fix';
+    expect(reconcileWork(next, incoming, after).tasks[0]!.status).toBe('done');
+  });
+
+  test.each([false, true])('newest source and notification state survive either saved row order: %s', reverse => {
+    const first = legacyTask('first', 'implement');
+    const second = legacyTask('second', 'follow-up');
+    const notification = { threadId: '123', reference: { repo: 'Owner/Repo', number: 42, kind: 'pr' as const }, updatedAt: before };
+    first.work.availabilityObservedAt = before;
+    first.work.notification = notification;
+    second.work.availability = 'waiting';
+    second.work.availabilityReason = 'In merge queue';
+    second.work.availabilityObservedAt = after;
+    second.work.notification = { ...notification, updatedAt: after };
+    second.work.unsubscribe = { operationId: 'unsubscribe:1', notification, status: 'unconfirmed', error: 'Retry explicitly' };
+    const initial = state();
+    initial.tasks = reverse ? [second, first] : [first, second];
+    const next = consolidateWorkTasks(initial);
+    expect(next.tasks[0]!.work).toMatchObject({
+      availability: 'waiting', availabilityReason: 'In merge queue', availabilityObservedAt: after,
+      notification: { updatedAt: after }, unsubscribe: second.work.unsubscribe,
+    });
+    expect(rankedTasks(next)).toEqual([]);
+  });
+
+  test('invalid notification references and evidence overflow block consolidation rather than dropping data', () => {
+    const initial = state();
+    const first = legacyTask('first', 'implement');
+    const second = legacyTask('second', 'follow-up');
+    second.work.notification = { threadId: '123', reference: { repo: 'Other/Repo', number: 42, kind: 'pr' }, updatedAt: after };
+    initial.tasks = [first, second];
+    expect(() => consolidateWorkTasks(initial)).toThrow('notification does not match');
+    delete second.work.notification;
+    for (const task of initial.tasks) task.work!.evidence = Array.from({ length: 1001 }, (_, index) => evidence(`${task.id}:${index}`));
+    expect(() => consolidateWorkTasks(initial)).toThrow();
+    expect(initial.tasks).toHaveLength(2);
+    expect(initial.tasks[0]!.work!.evidence).toHaveLength(1001);
+  });
+});
+
 describe('owner completion boundaries', () => {
+  test('different actions share Done, ignore old evidence and reopen once for a genuinely new request', () => {
+    const previous = done();
+    const incoming = batch([evidence('old-follow-up', before)]);
+    incoming.candidates[0]!.action = 'follow-up';
+    incoming.candidates[0]!.title = 'A different suggested title';
+    previous.tasks[0]!.title = 'Keep my title';
+    previous.tasks[0]!.notes = 'Keep my notes';
+    const old = reconcileWork(previous, incoming, after);
+    expect(old.tasks).toHaveLength(1);
+    expect(old.tasks[0]).toMatchObject({ id: previous.tasks[0]!.id, status: 'done', title: 'Keep my title', notes: 'Keep my notes' });
+    incoming.candidates[0]!.action = 'implement';
+    incoming.candidates[0]!.evidence = [evidence('new-implementation-request', after)];
+    const reopened = reconcileWork(old, incoming, after);
+    expect(reopened.tasks).toHaveLength(1);
+    expect(reopened.tasks[0]!.status).toBe('open');
+    const finished = completeWorkTask(reopened, reopened.tasks[0]!.id, after);
+    expect(finished.tasks[0]!.work!.handledEvidenceIds).toEqual(['github:event:1', 'old-follow-up', 'new-implementation-request']);
+    incoming.candidates[0]!.action = 'reply';
+    const replayed = reconcileWork(finished, incoming, after);
+    expect(replayed.tasks).toHaveLength(1);
+    expect(replayed.tasks[0]!.status).toBe('done');
+  });
+
   test('retained workspace Done and restore use handled IDs and keep the completion boundary', () => {
     const initial = reconcileWork(state(), batch(), before);
     const key = `a:${initial.tasks[0]!.id}`;
@@ -305,9 +459,9 @@ describe('source availability and ranking', () => {
     const incoming = { ...batch([evidence('slack:fix', after, 'slack')]), observations: [] };
     incoming.candidates[0]!.action = 'fix';
     const next = reconcileWork(queued, incoming, after);
-    expect(next.tasks).toHaveLength(2);
-    expect(next.tasks[1]!.work!.availability).toBe('waiting');
-    expect(next.tasks[1]!.work!.availabilityObservedAt).toBe(after);
+    expect(next.tasks).toHaveLength(1);
+    expect(next.tasks[0]!.work!.availability).toBe('waiting');
+    expect(next.tasks[0]!.work!.availabilityObservedAt).toBe(after);
     expect(rankedTasks(next)).toEqual([]);
     const delayed = reconcileWork(next, {
       ...batch([], 'open'), candidates: [],
