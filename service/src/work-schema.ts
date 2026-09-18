@@ -26,6 +26,11 @@ export const workEvidenceSchema = z.strictObject({
   id, source: z.enum(['github', 'slack', 'manual', 'mcp', 'copilot']),
   streamId: id, at: time, url, summary: z.string().min(1).max(2000),
 });
+export const workSourceContextSchema = z.strictObject({
+  revision: z.string().regex(/^[a-f0-9]{64}$/),
+  title: z.string().max(2000), body: z.string().max(100000),
+  labels: z.array(z.string().max(200)).max(100),
+});
 export const workMetadataSchema = z.strictObject({
   identity: z.string().min(1).max(2014), action: workActionSchema, url,
   evidence: z.array(workEvidenceSchema).max(2000),
@@ -33,6 +38,8 @@ export const workMetadataSchema = z.strictObject({
   availability: z.enum(['actionable', 'waiting', 'unknown']),
   availabilityReason: z.string().max(1000),
   availabilityObservedAt: time.optional(),
+  context: workSourceContextSchema.optional(),
+  contextObservedAt: time.optional(),
   notification: workNotificationSchema.optional(),
   unsubscribe: workUnsubscribeSchema.optional(),
 });
@@ -57,6 +64,7 @@ export const workRankingSchema = z.strictObject({
   orderedIds: z.array(id).max(2000),
   reasons: z.array(z.strictObject({ id, reason: z.string().trim().min(1).max(1000) })).max(2000),
   rankedAt: time,
+  expiresAt: time.optional(),
 });
 export const workStateSchema = z.strictObject({
   settings: workSettingsSchema,
@@ -75,6 +83,7 @@ export const workCandidateSchema = z.strictObject({
 export const workObservationSchema = z.strictObject({
   url, state: z.enum(['open', 'queued', 'closed', 'merged', 'unknown']),
   observedAt: time, reason: z.string().max(1000),
+  context: workSourceContextSchema.optional(),
 });
 export const workCollectInputSchema = z.strictObject({
   stream: workstreamSchema, model: z.string().max(100),
@@ -97,9 +106,14 @@ export const workRankInputSchema = z.strictObject({
     action: workActionSchema, url: url.nullable(),
     evidence: z.array(workEvidenceSchema).max(2000),
     createdAt: time,
+    availability: z.enum(['actionable', 'unknown']).optional(),
+    availabilityReason: z.string().max(1000).optional(),
+    context: workSourceContextSchema.optional(),
   })).max(2000),
 });
-export const workRankOutputSchema = workRankingSchema.omit({ rankedAt: true });
+export const workRankOutputSchema = workRankingSchema.omit({ rankedAt: true }).extend({
+  evaluatedAt: time.optional(),
+});
 export const workConnectionsSchema = z.strictObject({
   servers: z.array(z.strictObject({
     name: z.string(), tools: z.array(z.string()), source: z.string(),
@@ -114,6 +128,7 @@ export const workIntakeAckSchema = z.strictObject({ ids: z.array(id).max(200) })
 
 export type WorkAction = z.infer<typeof workActionSchema>;
 export type WorkEvidence = z.infer<typeof workEvidenceSchema>;
+export type WorkSourceContext = z.infer<typeof workSourceContextSchema>;
 export type WorkMetadata = z.infer<typeof workMetadataSchema>;
 export type Workstream = z.infer<typeof workstreamSchema>;
 export type WorkSettings = z.infer<typeof workSettingsSchema>;

@@ -6,6 +6,7 @@ import { emptyWorkspace } from '../domain/live.ts';
 import { transition } from '../domain/engine.ts';
 import { stateSchema, type AppState, type Task } from '../types.ts';
 import { canonicalSource, completeWorkTask, consolidateWorkTasks, rankInput, rankedTasks, reconcileWork, restoreWorkTask, taskIdentity } from './engine.ts';
+import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 
 const before = '2026-09-15T10:00:00.000Z';
 const completed = '2026-09-15T11:00:00.000Z';
@@ -33,6 +34,88 @@ function legacyTask(id: string, action: WorkAction): Task & { work: NonNullable<
   const task = reconcileWork(state(), incoming, before).tasks[0]!;
   return { ...task, id, work: { ...task.work!, identity: `${action}:${canonicalSource(url)}` } };
 }
+
+describe('current source context separate from immutable evidence', () => {
+  const context = { revision: 'a'.repeat(64), title: 'Current title', body: 'Current body', labels: ['bug'] };
+  test('same-ID source edits persist across restart and affect rank without changing owner text or Done', () => {
+    const first = batch();
+    first.observations[0]!.context = context;
+    const saved = reconcileWork(state(), first, before);
+    saved.tasks[0]!.title = 'Owner title';
+    saved.tasks[0]!.notes = 'Owner notes';
+    const original = rankInput(saved);
+    const completedState = completeWorkTask(saved, saved.tasks[0]!.id, completed);
+    const edited = { ...context, body: 'Urgent deadline changed', revision: 'b'.repeat(64) };
+    const updated = reconcileWork(completedState, {
+      ...batch(), candidates: [],
+      observations: [{ url, state: 'open', observedAt: after, reason: 'Source is open', context: edited }],
+    }, after);
+    const reloaded = stateSchema.parse(JSON.parse(JSON.stringify(updated)));
+    expect(reloaded.tasks[0]).toMatchObject({
+      title: 'Owner title', notes: 'Owner notes', status: 'done',
+      work: { context: edited, contextObservedAt: after, evidence: saved.tasks[0]!.work!.evidence },
+    });
+    expect(rankInput(reloaded).tasks).toEqual([]);
+    const restored = restoreWorkTask(reloaded, reloaded.tasks[0]!.id);
+    expect(rankInput(restored).tasks[0]!.context).toEqual(edited);
+    expect(semanticRankTask(rankInput(restored).tasks[0]!)).not.toEqual(semanticRankTask(original.tasks[0]!));
+  });
+  test('incidental confirmation times and evidence provenance do not change effective assessment input', () => {
+    const first = batch();
+    first.observations[0]!.context = context;
+    const saved = reconcileWork(state(), first, before);
+    const incoming = batch([{ ...evidence(), streamId: 'another-query' }]);
+    incoming.observations[0] = { ...incoming.observations[0]!, observedAt: '2026-09-16T00:00:00.000Z', context };
+    const updated = reconcileWork(saved, incoming, after);
+    expect(updated.tasks[0]!.work!.availabilityObservedAt).not.toBe(saved.tasks[0]!.work!.availabilityObservedAt);
+    expect(updated.tasks[0]!.work!.evidence).toHaveLength(2);
+    expect(semanticRankTask(rankInput(updated).tasks[0]!)).toEqual(semanticRankTask(rankInput(saved).tasks[0]!));
+  });
+  test('unknown source retains latest known context with its own timestamp and rejects stale content', () => {
+    const first = batch();
+    first.observations[0]!.context = context;
+    const saved = reconcileWork(state(), first, before);
+    const unknownAt = '2026-09-15T14:00:00.000Z';
+    const unknown = reconcileWork(saved, {
+      ...batch(), candidates: [],
+      observations: [{ url, state: 'unknown', observedAt: unknownAt, reason: 'Unavailable' }],
+    }, unknownAt);
+    expect(unknown.tasks[0]!.work).toMatchObject({ availability: 'unknown', context, contextObservedAt: after });
+    const stale = reconcileWork(unknown, {
+      ...batch(), candidates: [],
+      observations: [{ url, state: 'open', observedAt: before, reason: 'Open', context: { ...context, body: 'Old body' } }],
+    }, unknownAt);
+    expect(stale.tasks[0]!.work!.context).toEqual(context);
+    expect(rankInput(stale).tasks[0]).toMatchObject({ availability: 'unknown', availabilityReason: 'Unavailable', context });
+  });
+  test.each([false, true])('duplicate consolidation preserves newest known context despite later failed checks: %s', reverse => {
+    const first = legacyTask('first', 'implement');
+    const second = legacyTask('second', 'reply');
+    first.work.context = { ...context, body: 'Older known content' };
+    first.work.contextObservedAt = before;
+    first.work.availability = 'unknown';
+    first.work.availabilityObservedAt = '2026-09-16T00:00:00.000Z';
+    second.work.context = context;
+    second.work.contextObservedAt = after;
+    const saved = state();
+    saved.tasks = reverse ? [second, first] : [first, second];
+    const merged = consolidateWorkTasks(saved);
+    expect(merged.tasks[0]!.work).toMatchObject({ availability: 'unknown', context, contextObservedAt: after });
+  });
+  test('closed sources leave active ordering without completing the owner task', () => {
+    const first = batch();
+    first.observations[0]!.context = context;
+    const saved = reconcileWork(state(), first, before);
+    const closed = reconcileWork(saved, { ...batch([], 'closed'), candidates: [] }, after);
+    expect(closed.tasks[0]!.status).toBe('open');
+    expect(rankInput(closed).tasks).toEqual([]);
+  });
+  test('oversized source contexts fail instead of silently shortening or dropping current content', () => {
+    const incoming = batch();
+    incoming.observations[0]!.context = { ...context, body: 'x'.repeat(100001) };
+    expect(() => reconcileWork(state(), incoming, after)).toThrow();
+  });
+});
 
 describe('notification discovery metadata', () => {
   const notification = { threadId: '123', reference: { repo: 'Owner/Repo', number: 42, kind: 'pr' as const }, updatedAt: after };
@@ -422,8 +505,8 @@ describe('source availability and ranking', () => {
     unknown.tasks[0]!.notes = 'Owner task note';
     expect(rankedTasks(unknown)).toHaveLength(1);
     const input = rankInput(unknown);
-    expect(input.tasks[0]!.notes).toContain('Source availability: unknown.');
-    expect(input.tasks[0]!.notes).toContain('The source state has not been confirmed.');
+    expect(input.tasks[0]!.availability).toBe('unknown');
+    expect(input.tasks[0]!.availabilityReason).toBe('The source state has not been confirmed.');
     expect(input.tasks[0]!.notes).toContain('Owner task note');
     expect(unknown.tasks[0]!.notes).toBe('Owner task note');
     incoming.observations = [
@@ -441,7 +524,7 @@ describe('source availability and ranking', () => {
       const next = reconcileWork(state(), incoming, before);
       expect(rankedTasks(next)).toHaveLength(1);
       expect(next.tasks[0]!.work!.availability).toBe('unknown');
-      expect(rankInput(next).tasks[0]!.notes).toContain('Source availability: unknown.');
+      expect(rankInput(next).tasks[0]!.availability).toBe('unknown');
     }
   });
 
