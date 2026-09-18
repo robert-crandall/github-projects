@@ -7,6 +7,7 @@ import { ServiceClient } from '../platform/service.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
 import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
+import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type WorkQueueSnapshot = {
@@ -179,8 +180,8 @@ export class WorkQueue {
 
   private async rank(): Promise<string[]> {
     const input = rankInput(this.controller.state);
-    const submitted = new Map(this.controller.state.tasks.map(task => [task.id, JSON.stringify(task)]));
-    // Empty queues have nothing to order; every nonempty queue goes through the SDK.
+    const submitted = new Map(input.tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
+    // The backend reuses durable assessments and ordering when their inputs remain valid.
     const result = input.tasks.length
       ? workRankOutputSchema.parse(await this.service.call('work.rank', input))
       : { orderedIds: [], reasons: [] };
@@ -195,9 +196,8 @@ export class WorkQueue {
         throw new Error('Ranking settings changed during the run. The previous order is retained; run again with the saved settings.');
       }
       const latest: WorkRankInput = rankInput(current);
-      const eligible = new Set(latest.tasks.map(task => task.id));
-      const matching = new Set(current.tasks.filter(task => eligible.has(task.id)
-        && submitted.get(task.id) === JSON.stringify(task)).map(task => task.id));
+      const matching = new Set(latest.tasks.filter(task =>
+        submitted.get(task.id) === JSON.stringify(semanticRankTask(task))).map(task => task.id));
       const unranked = latest.tasks.length - matching.size;
       if (unranked) warnings.push(`${unranked} new or edited task${unranked === 1 ? ' is' : 's are'} unranked. Run again to include ${unranked === 1 ? 'it' : 'them'}.`);
       return {
@@ -205,7 +205,8 @@ export class WorkQueue {
           ...current.work, ranking: {
             orderedIds: result.orderedIds.filter(id => matching.has(id)),
             reasons: result.reasons.filter(reason => matching.has(reason.id)),
-            rankedAt: new Date().toISOString(),
+            rankedAt: result.evaluatedAt ?? new Date().toISOString(),
+            ...(result.expiresAt ? { expiresAt: result.expiresAt } : {}),
           },
         },
       };

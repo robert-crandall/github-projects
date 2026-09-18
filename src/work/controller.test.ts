@@ -289,7 +289,7 @@ describe('runs and persistence barriers', () => {
       };
       if (request.op === 'work.rank') {
         expect(request.input.tasks).toHaveLength(1);
-        expect(request.input.tasks[0]!.notes).toContain('Source availability: unknown. State check was unavailable.');
+        expect(request.input.tasks[0]).toMatchObject({ availability: 'unknown', availabilityReason: 'State check was unavailable.' });
       }
     });
     await mock.queue.run();
@@ -836,6 +836,32 @@ describe('intake acknowledgement', () => {
 });
 
 describe('concurrency and exact ranking', () => {
+  test.each([false, true])('source context changes invalidate in-flight reasons while timestamps alone do not: %s', async changed => {
+    const incoming = collection();
+    const context = { revision: 'a'.repeat(64), title: 'Source title', body: 'Body', labels: [] };
+    incoming.observations[0]!.context = context;
+    const saved = reconcileWork(initial(), incoming, before);
+    const entered = deferred<Extract<Request, { op: 'work.rank' }>>();
+    const result = deferred<unknown>();
+    const mock = await fixture(saved, request => {
+      if (request.op === 'work.rank') { entered.resolve(request); return result.promise; }
+    });
+    const run = mock.queue.run();
+    const request = await entered.promise;
+    mock.workspace.update(current => reconcileWork(current, {
+      candidates: [], observations: [{
+        url, state: 'open', observedAt: previousCompleted, reason: 'Open source',
+        context: changed ? { ...context, body: 'Changed source body', revision: 'b'.repeat(64) } : context,
+      }], warnings: [], collectedAt: previousCompleted,
+    }, previousCompleted));
+    result.resolve({ ...ranked(request), evaluatedAt: before, expiresAt: previousCompleted });
+    await run;
+    expect(mock.saved().work.ranking!.orderedIds).toEqual(changed ? [] : [saved.tasks[0]!.id]);
+    expect(mock.saved().work.ranking!.rankedAt).toBe(before);
+    expect(mock.saved().work.ranking!.expiresAt).toBe(previousCompleted);
+    expect(mock.queue.getSnapshot().warnings.length).toBe(changed ? 1 : 0);
+  });
+
   test('collection merges into latest Done, capture and settings without reopening old evidence', async () => {
     const saved = reconcileWork(initial(), collection(), before);
     saved.work.settings.streams = defaultWorkState().settings.streams.slice(0, 1);

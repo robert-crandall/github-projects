@@ -9,6 +9,7 @@ import { WorkService } from '../src/work.ts';
 import type { WorkRankInput, Workstream } from '../src/work-schema.ts';
 import { LIMITS } from '../src/schema.ts';
 import { ServiceError } from '../src/errors.ts';
+import { semanticRankTask } from '../src/work-rank-input.ts';
 
 const at = '2026-09-10T12:00:00Z';
 const stream: Workstream = {
@@ -47,13 +48,24 @@ async function sdkHarness<T>(operation: (context: {
     start: async () => {}, getAuthStatus: async () => ({ isAuthenticated: authenticated }),
     createSession: async config => {
       configs.push(config);
+      let input: { evaluatedAt: string; tasks: { id: string }[] };
       return {
         sessionId: 'work-session', abort: async () => {}, disconnect: async () => {},
         sendAndWait: async (options, timeout) => {
           prompts.push(options.prompt);
           timeouts.push(timeout);
           await hook?.(config);
-          return { data: { content: JSON.stringify(response) } };
+          if (options.prompt.startsWith('{')) input = JSON.parse(options.prompt).input;
+          const system = config.systemMessage as { content: string };
+          const result = system.content.startsWith('Assess each task') ? {
+            assessments: input.tasks.map(task => ({
+              id: task.id, importance: 'Explicit task', urgency: 'No deadline', blockers: 'None known',
+              supportingEvidence: [{ reference: '$title', summary: 'Explicit task' }],
+              uncertainty: 'No further evidence', reevaluateAt: '2026-09-11T12:00:00.000Z',
+            })),
+          } : system.content.startsWith('Order the WHOLE') && typeof response === 'object' && response !== null
+            ? { ...response, reevaluateAt: '2026-09-10T13:00:00.000Z' } : response;
+          return { data: { content: JSON.stringify(result) } };
         },
       };
     },
@@ -63,6 +75,7 @@ async function sdkHarness<T>(operation: (context: {
     return await operation({
       sdk: new CopilotService({ client: options => { clients.push(options); return client; }, cli: async () => '/fake/copilot', token: async () => 'test-only',
         diagnostic: () => {}, stateDirectory: () => directory,
+        now: () => new Date(at),
         mcpOAuthScope: () => ({ homeDirectory: directory, configDirectory: join(directory, 'oauth') }) }),
       configs, clients, prompts, timeouts, setResponse: value => { response = value; }, setHook: value => { hook = value; },
       setAuth: value => { authenticated = value; },
@@ -82,12 +95,14 @@ describe('isolated Copilot work operations', () => {
   test('rank gets selected model and owner instructions, no tools, exact permutation and reasons', async () => {
     await sdkHarness(async ({ sdk, configs, prompts, setResponse }) => {
       setResponse({ ranking: [{ id: 'T2', reason: 'First' }, { id: 'T1', reason: 'Second' }] });
-      expect(await sdk.rankWork(tasks, signal())).toEqual({
+      expect(await sdk.rankWork(tasks, signal())).toMatchObject({
         orderedIds: ['b', 'a'], reasons: [{ id: 'b', reason: 'First' }, { id: 'a', reason: 'Second' }],
       });
       expect(configs[0]).toMatchObject({ model: 'selected-model', availableTools: [], mcpServers: {}, tools: [], mcpOAuthTokenStorage: 'in-memory' });
       expect(configs[0]!.systemMessage).toMatchObject({ content: expect.stringContaining(tasks.instructions) });
-      expect(JSON.parse(prompts[0]!).input.tasks).toEqual(tasks.tasks.map((task, index) => ({ ...task, id: `T${index + 1}` })));
+      expect(JSON.parse(prompts[0]!).input.tasks).toEqual(tasks.tasks.map((task, index) => ({ ...semanticRankTask(task), id: `T${index + 1}` })));
+      expect(JSON.parse(prompts[1]!).input.tasks[0]).toHaveProperty('assessment');
+      expect(JSON.parse(prompts[1]!).input.tasks[0]).not.toHaveProperty('notes');
       expect(configs[0]!.systemMessage).toMatchObject({ content: expect.not.stringContaining(tasks.tasks[0]!.notes) });
     });
   });
@@ -114,12 +129,12 @@ describe('isolated Copilot work operations', () => {
       expect(Buffer.byteLength(JSON.stringify({ tasks: large.tasks }))).toBeLessThan(LIMITS.workModelBytes);
       setResponse({ ranking: large.tasks.map((_, index) => ({ id: `T${index + 1}`, reason: `Priority ${index + 1}` })).reverse() });
       const result = await sdk.rankWork(large, signal());
-      expect(result.orderedIds).toEqual(large.tasks.map(task => task.id).reverse());
+      expect(result.orderedIds).toEqual(large.tasks.map(task => task.id).sort().reverse());
       expect(result.reasons.map(reason => reason.id)).toEqual(result.orderedIds);
       expect(JSON.parse(prompts[0]!).input.tasks).toHaveLength(200);
       expect(JSON.parse(prompts[0]!).input.tasks[199].notes).toBe(large.tasks[199]!.notes);
-      expect(configs).toHaveLength(1);
-      expect(timeouts).toEqual([LIMITS.workModelMs]);
+      expect(configs).toHaveLength(2);
+      expect(timeouts).toEqual([LIMITS.workModelMs, LIMITS.workModelMs]);
     });
   });
   test('ranking still refuses oversized input before SDK startup, without silently dropping tasks', async () => {
@@ -135,11 +150,11 @@ describe('isolated Copilot work operations', () => {
     await sdkHarness(async ({ sdk, prompts, setResponse, setHook }) => {
       setHook(async () => {
         setResponse({ ranking: [
-          { id: 'T1', reason: 'First' }, { id: prompts.length === 1 ? 'T1' : 'T2', reason: 'Second' },
+          { id: 'T1', reason: 'First' }, { id: prompts.length === 2 ? 'T1' : 'T2', reason: 'Second' },
         ] });
       });
       expect((await sdk.rankWork(tasks, signal())).orderedIds).toEqual(['a', 'b']);
-      expect(prompts).toHaveLength(2);
+      expect(prompts).toHaveLength(3);
     });
   });
   test('reply references restore verbatim evidence rather than asking the model to copy IDs and links', async () => {
