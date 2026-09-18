@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { createNativePlatform, snapshotSchema, type NativeWorkspace } from '../platform/native.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
+import { emptyWorkspace } from '../domain/live.ts';
+import { reconcileWork } from '../work/engine.ts';
 import { DesktopWorkspace } from './desktop-workspace.ts';
 
 const now = '2026-09-11T20:00:00Z';
@@ -129,6 +131,61 @@ test('desktop migration backs up v2 before saving notes and Tasks with schedules
 
 test('failed migration backup blocks conversion and leaves original workspace recoverable', async () => {
   const original = legacySnapshot();
+  const mock = fixture(original);
+  mock.failBackup();
+  const workspace = new DesktopWorkspace(mock.platform);
+  await workspace.load();
+  expect(workspace.getSnapshot().workspace).toBeNull();
+  expect(workspace.getSnapshot().loadError).toContain('Backup failed');
+  expect(mock.saved()).toEqual(original);
+  expect(mock.commands).not.toContain('workspace_save');
+});
+
+function duplicateSnapshot(): NativeWorkspace {
+  const url = 'https://github.com/github/usersd/issues/1897';
+  const state = reconcileWork(emptyWorkspace(now, 'UTC'), {
+    candidates: [{
+      title: 'Implement the repair', action: 'implement', url,
+      evidence: [{ id: 'assignment', source: 'github', streamId: 'assigned', at: now, url, summary: 'Assigned repair' }],
+    }],
+    observations: [{ url, state: 'open', observedAt: now, reason: '' }], warnings: [], collectedAt: now,
+  }, now);
+  const first = state.tasks[0]!;
+  first.work!.identity = `implement:${url}`;
+  state.tasks.push({
+    ...first, id: 'follow-up', title: 'Resolve the overdue repair', notes: 'Follow-up notes',
+    work: {
+      ...first.work!, identity: `follow-up:${url}`, action: 'follow-up',
+      evidence: [{ id: 'request', source: 'github', streamId: 'notifications', at: now, url, summary: 'Resolve overdue repair' }],
+    },
+  });
+  state.selectedKey = 'a:follow-up';
+  return {
+    revision: crypto.randomUUID(), savedAt: now,
+    snapshot: snapshotSchema.parse({ formatVersion: 1, workspace: { version: 1, state, scroll: {} }, reminders: [] }),
+  };
+}
+
+test('loading saved duplicates backs up before persisting one task and never repeats the backup', async () => {
+  const original = duplicateSnapshot();
+  const mock = fixture(original);
+  const workspace = new DesktopWorkspace(mock.platform);
+  await workspace.load(); await workspace.flush();
+  expect(mock.commands).toEqual(['workspace_read', 'clock_now', 'workspace_create_backup', 'workspace_save']);
+  expect(mock.backups).toEqual([original]);
+  expect(workspace.state.tasks).toHaveLength(1);
+  const task = workspace.state.tasks[0]!;
+  expect(task.notes).toBe('Resolve the overdue repair\nFollow-up notes');
+  expect(task.work!.evidence.map(item => item.id)).toEqual(['assignment', 'request']);
+  expect(workspace.state.selectedKey).toBe(`a:${task.id}`);
+  const reloaded = new DesktopWorkspace(mock.platform);
+  await reloaded.load(); await reloaded.flush();
+  expect(reloaded.state.tasks).toEqual(workspace.state.tasks);
+  expect(mock.backups).toEqual([original]);
+});
+
+test('a failed duplicate backup prevents any change to saved tasks', async () => {
+  const original = duplicateSnapshot();
   const mock = fixture(original);
   mock.failBackup();
   const workspace = new DesktopWorkspace(mock.platform);

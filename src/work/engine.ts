@@ -28,7 +28,9 @@ export function canonicalSource(value: string): string {
 }
 
 export function taskIdentity(url: string, action: WorkAction): string {
-  return workMetadataSchema.shape.identity.parse(`${action}:${canonicalSource(url)}`);
+  const source = canonicalSource(url);
+  const github = /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+$/.test(source);
+  return workMetadataSchema.shape.identity.parse(github ? source : `${action}:${source}`);
 }
 
 function timestamp(now: string | Date): string {
@@ -79,9 +81,95 @@ function notificationSource(notification: NonNullable<WorkMetadata['notification
   return canonicalSource(`https://github.com/${notification.reference.repo}/issues/${notification.reference.number}`);
 }
 
+function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work: WorkMetadata }): Task {
+  const availabilityPriority = { actionable: 0, unknown: 1, waiting: 2 };
+  const firstObserved = first.work.availabilityObservedAt ? Date.parse(first.work.availabilityObservedAt) : 0;
+  const secondObserved = second.work.availabilityObservedAt ? Date.parse(second.work.availabilityObservedAt) : 0;
+  const observation = secondObserved > firstObserved || (secondObserved === firstObserved
+    && availabilityPriority[second.work.availability] > availabilityPriority[first.work.availability])
+    ? second.work : first.work;
+  const notification = !first.work.notification || (second.work.notification
+    && Date.parse(second.work.notification.updatedAt) > Date.parse(first.work.notification.updatedAt))
+    ? second.work.notification : first.work.notification;
+  const unsubscribe = [first.work.unsubscribe, second.work.unsubscribe].find(intent => intent && intent.status !== 'confirmed')
+    ?? first.work.unsubscribe ?? second.work.unsubscribe;
+  const status = first.status === 'open' || second.status === 'open' ? 'open' : 'done';
+  const completedAt = status === 'done' && (!first.completedAt || !second.completedAt) ? undefined
+    : [first.completedAt, second.completedAt].filter((at): at is string => !!at)
+      .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
+  const additionalNotes = second.title === first.title ? second.notes : [second.title, second.notes].filter(Boolean).join('\n');
+  return {
+    ...first, status, completedAt,
+    createdAt: Date.parse(first.createdAt) <= Date.parse(second.createdAt) ? first.createdAt : second.createdAt,
+    notes: [...new Set([first.notes, additionalNotes].filter(Boolean))].join('\n\n'),
+    work: workMetadataSchema.parse({
+      ...first.work,
+      evidence: mergeEvidence(first.work.evidence, second.work.evidence),
+      handledEvidenceIds: [...new Set([...first.work.handledEvidenceIds, ...second.work.handledEvidenceIds])],
+      availability: observation.availability, availabilityReason: observation.availabilityReason,
+      availabilityObservedAt: observation.availabilityObservedAt, notification, unsubscribe,
+    }),
+  };
+}
+
+/** Collapse saved source/action rows before collection, retaining one shared completion boundary. */
+export function consolidateWorkTasks(state: AppState): AppState {
+  const tasks: Task[] = [];
+  const positions = new Map<string, number>();
+  const replacements = new Map<string, string>();
+  const mergedIds = new Set<string>();
+  let changed = false;
+  for (const task of state.tasks) {
+    if (!task.work) { tasks.push(task); continue; }
+    const source = canonicalSource(task.work.url);
+    if (task.work.notification && notificationSource(task.work.notification) !== source) {
+      throw new Error('The notification does not match its task source.');
+    }
+    const identity = taskIdentity(source, task.work.action);
+    const index = positions.get(identity);
+    const normalized = { ...task, work: { ...task.work, identity, url: source } };
+    changed ||= task.work.identity !== identity || task.work.url !== source;
+    if (index === undefined) {
+      positions.set(identity, tasks.length);
+      tasks.push(normalized);
+    } else {
+      const previous = tasks[index]!;
+      tasks[index] = mergeTasks({ ...previous, work: previous.work! }, normalized);
+      replacements.set(task.id, previous.id);
+      mergedIds.add(task.id);
+      mergedIds.add(previous.id);
+      changed = true;
+    }
+  }
+  if (!changed) return state;
+  const replaceId = (id: string) => replacements.get(id) ?? id;
+  const replaceKey = (key: string) => key.startsWith('a:') ? `a:${replaceId(key.slice(2))}` : key;
+  const ranking = state.work.ranking;
+  const reasons = new Map<string, string>();
+  for (const reason of ranking?.reasons ?? []) {
+    const id = replaceId(reason.id);
+    if (!reasons.has(id)) reasons.set(id, reason.reason);
+  }
+  return {
+    ...state, tasks,
+    selectedKey: state.selectedKey === null ? null : replaceKey(state.selectedKey),
+    order: [...new Set(state.order.map(replaceKey))],
+    newKeys: [...new Set(state.newKeys.map(replaceKey))],
+    // An old per-action undo must not complete other unfinished requests after consolidation.
+    undo: state.undo.filter(entry => !mergedIds.has(entry.before.id) && !mergedIds.has(entry.after.id)),
+    work: {
+      ...state.work, ranking: ranking ? {
+        ...ranking, orderedIds: [...new Set(ranking.orderedIds.map(replaceId))],
+        reasons: [...reasons].map(([id, reason]) => ({ id, reason })),
+      } : null,
+    },
+  };
+}
+
 /** Completion belongs to the owner; collection can only reopen on unseen, newer actionable evidence. */
 export function reconcileWork(state: AppState, collection: WorkCollection, now: string | Date): AppState {
   const batch = workCollectOutputSchema.parse(collection);
+  state = consolidateWorkTasks(state);
   const createdAt = timestamp(now);
   const observations = latestObservations(batch.observations);
   const notifications = new Map<string, NonNullable<WorkMetadata['notification']>>();

@@ -21,7 +21,9 @@ Each saved GitHub query collects up to **200 matches**, using pages of 100. Larg
 
 ### Identity and Done
 
-A task identifies **source + action**, not a notification or search result. The same GitHub PR review discovered in Slack and two GitHub queries is one task, with all its evidence. Reviewing a PR and reading a completed Copilot review are different actions.
+A GitHub task identifies **one issue or PR**, using its normalized URL, not its action, notification or search result. Assignment, follow-up, reply and review requests for the same source join one task, including requests discovered through Slack or MCP. All requests share one Done state. Non-GitHub sources still identify **source + action**; manually captured tasks remain separate.
+
+Existing duplicates combine when the workspace loads, after a durable backup of the original snapshot. The first task keeps its ID and title; other titles, notes, evidence and handled evidence are retained. If any duplicate is unfinished, the combined task stays open. Otherwise it stays Done, retaining the latest completion boundary (or no automatic reopening if any completed task lacks a boundary).
 
 Done records handled evidence and a completion boundary. A repeated search, an old newly discovered message, or an unrelated comment cannot reopen it. A fresh actionable request with a new source event after completion can. Current merge-queue, closed and merged state removes tasks from **To do** without marking them Done; they remain in **No action now**.
 
@@ -31,7 +33,7 @@ In **Sources and priorities**, choose **Add GitHub notifications**, then **Save 
 
 The first scan covers the last **30 days**. Later scans include both read and unread issue/PR notifications updated since the last successful run. Reading a notification elsewhere does not finish a task. Large backlogs advance oldest-first across runs, with the remaining history shown in the task list. The saved cursor advances only through successfully inspected history, never beyond the run's start, after collection, ranking and persistence succeed. Failures retain the previous boundary for retry.
 
-Notifications identify conversations to inspect, not obligations. Actual source requests determine the action and retain their original event IDs and occurrence times. Notification reasons can remain `mention` after unrelated activity, so neither the reason nor the notification's update time can reopen Done. Requests already found through another source join the same source/action task.
+Notifications identify conversations to inspect, not obligations. Actual source requests determine the action and retain their original event IDs and occurrence times. Notification reasons can remain `mention` after unrelated activity, so neither the reason nor the notification's update time can reopen Done. Requests already found through another source join the same issue or PR task.
 
 **Unsubscribe on GitHub** appears in details for tasks discovered through notifications. Confirm it separately from Done. It stops following the conversation without closing the source, deleting the task or changing completion. Direct mentions, team mentions and review requests can still notify you again. The app saves the unsubscribe intent before sending it; unconfirmed writes stay visible for explicit retry and never replay automatically after relaunch.
 

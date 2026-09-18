@@ -141,6 +141,45 @@ describe('durable local work', () => {
 });
 
 describe('runs and persistence barriers', () => {
+  test('intake, assigned work and notification follow-ups save and rank one GitHub task with shared Done', async () => {
+    const saved = initial();
+    saved.work.settings.streams = [defaultWorkState().settings.streams[1]!, notificationWorkstream()];
+    let pending = true;
+    const mock = await fixture(saved, request => {
+      if (request.op === 'work.intake') return {
+        items: pending ? [{ id: 'intake:1', candidate: { ...candidate('copilot:1', 'copilot'), action: 'review-result' } }] : [],
+        hasMore: false,
+      };
+      if (request.op === 'work.ackIntake') { pending = false; return request.input; }
+      if (request.op === 'work.collect') {
+        const notification = request.input.stream.kind === 'github-notifications';
+        return collection([{
+          ...candidate(notification ? 'overdue-comment' : 'assigned'),
+          action: notification ? 'follow-up' : 'implement',
+          ...(notification ? {
+            notification: { threadId: '123', reference: { repo: 'Owner/Repo', number: 42, kind: 'pr' as const }, updatedAt: before },
+          } : {}),
+        }]);
+      }
+    });
+    await mock.queue.run();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.saved().tasks).toHaveLength(1);
+    const task = mock.saved().tasks[0]!;
+    expect(task.work!.evidence.map(item => item.id)).toEqual(['copilot:1', 'assigned', 'overdue-comment']);
+    expect(mock.saved().work.ranking!.orderedIds).toEqual([task.id]);
+    expect(mock.requests.find(request => request.op === 'work.rank')!.input).toMatchObject({ tasks: [{ id: task.id }] });
+    mock.queue.complete(task.id);
+    await mock.workspace.flush();
+    await mock.queue.run();
+    expect(mock.saved().tasks).toHaveLength(1);
+    expect(mock.saved().tasks[0]!.status).toBe('done');
+    expect(mock.saved().work.ranking!.orderedIds).toEqual([]);
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load(); await reloaded.flush();
+    expect(reloaded.state.tasks).toEqual(mock.saved().tasks);
+  });
+
   test('manual-only runs use SDK ranking with owner settings; zero tasks skip the model', async () => {
     const mock = await fixture();
     await mock.queue.run();
@@ -579,7 +618,7 @@ describe('notification task controls', () => {
     },
   );
 
-  test('one in-flight unsubscribe covers all actions on a source and preserves concurrent Done', async () => {
+  test('one in-flight unsubscribe covers consolidated actions and preserves concurrent Done', async () => {
     const saved = taskState();
     saved.tasks.push({
       ...structuredClone(saved.tasks[0]!), id: 'reply-task',
@@ -592,15 +631,17 @@ describe('notification task controls', () => {
       entered.resolve(request);
       return result.promise;
     });
-    const pending = mock.queue.unsubscribe(saved.tasks[0]!.id);
+    expect(mock.workspace.state.tasks).toHaveLength(1);
+    const id = mock.workspace.state.tasks[0]!.id;
+    const pending = mock.queue.unsubscribe(id);
     const request = await entered.promise;
-    await expect(mock.queue.unsubscribe('reply-task')).rejects.toThrow('already in progress');
-    mock.queue.complete('reply-task');
-    mock.queue.edit('reply-task', 'Edited during unsubscribe', 'Keep this note');
+    await expect(mock.queue.unsubscribe(id)).rejects.toThrow('already in progress');
+    mock.queue.complete(id);
+    mock.queue.edit(id, 'Edited during unsubscribe', 'Keep this note');
     result.resolve(confirmation(request));
     await pending;
     expect(mock.saved().tasks.every(task => task.work!.unsubscribe!.status === 'confirmed')).toBe(true);
-    expect(mock.saved().tasks[1]).toMatchObject({ status: 'done', title: 'Edited during unsubscribe', notes: 'Keep this note' });
+    expect(mock.saved().tasks[0]).toMatchObject({ status: 'done', title: 'Edited during unsubscribe', notes: 'Keep this note' });
     expect(mock.requests).toHaveLength(1);
   });
 });
