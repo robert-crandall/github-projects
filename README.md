@@ -1,6 +1,6 @@
 # GitHub Projects
 
-A local-first macOS todo app. GitHub searches and notifications, Slack, manual capture and MCP intake feed **one ranked task list**. Each run uses the Copilot SDK to prioritize the whole list using your instructions.
+A local-first macOS todo app. GitHub searches and notifications, Slack, manual capture and MCP intake feed **one ranked task list**. Copilot assesses changed tasks and prioritizes the whole list using your instructions; unchanged runs reuse saved assessments and ordering.
 
 The desktop keeps the native Mac shell, CLI authentication and revisioned SQLite storage. Existing tasks, completion and thread notes are retained.
 
@@ -16,6 +16,10 @@ Appearance stays separate from tasks and their backups. Desktop preferences use 
 4. Optionally enable a cadence. Runs continue while the app is running, including hidden in the menu bar. An overdue schedule catches up once after sleep or relaunch; quitting stops it.
 
 Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks and the failure visible. Source failures never masquerade as successful empty results.
+
+Copilot saves an independent assessment of each task's importance, urgency, blockers and supporting evidence. Only new, changed or expired tasks send full evidence again; ordering uses concise assessments for the entire active queue. Changes to task text, evidence, current source content or availability, priority instructions, model or assessment format invalidate reuse. Collection timestamps and duplicate stream provenance do not.
+
+Assessments expire within **24 hours**, earlier for time-sensitive work. Comparative ordering expires within **1 hour**, or sooner when an assessment expires or priorities may cross over. An unchanged run before expiry makes no ranking model calls, including after relaunch. Order expiry alone reorders cached assessments without rereading full evidence. Valid assessments survive a failed order attempt. The private local cache is credential-scoped; switching accounts or rotating credentials starts fresh. Cache hits do not verify current account access, and collection still runs normally.
 
 Each saved GitHub query collects up to **200 matches**, using pages of 100. Larger or incomplete searches show a coverage warning; missing matches never mark tasks Done. Reply extraction batches source comments, and ranking still considers the whole active queue together.
 

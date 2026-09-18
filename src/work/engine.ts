@@ -65,16 +65,23 @@ function latestObservations(observations: WorkObservation[]): Map<string, WorkOb
   return latest;
 }
 
-function observe(work: WorkMetadata, observation?: WorkObservation): WorkMetadata {
-  if (!observation || (work.availabilityObservedAt
-    && Date.parse(observation.observedAt) < Date.parse(work.availabilityObservedAt))) return work;
-  return {
-    ...work,
-    availability: observation.state === 'open' ? 'actionable' : observation.state === 'unknown' ? 'unknown' : 'waiting',
-    availabilityReason: observation.reason || (observation.state === 'open' ? 'The source is open.'
-      : observation.state === 'unknown' ? 'The source state could not be confirmed.' : `The source is ${observation.state}.`),
-    availabilityObservedAt: observation.observedAt,
-  };
+function observe(work: WorkMetadata, observation?: WorkObservation, contextObservation = observation): WorkMetadata {
+  let next = work;
+  if (observation && (!work.availabilityObservedAt
+    || Date.parse(observation.observedAt) >= Date.parse(work.availabilityObservedAt))) {
+    next = {
+      ...work,
+      availability: observation.state === 'open' ? 'actionable' : observation.state === 'unknown' ? 'unknown' : 'waiting',
+      availabilityReason: observation.reason || (observation.state === 'open' ? 'The source is open.'
+        : observation.state === 'unknown' ? 'The source state could not be confirmed.' : `The source is ${observation.state}.`),
+      availabilityObservedAt: observation.observedAt,
+    };
+  }
+  if (contextObservation?.context && (!work.contextObservedAt
+    || Date.parse(contextObservation.observedAt) >= Date.parse(work.contextObservedAt))) {
+    next = { ...next, context: contextObservation.context, contextObservedAt: contextObservation.observedAt };
+  }
+  return next;
 }
 
 function notificationSource(notification: NonNullable<WorkMetadata['notification']>): string {
@@ -88,6 +95,9 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
   const observation = secondObserved > firstObserved || (secondObserved === firstObserved
     && availabilityPriority[second.work.availability] > availabilityPriority[first.work.availability])
     ? second.work : first.work;
+  const context = [first.work, second.work].filter(work => work.context).sort((a, b) =>
+    Date.parse(b.contextObservedAt ?? b.availabilityObservedAt ?? '1970-01-01T00:00:00Z')
+    - Date.parse(a.contextObservedAt ?? a.availabilityObservedAt ?? '1970-01-01T00:00:00Z'))[0];
   const notification = !first.work.notification || (second.work.notification
     && Date.parse(second.work.notification.updatedAt) > Date.parse(first.work.notification.updatedAt))
     ? second.work.notification : first.work.notification;
@@ -108,6 +118,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
       handledEvidenceIds: [...new Set([...first.work.handledEvidenceIds, ...second.work.handledEvidenceIds])],
       availability: observation.availability, availabilityReason: observation.availabilityReason,
       availabilityObservedAt: observation.availabilityObservedAt, notification, unsubscribe,
+      context: context?.context, contextObservedAt: context?.contextObservedAt ?? context?.availabilityObservedAt,
     }),
   };
 }
@@ -172,6 +183,7 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
   state = consolidateWorkTasks(state);
   const createdAt = timestamp(now);
   const observations = latestObservations(batch.observations);
+  const contexts = latestObservations(batch.observations.filter(observation => observation.context));
   const notifications = new Map<string, NonNullable<WorkMetadata['notification']>>();
   for (const item of [...state.tasks.flatMap(task => task.work ? [task.work] : []), ...batch.candidates]) {
     if (!item.notification) continue;
@@ -186,7 +198,7 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
     ? { ...task, work: observe({
       ...task.work, ...(notifications.has(canonicalSource(task.work.url))
         ? { notification: notifications.get(canonicalSource(task.work.url)) } : {}),
-    }, observations.get(canonicalSource(task.work.url))) } : task);
+    }, observations.get(canonicalSource(task.work.url)), contexts.get(canonicalSource(task.work.url))) } : task);
   for (const candidate of batch.candidates) {
     const identity = taskIdentity(candidate.url, candidate.action);
     const url = canonicalSource(candidate.url);
@@ -200,12 +212,14 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
       availability: linked?.availability ?? (affirmative ? 'actionable' : 'unknown'),
       availabilityReason: linked?.availabilityReason ?? (affirmative ? 'The source supplied an action.' : 'The source state has not been confirmed.'),
       availabilityObservedAt: linked?.availabilityObservedAt,
+      ...(linked?.context ? { context: linked.context } : {}),
+      ...(linked?.contextObservedAt ? { contextObservedAt: linked.contextObservedAt } : {}),
       ...(linked?.unsubscribe ? { unsubscribe: linked.unsubscribe } : {}),
     };
     const work = workMetadataSchema.parse(observe({
       ...base, identity, url, evidence: mergeEvidence(base.evidence, candidate.evidence),
       ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
-    }, observation));
+    }, observation, contexts.get(url)));
     const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
     const reopen = previous?.status === 'done' && previous.completedAt !== undefined
       && work.availability === 'actionable'
@@ -255,20 +269,17 @@ export function rankedTasks(state: AppState): Task[] {
     });
 }
 
-function rankingNotes(task: Task): string {
-  const uncertainty = task.work?.availability === 'unknown'
-    ? `Source availability: unknown. ${task.work.availabilityReason || 'The source state could not be confirmed.'}\n\nTask notes:\n` : '';
-  return uncertainty + task.notes.slice(0, 16000 - uncertainty.length);
-}
-
 /** Include task notes, source uncertainty and evidence, never private thread notes. */
 export function rankInput(state: AppState): WorkRankInput {
   const work = state.work ?? defaultWorkState();
   return workRankInputSchema.parse({
     instructions: work.settings.instructions, model: work.settings.model,
     tasks: rankedTasks(state).map(task => ({
-      id: task.id, title: task.title.slice(0, 2000), notes: rankingNotes(task), action: task.work?.action ?? 'manual',
+      id: task.id, title: task.title.slice(0, 2000), notes: task.notes.slice(0, 16000), action: task.work?.action ?? 'manual',
       url: task.work?.url ?? null, evidence: task.work?.evidence ?? [], createdAt: task.createdAt,
+      availability: task.work?.availability === 'unknown' ? 'unknown' : 'actionable',
+      availabilityReason: task.work?.availabilityReason ?? '',
+      ...(task.work?.context ? { context: task.work.context } : {}),
     })),
   });
 }

@@ -21,6 +21,8 @@ const messages: Record<ServiceErrorDTO['code'], string> = {
   internal: 'The service failed. Saved local work is unchanged.',
   mcp_configuration: 'The selected MCP connection or explicit read tools are unavailable. App connections are not shared automatically. Configure the Copilot CLI mcp-config.json or backend COPILOT_MCP_CONFIG_PATH.',
   mcp_unavailable: 'The selected MCP read or OAuth authentication failed. Authenticate that connection through supported Copilot CLI MCP setup, then retry with explicit read tools. App sign-in may not be shared.',
+  assessment_storage: 'The assessment cache is unavailable or corrupt. The previous order is retained; repair local storage before retrying.',
+  assessment_capacity: 'The assessment cache reached its storage limit. The previous order is retained; free assessment cache storage before retrying.',
 };
 export class ServiceError extends Error {
   readonly dto: ServiceErrorDTO;
