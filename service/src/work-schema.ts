@@ -72,9 +72,16 @@ export const workCandidateSchema = z.strictObject({
   evidence: z.array(workEvidenceSchema).min(1).max(200),
   notification: workNotificationSchema.optional(),
 });
+export const workSourceContextSchema = z.strictObject({
+  revision: z.string().regex(/^[a-f0-9]{64}$/),
+  title: z.string().max(2000), body: z.string().max(100000),
+  labels: z.array(z.string().max(200)).max(100),
+});
+export type WorkSourceContext = z.infer<typeof workSourceContextSchema>;
 export const workObservationSchema = z.strictObject({
   url, state: z.enum(['open', 'queued', 'closed', 'merged', 'unknown']),
   observedAt: time, reason: z.string().max(1000),
+  context: workSourceContextSchema.optional(),
 });
 export const workCollectInputSchema = z.strictObject({
   stream: workstreamSchema, model: z.string().max(100),

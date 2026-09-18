@@ -60,7 +60,7 @@ function harness(options: {
     }
     throw new Error(`Unexpected path ${path}`);
   };
-  return { calls, service: new WorkGitHub({ runner, resolve: async () => '/synthetic/gh', now: () => new Date('2026-09-16T12:00:00Z'), copilot: options.copilot }) };
+  return { calls, service: new WorkGitHub({ cache: null, runner, resolve: async () => '/synthetic/gh', now: () => new Date('2026-09-16T12:00:00Z'), copilot: options.copilot }) };
 }
 const input = (override: Partial<Workstream> = {}) => ({ stream: { ...stream, ...override }, model: '', since: null });
 const signal = () => new AbortController().signal;
@@ -99,7 +99,7 @@ function issues(options: {
     }
     return { code: 0, stdout: `HTTP/2 200 OK\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(body)}` };
   };
-  return { pages, issueUrl, service: new WorkGitHub({ runner, resolve: async () => '/synthetic/gh', copilot: options.copilot }) };
+  return { pages, issueUrl, service: new WorkGitHub({ cache: null, runner, resolve: async () => '/synthetic/gh', copilot: options.copilot }) };
 }
 
 describe('saved GitHub workstream reads', () => {

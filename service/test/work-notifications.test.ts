@@ -97,6 +97,7 @@ function harness(options: {
       : match[3] === 'reviews' ? options.reviews ?? [] : options.inline ?? [], headers);
   };
   const service = new WorkGitHub({
+    cache: null,
     runner, resolve: async () => '/synthetic/gh', now: options.clock ?? (() => new Date(now)),
     copilot: {
       extractReplies: async () => ({ requests: [], warnings: [] }),

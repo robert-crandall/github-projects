@@ -2,12 +2,17 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { CopilotService, type GitHubRequestContext } from './copilot.ts';
 import { checkAbort, sanitized, ServiceError } from './errors.ts';
-import { pageLink, parse, parseResponse, pullRequestStateQuery, requireStatus, sourceReference, type ApiResponse } from './github.ts';
+import { pageLink, parse, parseResponse, requireStatus, sourceReference, type ApiResponse } from './github.ts';
 import { executable, run, type Runner } from './process.ts';
 import { LIMITS, loginSchema, referenceSchema, repoSchema, threadIdSchema, type Reference } from './schema.ts';
 import { canonicalGithubUrl } from './work-mcp.ts';
 import {
+  cacheHash, incrementalSearchSafe, SEARCH_OVERLAP_MS, SEARCH_RECONCILE_MS, WorkGitHubCache,
+  type CachedTimeline,
+} from './work-github-cache.ts';
+import {
   githubWorkActionSchema, isGitHubStream, workCollectInputSchema, workCollectOutputSchema,
+  workSourceContextSchema, type WorkSourceContext,
   type WorkCandidate, type WorkCollection, type WorkEvidence, type WorkObservation, type Workstream,
 } from './work-schema.ts';
 
@@ -18,6 +23,8 @@ const sourceSchema = z.object({
   id: z.number().int().positive().safe(), number: z.number().int().positive().safe(),
   title: z.string().min(1).max(1000), body: z.string().nullable().optional(),
   state: z.enum(['open', 'closed']), created_at: time,
+  updated_at: time.optional(),
+  labels: z.array(z.union([z.string().max(200), z.object({ name: z.string().max(200) })])).max(100).optional(),
   user: actor.nullable().optional(),
   merged: z.boolean().optional(), draft: z.boolean().optional(),
   requested_reviewers: z.array(actor).max(100).optional(),
@@ -94,12 +101,6 @@ const searchSchema = z.object({
   total_count: z.number().int().nonnegative(), incomplete_results: z.boolean(),
   items: z.array(z.object({ html_url: z.url(), number: z.number().int().positive().safe() })).max(100),
 });
-const observationGraphSchema = z.object({
-  data: z.object({ repository: z.object({ pullRequest: z.object({
-    state: z.enum(['OPEN', 'CLOSED', 'MERGED']),
-    mergeQueueEntry: z.object({ id: z.string().min(1) }).nullable(),
-  }).nullable() }).nullable() }),
-});
 const hash = (values: unknown) => createHash('sha256').update(JSON.stringify(values)).digest('hex');
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 function reference(raw: string): Reference {
@@ -121,19 +122,49 @@ function eventEvidence(event: Event, ref: Reference, stream: Workstream, url: st
   };
 }
 
+function sourceContext(source: Source, ref: Reference, graph?: Graph): WorkSourceContext {
+  let body = source.body ?? '';
+  if (ref.kind === 'pr') {
+    const checks = graph?.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
+    const current = {
+      state: source.merged ? 'MERGED' : graph?.state ?? source.state.toUpperCase(),
+      head: graph?.headRefOid ?? null, draft: graph?.isDraft ?? source.draft ?? false,
+      queued: Boolean(graph?.mergeQueueEntry), mergeable: graph?.mergeable ?? null,
+      reviewDecision: graph?.reviewDecision ?? null,
+      checksIncomplete: checks?.pageInfo.hasNextPage ?? false,
+      checks: (checks?.nodes ?? []).map(check => check.__typename === 'CheckRun'
+        ? { name: check.name, status: check.status, conclusion: check.conclusion }
+        : { name: check.context, status: check.state, conclusion: null })
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+    };
+    body += `\n\n--- Current GitHub pull request state (not source-authored text) ---\n${JSON.stringify(current)}`;
+  }
+  const content = {
+    title: source.title, body,
+    labels: [...new Set((source.labels ?? []).map(label => typeof label === 'string' ? label : label.name))].sort(),
+  };
+  const parsed = workSourceContextSchema.safeParse({ ...content, revision: hash(content) });
+  if (!parsed.success) throw new ServiceError('limit');
+  return parsed.data;
+}
+
 export class WorkGitHub {
   private readonly runner: Runner;
   private readonly resolve: typeof executable;
   private readonly now: () => Date;
   private readonly copilot: Pick<CopilotService, 'extractReplies'> & Partial<Pick<CopilotService, 'extractGitHubRequests'>>;
+  private readonly cache: WorkGitHubCache | null;
+  private collecting = false;
   constructor(options: {
     runner?: Runner; resolve?: typeof executable; now?: () => Date;
     copilot?: Pick<CopilotService, 'extractReplies'> & Partial<Pick<CopilotService, 'extractGitHubRequests'>>;
+    cache?: WorkGitHubCache | null;
   } = {}) {
     this.runner = options.runner ?? run;
     this.resolve = options.resolve ?? executable;
     this.now = options.now ?? (() => new Date());
     this.copilot = options.copilot ?? new CopilotService();
+    this.cache = options.cache === undefined ? new WorkGitHubCache() : options.cache;
   }
   private async api(path: string, signal: AbortSignal, body?: unknown): Promise<ApiResponse> {
     checkAbort(signal);
@@ -155,11 +186,13 @@ export class WorkGitHub {
     const input = workCollectInputSchema.safeParse(raw);
     if (!input.success || !isGitHubStream(input.data.stream)) throw new ServiceError('invalid_input');
     if (!githubWorkActionSchema.safeParse(input.data.stream.action).success) throw new ServiceError('unsupported');
+    if (this.collecting) throw new ServiceError('busy', true);
+    this.collecting = true;
     const deadline = new AbortController();
     const combined = AbortSignal.any([signal, deadline.signal]);
     const timer = setTimeout(() => deadline.abort(new ServiceError('deadline', true, 'read')), LIMITS.refreshMs + LIMITS.workModelMs);
     try { return await this.read(input.data, combined); }
-    finally { clearTimeout(timer); }
+    finally { clearTimeout(timer); this.collecting = false; }
   }
   private async sourceRoot(ref: Reference, signal: AbortSignal) {
     let source = parse(sourceSchema, (await this.api(`/repos/${ref.repo}/${ref.kind === 'pr' ? 'pulls' : 'issues'}/${ref.number}`, signal)).body);
@@ -170,6 +203,15 @@ export class WorkGitHub {
       if (source.number !== ref.number) throw new ServiceError('invalid_output');
     }
     return { source, ref };
+  }
+  private async sourceGraph(ref: Reference, source: Source, signal: AbortSignal): Promise<Graph | undefined> {
+    if (ref.kind !== 'pr' || source.state !== 'open' || source.merged) return undefined;
+    const [owner, name] = ref.repo.split('/');
+    const response = await this.api('/graphql', signal, { query: graphQuery, variables: { owner, name, number: ref.number } });
+    if (response.body && typeof response.body === 'object' && 'errors' in response.body) throw new ServiceError('access');
+    const graph = parse(graphSchema, response.body).data.repository?.pullRequest;
+    if (!graph) throw new ServiceError('invalid_output');
+    return graph;
   }
   async observe(rawUrls: string[], signal: AbortSignal): Promise<WorkObservation[]> {
     if (rawUrls.length > 300) throw new ServiceError('limit');
@@ -194,16 +236,16 @@ export class WorkGitHub {
           const observedAt = this.now().toISOString();
           try {
             const { source, ref } = await this.sourceRoot(reference(url), combined);
+            const graph = await this.sourceGraph(ref, source, combined);
             let state: WorkObservation['state'] = source.merged ? 'merged' : source.state;
-            if (ref.kind === 'pr' && state === 'open') {
-              const response = await this.api('/graphql', combined, { query: pullRequestStateQuery(ref) });
-              if (response.body && typeof response.body === 'object' && 'errors' in response.body) throw new ServiceError('access');
-              const current = parse(observationGraphSchema, response.body).data.repository?.pullRequest;
-              if (!current) throw new ServiceError('invalid_output');
-              state = current.state === 'MERGED' ? 'merged' : current.state === 'CLOSED' ? 'closed'
-                : current.mergeQueueEntry ? 'queued' : 'open';
+            if (graph) {
+              state = graph.state === 'MERGED' ? 'merged' : graph.state === 'CLOSED' ? 'closed'
+                : graph.mergeQueueEntry ? 'queued' : 'open';
             }
-            observations.push({ url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '' });
+            observations.push({
+              url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '',
+              context: sourceContext(source, ref, graph),
+            });
           } catch (error) {
             checkAbort(combined);
             observations.push({ url, state: 'unknown', observedAt, reason: sanitized(error).message });
@@ -443,7 +485,21 @@ export class WorkGitHub {
     signal = AbortSignal.any([signal, stop.signal]);
     const { stream } = input;
     const collectedAt = this.now().toISOString();
-    const viewer = parse(z.object({ login: loginSchema }), (await this.api('/user', signal)).body).login;
+    const accountResponse = (await this.api('/user', signal)).body;
+    const viewer = parse(z.object({ login: loginSchema }), accountResponse).login;
+    const cache = stream.kind === 'github' && !input.observeOnly ? this.cache : null;
+    const accountSchema = z.object({ id: z.number().int().positive().safe(), login: loginSchema });
+    const account = cache ? parse(accountSchema, accountResponse) : undefined;
+    const cacheKey = cacheHash([1, 'github.com', account, stream, input.model]);
+    const record = cache?.load(cacheKey);
+    const cached = record?.state;
+    const pending = cached?.pending.filter(delivery => !input.since || Date.parse(delivery.at) > Date.parse(input.since)) ?? [];
+    const timelines = new Map<string, CachedTimeline>(cached?.timelines);
+    // Validate stored events outside source error recovery: corruption is not a
+    // partial upstream read and must never become a successful cache fallback.
+    for (const timeline of timelines.values()) parse(z.array(eventSchema).max(200), timeline.events);
+    const replies = new Map(cached?.replies.map(reply => [reply.key, reply.candidates]));
+    const usedReplies = new Set<string>();
     // The saved expression is data in a single URL-encoded query value; never a command or shell fragment.
     const query = `${stream.query.replace(/@me\b/g, viewer)} is:open archived:false`;
     const warnings: string[] = [];
@@ -454,11 +510,20 @@ export class WorkGitHub {
     const urls = discovery?.urls ?? new Map<string, Target>();
     warnings.push(...discovery?.warnings ?? []);
     coverageInfo.push(...discovery?.coverageInfo ?? []);
+    const safeQuery = incrementalSearchSafe(query);
+    const fullSearch = !cached?.scannedAt || !cached.reconciledAt || !input.since || !safeQuery
+      || Date.parse(collectedAt) - Date.parse(cached.reconciledAt) >= SEARCH_RECONCILE_MS
+      || Date.parse(cached.scannedAt) >= Date.parse(collectedAt)
+      || Date.parse(input.since) >= Date.parse(collectedAt);
+    const lower = Math.min(Date.parse(input.since ?? collectedAt), Date.parse(cached?.scannedAt ?? collectedAt));
+    const searchQuery = fullSearch ? query
+      : `${query} updated:${new Date(lower - SEARCH_OVERLAP_MS).toISOString()}..${collectedAt}`;
+    if (cache && !safeQuery) coverageInfo.push('This saved expression uses date, relative, Boolean, or unrecognized syntax; full search preserves its original meaning.');
     let total = 0;
     let incomplete = false;
     for (let page = 1; !notificationStream && !input.observeOnly && page <= 2; page++) {
       const search = parse(searchSchema, (await this.api(
-        `/search/issues?q=${encodeURIComponent(query)}&per_page=100&page=${page}`, signal,
+        `/search/issues?q=${encodeURIComponent(searchQuery)}&per_page=100&page=${page}${cache && safeQuery ? '&sort=updated&order=asc' : ''}`, signal,
       )).body);
       total = Math.max(total, search.total_count);
       incomplete ||= search.incomplete_results;
@@ -476,11 +541,21 @@ export class WorkGitHub {
         ? 'GitHub search is capped at 200 matches. Missing matches are not completion.'
         : 'GitHub search returned incomplete results. Missing matches are not completion.');
     }
+    const completeSearch = !incomplete && total <= urls.size;
+    const members = new Set(fullSearch && completeSearch ? urls.keys() : [...cached?.members ?? [], ...urls.keys()]);
+    if (cache) {
+      if (members.size > 200) throw new ServiceError('limit');
+      for (const url of members) if (!urls.has(url)) urls.set(url, { ref: reference(url), matched: true });
+      for (const url of [...cached?.members ?? [], ...pending.map(delivery => delivery.candidate.url)]) {
+        if (!urls.has(url)) urls.set(url, { ref: reference(url), matched: false });
+      }
+    }
     for (const raw of input.knownUrls) {
       const url = canonicalGithubUrl(raw);
       if (!url) continue;
       if (!urls.has(url)) urls.set(url, { ref: reference(url), matched: false });
     }
+    if (urls.size > 300) throw new ServiceError('limit');
     const candidates: WorkCandidate[] = [];
     const observations: WorkCollection['observations'] = [];
     const replyInputs: { source: z.infer<typeof sourceSchema>; events: Event[]; url: string; ref: Reference }[] = [];
@@ -498,21 +573,30 @@ export class WorkGitHub {
         let observed = false;
         try {
           const { source, ref: sourceRef } = await this.sourceRoot(ref, signal);
-          let graph: Graph | undefined;
-          if (sourceRef.kind === 'pr' && source.state === 'open' && !source.merged) {
-            const [owner, name] = ref.repo.split('/');
-            const response = await this.api('/graphql', signal, { query: graphQuery, variables: { owner, name, number: ref.number } });
-            if (response.body && typeof response.body === 'object' && 'errors' in response.body) throw new ServiceError('access');
-            graph = parse(graphSchema, response.body).data.repository?.pullRequest ?? undefined;
-            if (!graph) throw new ServiceError('invalid_output');
-          }
+          const graph = await this.sourceGraph(sourceRef, source, signal);
           const state = source.merged || graph?.state === 'MERGED' ? 'merged'
             : source.state === 'closed' || graph?.state === 'CLOSED' ? 'closed'
             : graph?.mergeQueueEntry ? 'queued' : 'open';
-          observations.push({ url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '' });
+          observations.push({
+            url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '',
+            context: sourceContext(source, sourceRef, graph),
+          });
           observed = true;
           if (!matched || state !== 'open') continue;
-          const events = await this.timeline(sourceRef, signal, warnings, notificationStream ? coverageInfo : warnings);
+          const revision = hash([source, graph?.headRefOid, graph?.reviewDecision]);
+          const previous = timelines.get(url);
+          let events: Event[];
+          if (cache && source.updated_at && previous?.revision === revision
+            && Date.parse(previous.fetchedAt) <= Date.parse(collectedAt)
+            && Date.parse(collectedAt) - Date.parse(previous.fetchedAt) < SEARCH_RECONCILE_MS) {
+            events = parse(z.array(eventSchema).max(200), previous.events);
+            warnings.push(...previous.warnings);
+          } else {
+            const sourceWarnings: string[] = [];
+            events = await this.timeline(sourceRef, signal, sourceWarnings, notificationStream ? coverageInfo : sourceWarnings);
+            warnings.push(...sourceWarnings);
+            if (cache && source.updated_at && !sourceWarnings.length) timelines.set(url, { revision, fetchedAt: collectedAt, events, warnings: [] });
+          }
           if (notificationStream) {
             const sourceEvents = [
               ...events, ...await this.discussions(sourceRef, signal, warnings, coverageInfo),
@@ -561,6 +645,7 @@ export class WorkGitHub {
     type ReplyMessage = Parameters<CopilotService['extractReplies']>[0]['messages'][number];
     const batches: ReplyMessage[][] = [];
     const owners = new Map<string, { source: z.infer<typeof sourceSchema>; url: string }>();
+    const replyKeys = new Map<string, string>();
     const bytes = (messages: ReplyMessage[]) => Buffer.byteLength(JSON.stringify({ viewer, query: stream.query, messages }));
     let batch: ReplyMessage[] = [];
     for (const { source, events, url, ref } of replyInputs) {
@@ -581,6 +666,11 @@ export class WorkGitHub {
         warnings.push(`${ref.repo}#${ref.number}: reply context exceeds the model input limit; no reply was inferred.`);
         continue;
       }
+      const replyKey = cacheHash([1, viewer, stream, input.model, source.title, messages]);
+      replyKeys.set(url, replyKey);
+      usedReplies.add(replyKey);
+      const reusable = cache ? replies.get(replyKey) : undefined;
+      if (reusable) { candidates.push(...reusable); continue; }
       if (batch.length && bytes([...batch, ...messages]) > LIMITS.modelBytes) {
         batches.push(batch);
         batch = [];
@@ -604,6 +694,11 @@ export class WorkGitHub {
         });
         candidates.push(...extracted);
         warnings.push(...result.warnings);
+        if (cache && !result.warnings.length) {
+          for (const url of new Set(messages.map(message => owners.get(message.eventId)!.url))) {
+            replies.set(replyKeys.get(url)!, extracted.filter(candidate => candidate.url === url));
+          }
+        }
       } catch (error) {
         checkAbort(signal);
         const failure = sanitized(error);
@@ -611,37 +706,65 @@ export class WorkGitHub {
         warnings.push(`Reply extraction failed for ${new Set(messages.map(message => owners.get(message.eventId)!.url)).size} sources: ${failure.message}`);
       }
     }
+    const currentCandidates = structuredClone(candidates);
+    const accessible = new Set(observations.filter(observation => observation.state !== 'unknown').map(observation => observation.url));
     const merged = new Map<string, WorkCandidate>();
-    for (const candidate of candidates) {
+    for (const candidate of [...pending.filter(delivery => accessible.has(delivery.candidate.url)).map(delivery => delivery.candidate), ...candidates]) {
       const notification = urls.get(candidate.url)?.notification;
       if (notification) candidate.notification = notification;
       const key = `${candidate.url}:${candidate.action}`;
       const existing = merged.get(key);
-      if (!existing) merged.set(key, candidate);
+      if (!existing) merged.set(key, structuredClone(candidate));
       else {
         const evidence = [...new Map([...existing.evidence, ...candidate.evidence].map(event => [event.id, event])).values()];
+        if (cache && evidence.length > 200) throw new ServiceError('limit');
         if (evidence.length > 200) (notificationStream ? coverageInfo : warnings).push(`${candidate.url}: merged ${candidate.action} evidence is capped at 200 events.`);
         existing.evidence = evidence.slice(-200);
       }
     }
     if (merged.size > 200) {
-      if (notificationStream) throw new ServiceError('limit');
+      if (notificationStream || cache) throw new ServiceError('limit');
       warnings.push('GitHub candidates are capped at 200 source/action pairs; coverage is incomplete and missing requests are not completion.');
     }
     const uniqueWarnings = [...new Set(warnings)];
     const uniqueInfo = [...new Set(coverageInfo)];
-    return parse(workCollectOutputSchema, {
+    const output = parse(workCollectOutputSchema, {
       candidates: [...merged.values()].slice(0, 200), observations,
       warnings: uniqueWarnings.length > 30
         ? [...uniqueWarnings.slice(0, 29), `${uniqueWarnings.length - 29} additional source warnings omitted; coverage remains incomplete.`]
         : uniqueWarnings,
-      ...(notificationStream ? { coverageInfo: uniqueInfo.length > 30
+      ...(notificationStream || cache ? { coverageInfo: uniqueInfo.length > 30
         ? [...uniqueInfo.slice(0, 29), `${uniqueInfo.length - 29} additional bounded-context or exclusion notes omitted.`]
         : uniqueInfo } : {}),
       ...(discovery?.coveredThrough ? { coveredThrough: discovery.coveredThrough } : {}),
       collectedAt,
     });
+    // Include envelope overhead before making any durable checkpoint.
+    if (Buffer.byteLength(JSON.stringify(output)) > LIMITS.responseBytes - 1024) throw new ServiceError('limit');
+    if (cache && cached && record) {
+      checkAbort(signal);
+      const currentAccount = parse(accountSchema, (await this.api('/user', signal)).body);
+      if (currentAccount.id !== account!.id || !same(currentAccount.login, account!.login)) throw new ServiceError('authentication');
+      const deliveries = new Map(pending.map(delivery => [cacheHash(delivery.candidate), delivery]));
+      for (const candidate of currentCandidates) {
+        const key = cacheHash(candidate);
+        if (!deliveries.has(key)) deliveries.set(key, { at: collectedAt, candidate });
+      }
+      const retained = new Set([...members, ...[...deliveries.values()].map(delivery => delivery.candidate.url)]);
+      cache.save(cacheKey, record.revision, {
+        version: 1,
+        scannedAt: uniqueWarnings.length ? cached.scannedAt : collectedAt,
+        reconciledAt: fullSearch && !uniqueWarnings.length ? collectedAt : cached.reconciledAt,
+        members: [...members],
+        timelines: [...timelines].filter(([url]) => retained.has(url)),
+        replies: [...replies].filter(([key]) => usedReplies.has(key) || uniqueWarnings.length > 0)
+          .map(([key, candidates]) => ({ key, candidates })),
+        pending: [...deliveries.values()],
+      });
+    }
+    return output;
   }
+  close(): void { this.cache?.close(); }
   private evidence(
     source: z.infer<typeof sourceSchema>, graph: Graph | undefined, events: Event[],
     ref: Reference, stream: Workstream, viewer: string, url: string, warnings: string[], coverageInfo = warnings,
