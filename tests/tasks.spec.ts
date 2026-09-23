@@ -195,6 +195,10 @@ test('model failure preserves discoveries and makes unranked work explicit', asy
 test('unknown source state stays visible instead of silently removing work', async ({ page, native }) => {
   await page.goto('/');
   await run(page);
+  await page.locator('.task-row').first().click();
+  await page.getByLabel('Task notes').fill('Check the rollout plan before reviewing.');
+  await persisted(page);
+  await page.getByRole('button', { name: 'Close task details' }).click();
   native.workCollection.candidates = [];
   native.workCollection.observations[0]!.state = 'unknown';
   native.workCollection.observations[0]!.reason = 'GitHub state could not be checked. Retry the source.';
@@ -204,7 +208,11 @@ test('unknown source state stays visible instead of silently removing work', asy
   const rank = native.requests.filter(request => request.op === 'work.rank').at(-1);
   if (rank?.op !== 'work.rank') throw new Error('Rank request missing');
   expect(rank.input.tasks).toHaveLength(1);
-  expect(rank.input.tasks[0]!.notes).toContain('GitHub state could not be checked');
+  expect(rank.input.tasks[0]).toMatchObject({
+    availability: 'unknown',
+    availabilityReason: 'GitHub state could not be checked. Retry the source.',
+    notes: 'Check the rollout plan before reviewing.',
+  });
 });
 
 test('local capture and Done during ranking survive the result', async ({ page, native }) => {
