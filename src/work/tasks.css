@@ -2,6 +2,10 @@
 .task-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 28px 36px 16px; }
 .task-brand { display: flex; align-items: center; gap: 12px; }
 .task-brand h1 { font-size: 25px; }
+.task-profile-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 36px 20px; }
+.task-profile-bar label { margin: 0; }
+.task-profile-bar select { width: auto; max-width: min(100%, 320px); min-width: 0; }
+.task-profile-bar .field-help { flex-basis: 100%; margin: 0; }
 .task-shortcut { color: var(--secondary); margin-left: 12px; font-size: 12px; }
 .task-context { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 0 36px 26px; color: var(--secondary); font-size: 13px; }
 .task-context > span { line-height: 1.65; }
@@ -77,6 +81,7 @@
   .task-top .secondary, .task-top .primary { padding: 7px 9px; }
   .task-shortcut { display: none; }
   .task-context { padding: 0 20px 22px; }
+  .task-profile-bar { padding: 0 20px 20px; }
   .task-main, .task-with-detail .task-main { padding: 0 20px 40px; }
   .task-with-detail { grid-template-columns: minmax(0, 1fr); }
   .task-with-detail .task-main { display: none; }

@@ -16,6 +16,95 @@ async function run(page: Page) {
   await persisted(page);
 }
 
+test('work profiles preserve separate tasks and priorities across switching and relaunch', async ({ page, native }, testInfo) => {
+  await page.goto('/');
+  await add(page, 'Regular task');
+  await page.getByRole('button', { name: 'Mark done: Regular task', exact: true }).click();
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByLabel('What should come first?').fill('Roadmap first');
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await page.getByRole('button', { name: 'Add profile', exact: true }).click();
+  const modal = page.getByRole('dialog', { name: 'Add work profile' });
+  await expect(modal.getByLabel('Profile name')).toBeFocused();
+  await modal.getByLabel('Profile name').fill('On call');
+  await modal.getByLabel('Copy saved instructions and sources from Default').check();
+  await modal.getByRole('button', { name: 'Create profile' }).click();
+  await expect(page.getByLabel('Profile name')).toHaveValue('On call');
+  await expect(page.getByLabel('What should come first?')).toHaveValue('Roadmap first');
+  await page.getByLabel('What should come first?').fill('Incidents first');
+  await page.getByLabel('Profile name').fill('Incident response');
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  const profileId = native.state.activeWorkProfile.id;
+  expect(native.state.work.settings.schedule.enabled).toBe(false);
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await expect(page.locator('.task-title')).toHaveCount(0);
+  await add(page, 'Investigate incident');
+  await run(page);
+  const request = native.requests.find(request => request.op === 'work.rank')!;
+  if (request.op !== 'work.rank') throw new Error('Ranking request missing');
+  expect(request.input.instructions).toBe('Incidents first');
+  expect(request.input.tasks.map(task => task.title)).not.toContain('Regular task');
+  await page.screenshot({ path: testInfo.outputPath('work-profiles-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByLabel('Work profile', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('work-profiles-narrow.png') });
+
+  await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await persisted(page);
+  await expect(page.locator('.task-title')).toHaveCount(0);
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await expect(page.locator('.task-title')).toHaveText('Regular task');
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await expect(page.getByLabel('What should come first?')).toHaveValue('Roadmap first');
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await page.getByLabel('Work profile', { exact: true }).selectOption(profileId);
+  await persisted(page);
+  await page.reload();
+  await expect(page.getByLabel('Work profile', { exact: true })).toHaveValue(profileId);
+  await expect(page.locator('.task-title')).toContainText(['Review the usersd rollout', 'Investigate incident']);
+  expect(native.state.inactiveWorkProfiles[0]!.tasks[0]!.status).toBe('done');
+});
+
+test('profile creation reports duplicate names and starts empty without copying', async ({ page, native }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Add profile', exact: true }).click();
+  const modal = page.getByRole('dialog', { name: 'Add work profile' });
+  await modal.getByLabel('Profile name').fill(' default ');
+  await modal.getByRole('button', { name: 'Create profile' }).click();
+  await expect(modal.getByRole('alert')).toContainText('must be unique');
+  expect(native.state.inactiveWorkProfiles).toHaveLength(0);
+  await modal.getByLabel('Profile name').fill('Release week');
+  await modal.getByRole('button', { name: 'Create profile' }).click();
+  await expect(page.getByLabel('What should come first?')).toHaveValue('');
+  await expect(page.locator('.task-stream')).toHaveCount(0);
+  await persisted(page);
+  expect(native.state.tasks).toEqual([]);
+  expect(native.state.work.settings.streams).toEqual([]);
+  await page.getByLabel('Profile name').fill('Default');
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await expect(page.getByRole('alert')).toContainText('must be unique');
+  expect(native.state.activeWorkProfile.name).toBe('Release week');
+});
+
+test('profile selection and creation wait for an in-flight ranking', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Keep this run here');
+  native.holdRank = gate();
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await expect.poll(() => native.requests.filter(request => request.op === 'work.rank').length).toBe(1);
+  await expect(page.getByLabel('Work profile', { exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Add profile', exact: true })).toBeDisabled();
+  await expect(page.getByText('Profiles can be switched after the current run or unsubscribe finishes.')).toBeVisible();
+  native.holdRank.release();
+  native.holdRank = undefined;
+  await expect(page.getByLabel('Work profile', { exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Add profile', exact: true })).toBeEnabled();
+});
+
 test('task-first home captures and completes work offline across relaunch', async ({ page, native }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'What’s next' })).toBeVisible();

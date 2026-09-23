@@ -10,10 +10,12 @@ const actions = [
   ['review-result', 'Read a completed Copilot review'], ['follow-up', 'Follow up'], ['manual', 'Task'],
 ] as const;
 
-export function Settings({ settings, queue, close, recover, reference }: {
+export function Settings({ settings, profileName, queue, close, recover, reference }: {
   settings: WorkSettings; queue: WorkQueue; close: () => void; recover: () => void; reference: () => void;
+  profileName: string;
 }) {
   const [draft, setDraft] = useState(() => structuredClone(settings));
+  const [name, setName] = useState(profileName);
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -31,7 +33,7 @@ export function Settings({ settings, queue, close, recover, reference }: {
     const invalidMcp = parsed.data.streams.find(stream => stream.enabled && !isGitHubStream(stream)
       && (!stream.server.trim() || !stream.tools.length || stream.tools.includes('*')));
     if (invalidMcp) { setError(`${invalidMcp.name}: choose a server and name its allowed read tools. Wildcards are not allowed.`); return; }
-    try { queue.saveSettings(parsed.data); setSaved(true); }
+    try { queue.saveSettings(parsed.data, name); setSaved(true); }
     catch (error) { setError(error instanceof Error ? error.message : 'Settings could not be saved.'); }
   }
   async function connections() {
@@ -50,6 +52,13 @@ export function Settings({ settings, queue, close, recover, reference }: {
     </header>
     <Appearance />
     <form onSubmit={save}>
+      <section aria-labelledby="profile-heading"><h2 id="profile-heading">Work profile</h2>
+        <label htmlFor="profile-name">Profile name</label>
+        <input id="profile-name" value={name} maxLength={80} required onChange={event => {
+          setName(event.target.value); setSaved(false); setError('');
+        }} />
+        <p>Instructions, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
+      </section>
       <section aria-labelledby="instructions-heading"><h2 id="instructions-heading">Priority instructions</h2>
         <p>Your rules and roadmap guide the order, not which requests you have already completed.</p>
         <label htmlFor="priority-instructions">What should come first?</label>
@@ -115,7 +124,7 @@ export function Settings({ settings, queue, close, recover, reference }: {
           Collect and prioritize automatically</label>
         <label className="task-cadence">Minutes between runs<input type="number" min={5} max={1440} required value={draft.schedule.everyMinutes}
           onChange={event => change({ ...draft, schedule: { ...draft.schedule, everyMinutes: Number(event.target.value) } })} /></label>
-        <p>Runs while this app is open, including hidden in the menu bar. After sleep, it catches up once. Quitting stops scheduled runs.</p>
+        <p>Runs only while this profile is selected and the app is open, including hidden in the menu bar. After sleep, it catches up once. Quitting stops scheduled runs.</p>
         <p className="field-help">Each run uses Copilot. Run now uses these same sources and instructions.</p>
       </section>
       {error && <p className="task-error" role="alert">{error}</p>}
@@ -127,7 +136,8 @@ export function Settings({ settings, queue, close, recover, reference }: {
       <button className="secondary" disabled={checking} onClick={() => void connections()}>{checking ? 'Reading connections...' : 'Read MCP connections'}</button>
       {connectionInfo && <p className="task-connection-info" role="status">{connectionInfo}</p>}
       <p>A Slack connection saved in Copilot app settings is not automatically shared with this app. Read connections for setup details.</p>
-      <p>External agents can submit tasks through this app's MCP server. For a completed Copilot review, submit a <code>review-result</code> task with a stable event ID and PR link. The task stays open until you mark it Done.</p>
+      <p>External agents can submit tasks through this app's MCP server. The next run adds them to the selected profile.
+        For a completed Copilot review, submit a <code>review-result</code> task with a stable event ID and PR link. The task stays open until you mark it Done.</p>
       <p className="field-help">Run the packaged <code>github-projects-service --mcp</code> as a local MCP server in the producing app. This does not automatically install a completion hook.</p>
     </section>
     <section aria-labelledby="storage-heading"><h2 id="storage-heading">Your saved work</h2>

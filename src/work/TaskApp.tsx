@@ -10,6 +10,7 @@ import type { Task } from '../types.ts';
 import { WorkQueue } from './controller.ts';
 import { canonicalSource, rankedTasks } from './engine.ts';
 import { Settings } from './Settings.tsx';
+import { workProfiles } from './profiles.ts';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -37,6 +38,32 @@ function Capture({ queue, close }: { queue: WorkQueue; close: () => void }) {
       {error && <p className="task-error" role="alert">{error}</p>}
       <footer className="modal-footer"><button type="button" className="secondary" onClick={close}>Cancel</button>
         <button className="primary" disabled={!title.trim()} type="submit">Add task</button></footer>
+    </form>
+  </Modal>;
+}
+function NewProfile({ queue, currentName, close, created }: {
+  queue: WorkQueue; currentName: string; close: () => void; created: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [name, setName] = useState('');
+  const [copySettings, setCopySettings] = useState(false);
+  const [error, setError] = useState('');
+  return <Modal title="Add work profile" close={close} initialFocus={ref}>
+    <form onSubmit={event => {
+      event.preventDefault();
+      try { queue.createProfile(name, copySettings); created(); close(); }
+      catch (error) { setError(error instanceof Error ? error.message : 'The work profile could not be created.'); }
+    }}>
+      <label htmlFor="new-profile-name">Profile name</label>
+      <input id="new-profile-name" ref={ref} value={name} maxLength={80} required
+        placeholder="For example, On call" onChange={event => setName(event.target.value)} />
+      <p className="field-help">Start with an empty task list. Your other profiles keep their tasks and Done history.</p>
+      <label className="checkbox-label"><input type="checkbox" checked={copySettings}
+        onChange={event => setCopySettings(event.target.checked)} />Copy saved instructions and sources from {currentName}</label>
+      <p className="field-help">Without a copy, instructions and sources start empty. Automatic runs start off.</p>
+      {error && <p className="task-error" role="alert">{error}</p>}
+      <footer className="modal-footer"><button type="button" className="secondary" onClick={close}>Cancel</button>
+        <button type="submit" className="primary" disabled={!name.trim()}>Create profile</button></footer>
     </form>
   </Modal>;
 }
@@ -100,6 +127,7 @@ export function TaskApp({ controller, queue, reference }: {
   const saved = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const run = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
   const [capture, setCapture] = useState(false);
+  const [newProfile, setNewProfile] = useState(false);
   const [settings, setSettings] = useState(false);
   const [recovery, setRecovery] = useState(false);
   const [oldWorkspace, setOldWorkspace] = useState(() => window.location.hash === '#reference');
@@ -131,6 +159,7 @@ export function TaskApp({ controller, queue, reference }: {
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
   </main>;
   const state = saved.workspace.state;
+  const profileBusy = run.running || run.unsubscribing.length > 0;
   const ranked = rankedTasks(state);
   const done = state.tasks.filter(task => task.status === 'done');
   const waiting = state.tasks.filter(task => task.status === 'open' && task.work?.availability === 'waiting');
@@ -149,11 +178,26 @@ export function TaskApp({ controller, queue, reference }: {
         <button className="primary" disabled={run.running} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
         <button className="quiet" aria-label="Sources and priorities" onClick={() => setSettings(true)}><Settings2 size={18} /></button></div>
     </header>}
+    {!settings && <div className="task-profile-bar">
+      <label htmlFor="work-profile">Work profile</label>
+      <select id="work-profile" value={state.activeWorkProfile.id} disabled={profileBusy}
+        aria-describedby="work-profile-help" onChange={event => {
+          try { queue.switchProfile(event.target.value); setSelection(null); setView('tasks'); }
+          catch (error) { controller.report(error); }
+        }}>
+        {workProfiles(state).map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+      </select>
+      <button className="quiet" disabled={profileBusy} onClick={() => setNewProfile(true)}><Plus size={15} />Add profile</button>
+      <p id="work-profile-help" className="field-help">{profileBusy
+        ? 'Profiles can be switched after the current run or unsubscribe finishes.'
+        : 'Only this profile collects and ranks work. Other task lists stay saved.'}</p>
+    </div>}
     {(run.error || state.work.lastError || saved.operationError || saved.persistence.error) && <div className="task-error" role="alert">
       <p>{saved.persistence.error || saved.operationError || run.error || state.work.lastError}</p>
       {saved.persistence.error && <button className="secondary" onClick={() => invoke(() => controller.retryStorage())}>Retry storage</button>}
     </div>}
-    {settings ? <Settings settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
+    {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
+      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
       reference={() => { window.history.replaceState(null, '', '#reference'); setOldWorkspace(true); }} /> : <>
       <div className="task-context"><p>{run.running ? run.phase : state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
         <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>
@@ -194,6 +238,8 @@ export function TaskApp({ controller, queue, reference }: {
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved' : 'Saved on this Mac'}</span>
       <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last successful run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}
+    {newProfile && <NewProfile queue={queue} currentName={state.activeWorkProfile.name} close={() => setNewProfile(false)}
+      created={() => { setSelection(null); setView('tasks'); setSettings(true); }} />}
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
   </div>;
 }

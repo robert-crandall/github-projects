@@ -4,7 +4,9 @@
 
 ## Purpose
 
-A local-first, prioritized todo app. Bring work from GitHub searches, Slack, manual capture and MCP ingestion into one list the user can work from top to bottom.
+A local-first, prioritized todo app. Bring work from GitHub searches, Slack, manual capture and MCP ingestion into a ranked task list for each named work profile.
+
+Each work profile owns its priority instructions, sources, model, schedule, tasks, Done history and run history. Only the selected profile collects and ranks work; external-agent intake goes into that profile on its next run. Existing work becomes the Default profile. Thread notes, connections, appearance and backups remain shared.
 
 Keep the native Tauri shell, CLI authentication and current SQLite namespace. Preserve existing tasks, completion, annotations, backups and recovery. The notification workspace is retained for saved reference material, not as the primary product.
 
