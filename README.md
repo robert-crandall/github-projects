@@ -1,6 +1,6 @@
 # GitHub Projects
 
-A local-first macOS todo app. GitHub searches and notifications, Slack, manual capture and MCP intake feed **one ranked task list**. Copilot assesses changed tasks and prioritizes the whole list using your instructions; unchanged runs reuse saved assessments and ordering.
+A local-first macOS todo app. GitHub searches and notifications, Slack, manual capture and MCP intake feed **a ranked task list for each work profile**. Copilot assesses changed tasks and prioritizes the selected profile's list using its instructions; unchanged runs reuse saved assessments and ordering.
 
 The desktop keeps the native Mac shell, CLI authentication and revisioned SQLite storage. Existing tasks, completion and thread notes are retained.
 
@@ -16,6 +16,14 @@ Appearance stays separate from tasks and their backups. Desktop preferences use 
 4. Optionally enable a cadence. Runs continue while the app is running, including hidden in the menu bar. An overdue schedule catches up once after sleep or relaunch; quitting stops it.
 
 Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks and the failure visible. Source failures never masquerade as successful empty results.
+
+### Work profiles
+
+Use **Work profile** above the task list to switch between named setups, such as regular work and on-call work. Your existing setup becomes **Default**, without changing its tasks or settings. **Add profile** creates and selects an empty task list, then opens its settings. Optionally copy the current profile's saved instructions, sources and model; automatic runs start off. Rename the selected profile in **Sources and priorities**.
+
+Each profile keeps its own instructions, sources, model, schedule, tasks, notes, Done history, ranking and notification cursor. The same source can appear independently in different profiles; completing it in one does not complete it in another. Only the selected profile runs, including scheduled runs. Switching alone does not collect or rank; **Run now** or the next due scheduled tick does. Switching waits until a run or unsubscribe finishes.
+
+External-agent intake goes into whichever profile runs next, and is acknowledged only after saving. Saved thread notes, connections, appearance and backups remain shared. Backups include every profile, and the selected profile survives relaunch.
 
 Copilot saves an independent assessment of each task's importance, urgency, blockers and supporting evidence. Only new, changed or expired tasks send full evidence again; ordering uses concise assessments for the entire active queue. Changes to task text, evidence, current source content or availability, priority instructions, model or assessment format invalidate reuse. Collection timestamps and duplicate stream provenance do not.
 

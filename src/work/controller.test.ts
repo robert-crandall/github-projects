@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { defaultWorkState, notificationWorkstream, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
 import type { Request } from '../../service/src/schema.ts';
-import { emptyWorkspace } from '../domain/live.ts';
+import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
 import { createNativePlatform, snapshotSchema, type NativeWorkspace } from '../platform/native.ts';
 import { ServiceClient } from '../platform/service.ts';
@@ -137,6 +137,215 @@ describe('durable local work', () => {
     await mock.queue.connections();
     expect(mock.queue.getSnapshot().connections?.servers[0]?.name).toBe('slack');
     expect(mock.workspace.state.work.settings.instructions).toBe('');
+  });
+});
+
+describe('work profiles', () => {
+  test('existing v3 work migrates to Default without changing tasks, settings or history', async () => {
+    const current = reconcileWork(initial(), collection(), before);
+    current.work.settings.instructions = 'Keep these priorities';
+    current.work.collectionCursor = before;
+    current.work.lastCompletedAt = previousCompleted;
+    const { activeWorkProfile: _active, inactiveWorkProfiles: _inactive, ...legacy } = current;
+    const mock = await fixture(legacy);
+    expect(mock.saved().activeWorkProfile).toEqual({ id: 'default', name: 'Default' });
+    expect(mock.saved().inactiveWorkProfiles).toEqual([]);
+    expect(mock.saved().tasks).toEqual(current.tasks);
+    expect(mock.saved().work).toEqual(current.work);
+  });
+
+  test('switching restores independent tasks, completion, settings, ranking and cursors after relaunch', async () => {
+    const saved = initial();
+    saved.work.settings = { ...defaultWorkState().settings, instructions: 'Reviews first', model: 'model-a' };
+    const mock = await fixture(saved);
+    await mock.queue.run();
+    const firstId = mock.workspace.state.tasks[0]!.id;
+    mock.queue.edit(firstId, 'Regular review', 'Notes for regular work');
+    mock.queue.complete(firstId);
+    mock.queue.capture('Regular manual task');
+    await mock.workspace.flush();
+    const original = structuredClone(mock.saved());
+
+    mock.queue.createProfile(' On call ', true);
+    const profileId = mock.workspace.state.activeWorkProfile.id;
+    expect(mock.workspace.state.tasks).toEqual([]);
+    expect(mock.workspace.state.work.ranking).toBeNull();
+    expect(mock.workspace.state.work.collectionCursor).toBeNull();
+    expect(mock.workspace.state.work.lastCompletedAt).toBeNull();
+    mock.queue.saveSettings({
+      ...mock.workspace.state.work.settings, instructions: 'Incidents first', model: 'model-b',
+      streams: [notificationWorkstream()],
+    });
+    await mock.queue.run();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    const onCallId = mock.workspace.state.tasks[0]!.id;
+    expect(onCallId).not.toBe(firstId);
+    expect(mock.workspace.state.tasks[0]!.status).toBe('open');
+    mock.queue.edit(onCallId, 'On-call review', 'Different notes');
+    mock.queue.capture('On-call manual task');
+    await mock.workspace.flush();
+    const onCall = structuredClone(mock.saved());
+    expect(onCall.inactiveWorkProfiles[0]!.tasks).toEqual(original.tasks);
+    expect(onCall.inactiveWorkProfiles[0]!.work).toEqual(original.work);
+    const rank = mock.requests.filter(request => request.op === 'work.rank').at(-1)!;
+    expect(rank.input.instructions).toBe('Incidents first');
+    expect(rank.input.tasks.map(task => task.id)).toEqual([onCallId]);
+    const collect = mock.requests.filter(request => request.op === 'work.collect').at(-1)!;
+    expect(collect.input).toMatchObject({ since: null, stream: { kind: 'github-notifications' } });
+
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    const queue = new WorkQueue(reloaded, mock.service);
+    expect(reloaded.state.activeWorkProfile).toEqual({ id: profileId, name: 'On call' });
+    expect(reloaded.state.tasks).toEqual(onCall.tasks);
+    queue.switchProfile('default');
+    expect(reloaded.state.tasks).toEqual(original.tasks);
+    expect(reloaded.state.work).toEqual(original.work);
+    queue.switchProfile(profileId);
+    expect(reloaded.state.tasks).toEqual(onCall.tasks);
+    expect(reloaded.state.work).toEqual(onCall.work);
+    await reloaded.flush();
+    expect(mock.saved().activeWorkProfile.id).toBe(profileId);
+  });
+
+  test('empty and copied profiles have no tasks, and copies cannot mutate the original settings', async () => {
+    const saved = initial();
+    saved.work.settings = defaultWorkState().settings;
+    saved.work.settings.instructions = 'Normal work';
+    saved.work.settings.schedule.enabled = true;
+    const mock = await fixture(saved);
+    mock.queue.capture('Keep in Default');
+    mock.queue.createProfile('Copied', true);
+    expect(mock.workspace.state.work.settings.instructions).toBe('Normal work');
+    expect(mock.workspace.state.work.settings.streams).toEqual(saved.work.settings.streams);
+    expect(mock.workspace.state.work.settings.schedule.enabled).toBe(false);
+    const changed = structuredClone(mock.workspace.state.work.settings);
+    changed.streams[0]!.query = 'repo:owner/on-call is:pr';
+    mock.queue.saveSettings(changed);
+    expect(mock.workspace.state.inactiveWorkProfiles[0]!.work.settings).toEqual(saved.work.settings);
+    mock.queue.createProfile('Empty');
+    expect(mock.workspace.state.tasks).toEqual([]);
+    expect(mock.workspace.state.work.settings).toMatchObject({ instructions: '', model: '', streams: [], schedule: { enabled: false } });
+    await mock.workspace.flush();
+  });
+
+  test('profile names are trimmed, unique and validated atomically with settings', async () => {
+    const mock = await fixture();
+    mock.queue.createProfile('On call');
+    const before = structuredClone(mock.workspace.state);
+    for (const name of ['', ' ', 'DEFAULT', 'x'.repeat(81)]) {
+      expect(() => mock.queue.createProfile(name)).toThrow();
+      expect(() => mock.queue.saveSettings({ ...before.work.settings, instructions: 'Must not save' }, name)).toThrow();
+      expect(mock.workspace.state.work).toEqual(before.work);
+      expect(mock.workspace.state.activeWorkProfile).toEqual(before.activeWorkProfile);
+    }
+    expect(() => mock.queue.switchProfile('missing')).toThrow('no longer exists');
+    mock.queue.saveSettings(before.work.settings, ' Release week ');
+    expect(mock.workspace.state.activeWorkProfile).toEqual({ ...before.activeWorkProfile, name: 'Release week' });
+    await mock.workspace.flush();
+  });
+
+  test('reference task undo stays with its profile and unfinished capture text is retained', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Regular task');
+    const id = mock.workspace.state.tasks[0]!.id;
+    mock.workspace.dispatch({ type: 'done', key: `a:${id}` });
+    mock.workspace.dispatch({ type: 'draft', text: 'Unfinished capture' });
+    const undo = structuredClone(mock.workspace.state.undo);
+    expect(undo).toHaveLength(1);
+    mock.queue.createProfile('On call');
+    expect(mock.workspace.state.undo).toEqual([]);
+    expect(mock.workspace.state.draft).toBe('Unfinished capture');
+    mock.workspace.dispatch({ type: 'undo' });
+    expect(mock.workspace.state.tasks).toEqual([]);
+    mock.queue.switchProfile('default');
+    expect(mock.workspace.state.undo).toEqual(undo);
+    mock.workspace.dispatch({ type: 'undo' });
+    expect(mock.workspace.state.tasks[0]!.status).toBe('open');
+    await mock.workspace.flush();
+  });
+
+  test('invalid inactive profiles block loading rather than dropping saved work', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Preserve this');
+    mock.queue.createProfile('On call');
+    await mock.workspace.flush();
+    for (const field of ['name', 'id', 'task'] as const) {
+      const damaged = structuredClone(mock.saved());
+      if (field === 'task') damaged.tasks = structuredClone(damaged.inactiveWorkProfiles[0]!.tasks);
+      else damaged.inactiveWorkProfiles[0]![field] = damaged.activeWorkProfile[field];
+      expect(() => restoreDesktop(damaged, before)).toThrow(field === 'task' ? 'inconsistent task references' : 'must be unique');
+    }
+  });
+
+  test('inactive schedules do not run and intake belongs only to the active profile', async () => {
+    const saved = initial();
+    saved.work.settings.schedule.enabled = true;
+    let pending = true;
+    const mock = await fixture(saved, request => {
+      if (request.op === 'work.intake') return { items: pending ? [{ id: 'pushed', candidate: candidate() }] : [], hasMore: false };
+      if (request.op === 'work.ackIntake') { pending = false; return request.input; }
+    });
+    mock.queue.createProfile('Focused');
+    await mock.queue.tick();
+    expect(mock.requests).toEqual([]);
+    await mock.queue.run();
+    expect(mock.saved().tasks).toHaveLength(1);
+    expect(mock.saved().inactiveWorkProfiles[0]!.tasks).toEqual([]);
+    const calls = mock.requests.length;
+    mock.queue.switchProfile('default');
+    expect(mock.requests).toHaveLength(calls);
+    await mock.queue.tick();
+    expect(mock.requests.length).toBeGreaterThan(calls);
+    expect(mock.saved().tasks).toEqual([]);
+    expect(mock.saved().inactiveWorkProfiles[0]!.tasks).toHaveLength(1);
+  });
+
+  test('profile creation and switching are blocked throughout an in-flight run', async () => {
+    const entered = deferred<void>();
+    const result = deferred<unknown>();
+    const mock = await fixture(initial(), request => {
+      if (request.op !== 'work.rank') return;
+      entered.resolve();
+      return result.promise;
+    });
+    mock.queue.createProfile('On call');
+    const targetId = mock.workspace.state.activeWorkProfile.id;
+    mock.queue.switchProfile('default');
+    mock.queue.capture('Rank this task');
+    const pending = mock.queue.run();
+    await entered.promise;
+    expect(() => mock.queue.switchProfile(targetId)).toThrow('Wait for the current run');
+    expect(() => mock.queue.createProfile('Release')).toThrow('Wait for the current run');
+    const request = mock.requests.find(request => request.op === 'work.rank')!;
+    result.resolve(ranked(request));
+    await pending;
+    expect(mock.saved().work.ranking!.orderedIds).toEqual([mock.saved().tasks[0]!.id]);
+    mock.queue.switchProfile(targetId);
+    expect(mock.workspace.state.tasks).toEqual([]);
+    expect(mock.workspace.state.work.ranking).toBeNull();
+    expect(mock.queue.getSnapshot()).toMatchObject({ error: '', warnings: [], running: false });
+    await mock.workspace.flush();
+  });
+
+  test('failed profile saves retain every task for retry and backups include inactive profiles', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Default task');
+    await mock.workspace.flush();
+    mock.fail(() => true);
+    mock.queue.createProfile('On call');
+    mock.queue.capture('On-call task');
+    await expect(mock.workspace.flush()).rejects.toThrow('Disk unavailable');
+    expect(mock.saved().activeWorkProfile.id).toBe('default');
+    const pending = JSON.parse(mock.workspace.pendingJson()).workspace.state;
+    expect(pending.tasks[0].title).toBe('On-call task');
+    expect(pending.inactiveWorkProfiles[0].tasks[0].title).toBe('Default task');
+    mock.fail(() => false);
+    await mock.workspace.retryStorage();
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    expect(reloaded.state.tasks[0]!.title).toBe('On-call task');
+    expect(reloaded.state.inactiveWorkProfiles[0]!.tasks[0]!.title).toBe('Default task');
   });
 });
 
@@ -636,6 +845,8 @@ describe('notification task controls', () => {
     const pending = mock.queue.unsubscribe(id);
     const request = await entered.promise;
     await expect(mock.queue.unsubscribe(id)).rejects.toThrow('already in progress');
+    expect(() => mock.queue.createProfile('On call')).toThrow('unsubscribe');
+    expect(() => mock.queue.switchProfile('default')).toThrow('unsubscribe');
     mock.queue.complete(id);
     mock.queue.edit(id, 'Edited during unsubscribe', 'Keep this note');
     result.resolve(confirmation(request));

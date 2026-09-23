@@ -113,6 +113,12 @@ export const noteSchema = z.object({
   id: z.string(), threadId: z.string(), text: z.string(),
   sourceTitle: z.string().optional(), history: historySchema.optional(),
 });
+export const workProfileIdentitySchema = z.strictObject({ id: localId, name: nameSchema });
+const taskUndoSchema = z.array(z.object({ before: taskSchema, after: taskSchema }));
+export const inactiveWorkProfileSchema = workProfileIdentitySchema.extend({
+  tasks: z.array(taskSchema), work: workStateSchema, undo: taskUndoSchema,
+});
+export function defaultWorkProfile() { return { id: 'default', name: 'Default' }; }
 export const stateSchema = legacyStateSchema.omit({
   version: true, actions: true, activeId: true, view: true, undo: true, failures: true,
 }).extend({
@@ -121,8 +127,10 @@ export const stateSchema = legacyStateSchema.omit({
   inboxes: z.array(inboxSchema).max(50).default([]),
   rules: z.array(ruleSchema).max(100).default([]),
   work: workStateSchema.default(defaultWorkState),
+  activeWorkProfile: workProfileIdentitySchema.default(defaultWorkProfile),
+  inactiveWorkProfiles: z.array(inactiveWorkProfileSchema).default([]),
   failures: z.object({ refresh: z.enum(['none', 'partial', 'error']), storage: z.boolean(), external: z.boolean() }),
-  undo: z.array(z.object({ before: taskSchema, after: taskSchema })),
+  undo: taskUndoSchema,
 });
 
 export type AppState = z.infer<typeof stateSchema>;

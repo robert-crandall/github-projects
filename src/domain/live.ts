@@ -1,4 +1,4 @@
-import { threadSchema, type AppState, type ExternalOperation, type Thread } from '../types.ts';
+import { defaultWorkProfile, threadSchema, type AppState, type ExternalOperation, type Thread } from '../types.ts';
 import { transition } from './engine.ts';
 import { instant } from './clock.ts';
 import { migrateWorkspace } from './migration.ts';
@@ -12,6 +12,7 @@ export function emptyWorkspace(now: string, timeZone: string): AppState {
   new Intl.DateTimeFormat('en-US', { timeZone });
   return {
     version: 3, runtime: 'desktop', clock: instant(now), timeZone, work: defaultWorkState(),
+    activeWorkProfile: defaultWorkProfile(), inactiveWorkProfiles: [],
     threads: [], tasks: [], notes: [], staged: [], handled: [], seen: [], order: [], newKeys: [],
     selectedKey: null, view: 'inbox', draft: '', operations: [], rules: [], inboxes: [],
     refresh: { lastSuccessAt: null, status: 'saved', message: 'Refresh loads GitHub activity. Notes and tasks are available without a connection.' },
@@ -21,7 +22,8 @@ export function emptyWorkspace(now: string, timeZone: string): AppState {
 
 export function restoreDesktop(value: unknown, now: string): AppState {
   const state = migrateWorkspace(value);
-  if (state.runtime !== 'desktop' || state.tasks.some(task => task.history?.origin === 'fixture')
+  if (state.runtime !== 'desktop' || [...state.tasks, ...state.inactiveWorkProfiles.flatMap(profile => profile.tasks)]
+    .some(task => task.history?.origin === 'fixture')
     || state.notes.some(note => note.history?.origin === 'fixture') || state.threads.some(thread => thread.source !== 'github')) {
     throw new Error('This is not a live desktop workspace. The saved copy has not been changed.');
   }
@@ -66,6 +68,13 @@ export function mergeRefresh(state: AppState, batch: RefreshBatch): AppState {
         const previousId = previous.id;
         for (const note of next.notes) if (note.threadId === previousId) note.threadId = fetched.id;
         for (const task of next.tasks) if (task.threadId === previousId) task.threadId = fetched.id;
+        for (const profile of next.inactiveWorkProfiles) {
+          for (const task of profile.tasks) if (task.threadId === previousId) task.threadId = fetched.id;
+          for (const entry of profile.undo) {
+            if (entry.before.threadId === previousId) entry.before.threadId = fetched.id;
+            if (entry.after.threadId === previousId) entry.after.threadId = fetched.id;
+          }
+        }
         for (const operation of next.operations) if (operation.threadId === previousId) operation.threadId = fetched.id;
         if (next.selectedKey === `t:${previousId}`) next.selectedKey = `t:${fetched.id}`;
         next.order = next.order.map(key => key === `t:${previousId}` ? `t:${fetched.id}` : key);

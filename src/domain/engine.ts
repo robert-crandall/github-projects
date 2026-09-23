@@ -113,6 +113,7 @@ export function initialState(timeZone = 'UTC'): AppState {
   ];
   return {
     version: 3, runtime: 'demo', clock, timeZone, work: defaultWorkState(),
+    activeWorkProfile: { id: 'default', name: 'Default' }, inactiveWorkProfiles: [],
     threads: threads.map(thread => {
       thread.archive = thread.id === CLOSED ? archiveBoundary(thread, clock) : null;
       thread.sourceState = { state: thread.state, observedAt: clock, updatedAt: null, error: null };

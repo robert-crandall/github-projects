@@ -8,6 +8,7 @@ import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
 import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
+import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type WorkQueueSnapshot = {
@@ -46,14 +47,29 @@ export class WorkQueue {
     this.controller.update(current => transform({ ...current, work: current.work ?? defaultWorkState() }));
   }
 
-  saveSettings(settings: WorkSettings): void {
+  saveSettings(settings: WorkSettings, profileName = this.controller.state.activeWorkProfile.name): void {
     const saved = workSettingsSchema.parse(settings);
     this.update(current => ({
-      ...current, work: {
+      ...renameWorkProfile(current, profileName), work: {
         ...current.work, settings: saved,
         ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null } : {}),
       },
     }));
+  }
+  private assertProfileIdle(): void {
+    if (this.status.running || this.status.unsubscribing.length) {
+      throw new Error('Wait for the current run or unsubscribe to finish before changing work profiles.');
+    }
+  }
+  switchProfile(id: string): void {
+    this.assertProfileIdle();
+    this.update(current => switchWorkProfile(current, id));
+    this.publish({ error: '', warnings: [], phase: 'idle' });
+  }
+  createProfile(name: string, copySettings = false): void {
+    this.assertProfileIdle();
+    this.update(current => createWorkProfile(current, name, copySettings));
+    this.publish({ error: '', warnings: [], phase: 'idle' });
   }
   capture(title: string, notes = ''): void {
     this.validateText(title, notes);
