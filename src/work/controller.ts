@@ -254,15 +254,18 @@ export class WorkQueue {
         if (this.controller.getSnapshot().persistence.error) throw error;
         errors.push(`Task intake: ${message(error)}`);
       }
+      const observed = new Set<string>();
       for (const stream of streams) {
         this.publish({ phase: `collecting: ${stream.name}` });
         const knownUrls = [...new Set(this.controller.state.tasks
           .filter(task => task.status === 'open' && task.work && new URL(task.work.url).hostname === 'github.com')
-          .map(task => task.work!.url))];
+          .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
         for (let offset = 0; offset < Math.max(knownUrls.length, 1); offset += 100) {
+          const pendingUrls = knownUrls.slice(offset, offset + 100).filter(url => !observed.has(canonicalSource(url)));
+          if (offset > 0 && !pendingUrls.length) continue;
           try {
             const result = await this.service.call('work.collect', {
-              stream, model: settings.model, since: collectionCursor, knownUrls: knownUrls.slice(offset, offset + 100),
+              stream, model: settings.model, since: collectionCursor, knownUrls: pendingUrls,
               observeOnly: offset > 0,
             });
             if (result.coveredThrough) {
@@ -274,6 +277,7 @@ export class WorkQueue {
               if (boundary < Date.parse(coveredThrough)) coveredThrough = result.coveredThrough;
             }
             await this.persist(result);
+            for (const observation of result.observations) observed.add(canonicalSource(observation.url));
             warnings.push(...(result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`));
             for (const warning of result.warnings) {
               warnings.push(`${stream.name}: ${warning}`);

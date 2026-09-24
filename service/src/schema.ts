@@ -9,7 +9,7 @@ export const LIMITS = {
   processBytes: 4_194_304, processMs: 20_000, notificationPages: 2, threads: 50,
   refreshMs: 90_000, enrichmentConcurrency: 3,
   eventPages: 2, events: 200, evidenceText: 2_000, modelBytes: 60_000, modelMs: 90_000,
-  workModelBytes: 240_000, workModelMs: 180_000, workDeadlineMs: 300_000,
+  workModelBytes: 240_000, workAssessmentTasks: 20, workModelMs: 180_000, workDeadlineMs: 300_000,
 } as const;
 
 export const idSchema = z.string().min(1).max(500).regex(/^[A-Za-z0-9:_.\/-]+$/);

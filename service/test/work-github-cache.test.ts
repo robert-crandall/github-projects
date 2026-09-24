@@ -61,7 +61,7 @@ async function setup(count: number) {
   const world = {
     now: Date.parse(start), account: { id: 1, login: 'viewer' },
     fail: new Map<string, number>(), incomplete: false, duplicatePage: false,
-    failModel: false, emptyModel: false,
+    failModel: false, emptyModel: false, lastPage: 1,
     beforeSearch: undefined as ((params: URLSearchParams) => void) | undefined,
     beforeUser: undefined as (() => void) | undefined,
   };
@@ -92,10 +92,17 @@ async function setup(count: number) {
       const number = JSON.parse(body!).variables.number as number;
       return response({ data: { repository: { pullRequest: prs.get(number) } } });
     }
-    const match = /^\/repos\/octo\/repo\/(issues|pulls)\/(\d+)(\/timeline\?per_page=100&page=1)?$/.exec(target);
+    const match = /^\/repos\/octo\/repo\/(issues|pulls)\/(\d+)(\/timeline\?per_page=100&page=\d+)?$/.exec(target);
     if (!match) throw new Error(`Unexpected synthetic request ${target}`);
     const number = Number(match[2]);
-    if (match[3]) return response(events.get(number) ?? []);
+    if (match[3]) {
+      const result = response(events.get(number) ?? []);
+      if (world.lastPage > 1 && target.endsWith('page=1')) {
+        result.stdout = result.stdout.replace('\r\n\r\n',
+          `\r\nLink: <https://api.github.com/repos/octo/repo/issues/${number}/timeline?per_page=100&page=${world.lastPage}>; rel="last"\r\n\r\n`);
+      }
+      return result;
+    }
     return response(sources.get(number) ?? {}, sources.has(number) ? 200 : 404);
   };
   const copilot: Pick<CopilotService, 'extractReplies'> = {
@@ -139,6 +146,23 @@ async function setup(count: number) {
 }
 
 describe('durable incremental saved searches', () => {
+  test('bounded history keeps its coverage note across restart without blocking cache checkpoints', async () => {
+    await fixture(async f => {
+      f.world.lastPage = 5;
+      const first = await f.collect();
+      expect(first.warnings).toEqual([]);
+      expect(first.coverageInfo!.join(' ')).toContain('timeline is capped');
+      expect(f.states()[0]!.scannedAt).toBe(start);
+      expect(f.count('/timeline')).toBe(2);
+      f.restart();
+      f.advance();
+      const second = await f.collect(first.collectedAt);
+      expect(second.warnings).toEqual([]);
+      expect(second.coverageInfo).toEqual(first.coverageInfo);
+      expect(f.queries()[1]).toContain(' updated:');
+      expect(f.count('/timeline')).toBe(2);
+    });
+  });
   test('unchanged cache survives restart, authenticates every source, and avoids all timeline/model rereads', async () => {
     await fixture(async f => {
       const first = await f.collect(null, { action: 'reply' });
@@ -595,7 +619,7 @@ describe('private cache storage and bounds', () => {
       expect(() => f.cache.save('test', 0, { ...emptyGitHubCache(), members: Array(201).fill(url(1)) })).toThrow(ServiceError);
       const large: GitHubCacheState = {
         ...emptyGitHubCache(), timelines: [[url(1), {
-          revision: 'a'.repeat(64), fetchedAt: start, events: ['x'.repeat(CACHE_ENTRY_BYTES)], warnings: [],
+          revision: 'a'.repeat(64), fetchedAt: start, events: ['x'.repeat(CACHE_ENTRY_BYTES)], warnings: [], coverageInfo: [],
         }]],
       };
       expect(() => f.cache.save('test', 0, large)).toThrow(ServiceError);
