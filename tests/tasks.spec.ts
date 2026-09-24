@@ -16,6 +16,32 @@ async function run(page: Page) {
   await persisted(page);
 }
 
+test('saved team searches survive relaunch and collect through configured sources', async ({ page, native }) => {
+  const query = 'is:pr is:open team-review-requested:sample/provider-maintainers';
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Add source', exact: true }).click();
+  const source = page.locator('.task-stream').last();
+  await source.getByLabel('Name', { exact: true }).fill('Team reviews');
+  await source.getByLabel('Source type').selectOption('github');
+  await source.getByLabel('GitHub query').fill(query);
+  await source.getByLabel('Action to take on matches').selectOption('review');
+  await source.getByLabel('Enabled', { exact: true }).check();
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  const settings = structuredClone(native.state.work.settings);
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'What’s next' })).toBeVisible();
+  expect(native.state.work.settings).toEqual(settings);
+  await run(page);
+  const collection = native.requests.find(request => request.op === 'work.collect'
+    && request.input.stream.name === 'Team reviews');
+  if (collection?.op !== 'work.collect') throw new Error('Saved team search was not collected');
+  expect(collection.input.stream).toMatchObject({ kind: 'github', query, enabled: true, action: 'review' });
+  expect(native.state.work.settings).toEqual(settings);
+  expect(native.requests.some(request => request.op.startsWith('github.'))).toBe(false);
+});
+
 test('work profiles preserve separate tasks and priorities across switching and relaunch', async ({ page, native }, testInfo) => {
   await page.goto('/');
   await add(page, 'Regular task');
@@ -65,7 +91,7 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await persisted(page);
   await page.reload();
   await expect(page.getByLabel('Work profile', { exact: true })).toHaveValue(profileId);
-  await expect(page.locator('.task-title')).toContainText(['Review the usersd rollout', 'Investigate incident']);
+  await expect(page.locator('.task-title')).toContainText(['Review the relay rollout', 'Investigate incident']);
   expect(native.state.inactiveWorkProfiles[0]!.tasks[0]!.status).toBe('done');
 });
 
@@ -125,7 +151,7 @@ test('every run ranks all tasks with saved instructions without reading notifica
   await add(page, 'Prepare roadmap');
   await add(page, 'Read release notes');
   await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
-  await page.getByLabel('What should come first?').fill('Prioritize usersd roadmap phase one and Slack reviews.');
+  await page.getByLabel('What should come first?').fill('Prioritize relay roadmap phase one and Slack reviews.');
   await page.getByRole('button', { name: 'Save settings' }).click();
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   await run(page);
@@ -133,9 +159,9 @@ test('every run ranks all tasks with saved instructions without reading notifica
   expect(rank?.op).toBe('work.rank');
   if (rank?.op !== 'work.rank') throw new Error('Rank request missing');
   expect(rank.input.tasks).toHaveLength(3);
-  expect(rank.input.instructions).toContain('usersd roadmap phase one');
-  await expect(page.locator('.task-title').first()).toHaveText('Review the usersd rollout');
-  await expect(page.locator('.task-reason').first()).toHaveText('Priority for Review the usersd rollout');
+  expect(rank.input.instructions).toContain('relay roadmap phase one');
+  await expect(page.locator('.task-title').first()).toHaveText('Review the relay rollout');
+  await expect(page.locator('.task-reason').first()).toHaveText('Priority for Review the relay rollout');
   expect(native.requests.some(request => request.op.startsWith('github.'))).toBe(false);
   expect(native.state.tasks.filter(task => task.work)).toHaveLength(1);
 });
@@ -143,7 +169,7 @@ test('every run ranks all tasks with saved instructions without reading notifica
 test('Done survives repeated queries and only a newer request reopens it', async ({ page, native }) => {
   await page.goto('/');
   await run(page);
-  await page.getByRole('button', { name: 'Mark done: Review the usersd rollout', exact: true }).click();
+  await page.getByRole('button', { name: 'Mark done: Review the relay rollout', exact: true }).click();
   await persisted(page);
   await run(page);
   await expect(page.locator('.task-title')).toHaveCount(0);
@@ -156,7 +182,7 @@ test('Done survives repeated queries and only a newer request reopens it', async
   native.workCollection.collectedAt = future;
   await page.clock.setFixedTime(new Date(future));
   await run(page);
-  await expect(page.locator('.task-title')).toHaveText('Review the usersd rollout');
+  await expect(page.locator('.task-title')).toHaveText('Review the relay rollout');
   expect(native.state.tasks).toHaveLength(1);
 });
 
@@ -169,13 +195,13 @@ test('merge queue removes work without completing it and reopening restores only
   await run(page);
   await expect(page.locator('.task-title')).toHaveCount(0);
   await page.getByRole('button', { name: /^No action now/ }).click();
-  await expect(page.locator('.task-title')).toHaveText('Review the usersd rollout');
+  await expect(page.locator('.task-title')).toHaveText('Review the relay rollout');
   expect(native.state.tasks[0]?.status).toBe('open');
   native.workCollection.observations[0]!.state = 'open';
   native.workCollection.observations[0]!.reason = '';
   await run(page);
   await page.getByRole('button', { name: /^To do/ }).click();
-  await expect(page.locator('.task-title')).toHaveText('Review the usersd rollout');
+  await expect(page.locator('.task-title')).toHaveText('Review the relay rollout');
 });
 
 test('model failure preserves discoveries and makes unranked work explicit', async ({ page, native }) => {
@@ -203,7 +229,7 @@ test('unknown source state stays visible instead of silently removing work', asy
   native.workCollection.observations[0]!.state = 'unknown';
   native.workCollection.observations[0]!.reason = 'GitHub state could not be checked. Retry the source.';
   await run(page);
-  await expect(page.locator('.task-title')).toHaveText('Review the usersd rollout');
+  await expect(page.locator('.task-title')).toHaveText('Review the relay rollout');
   await expect(page.locator('.task-uncertain')).toContainText('GitHub state could not be checked');
   const rank = native.requests.filter(request => request.op === 'work.rank').at(-1);
   if (rank?.op !== 'work.rank') throw new Error('Rank request missing');
@@ -227,7 +253,7 @@ test('local capture and Done during ranking survive the result', async ({ page, 
   native.holdRank = undefined;
   await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
   await persisted(page);
-  await expect(page.locator('.task-title')).toContainText(['Review the usersd rollout', 'Arrived during the run']);
+  await expect(page.locator('.task-title')).toContainText(['Review the relay rollout', 'Arrived during the run']);
   expect(native.state.tasks.find(task => task.title === 'Already handled')?.status).toBe('done');
   await expect(page.locator('.ranked-list > li').filter({ hasText: 'Arrived during the run' })).toContainText('Not ranked yet');
 });
@@ -386,7 +412,7 @@ test('failed unsubscribe remains visible and requires explicit retry after relau
 });
 
 test('ranked list and details stay readable on desktop and narrow screens', async ({ page, native }, testInfo) => {
-  native.workCollection.candidates[0]!.title = '<img src=x> Review a long usersd task with a source that needs context';
+  native.workCollection.candidates[0]!.title = '<img src=x> Review a long relay task with a source that needs context';
   await page.goto('/');
   await add(page, 'Write phase-one rollout notes');
   await run(page);

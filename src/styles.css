@@ -108,25 +108,6 @@ p { line-height: 1.65; }
 .archive-controls { margin-top: 18px; }
 .archive-controls .field-help { margin: 0; }
 .thread-placement { margin-top: 22px; font-size: 12px; overflow-wrap: anywhere; }
-.modal.waiting-modal { width: 760px; max-width: min(760px, calc(100% - 30px)); }
-.waiting-report { margin-top: 26px; overflow-wrap: anywhere; }
-.waiting-report > h3 { font-size: 18px; }
-.waiting-summary { margin-top: 14px; font-size: 13px; color: var(--secondary); }
-.waiting-empty { padding: 24px 0; }
-.waiting-bucket { margin-top: 28px; }
-.waiting-bucket h4 { margin: 0; font-size: 14px; line-height: 1.6; font-weight: 600; }
-.waiting-bucket h4 > span { color: var(--secondary); font-weight: 400; }
-.waiting-list { list-style: none; padding: 0; margin: 10px 0 0; }
-.waiting-item { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0; border-top: 1px solid var(--border); }
-.waiting-item > div { min-width: 0; flex: 1; }
-.waiting-title { display: block; font-size: 14px; line-height: 1.6; }
-.waiting-meta, .waiting-reasons { display: block; font-size: 12px; line-height: 1.6; margin-top: 4px; }
-.waiting-meta { color: var(--secondary); }
-.waiting-reasons { color: var(--warning); }
-.waiting-item .text-button { margin-top: 6px; color: var(--accent); }
-.waiting-footer { margin-top: 20px; border-top: 1px solid var(--border); }
-.waiting-task-status { flex-basis: 100%; font-size: 13px; }
-.waiting-footer .inline-error { margin-top: 0; }
 .rules-modal { width: 680px; max-width: min(680px, calc(100% - 30px)); }
 .rule-list { list-style: none; padding: 0; margin: 16px 0; }
 .rule-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }

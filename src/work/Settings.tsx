@@ -63,7 +63,7 @@ export function Settings({ settings, profileName, queue, close, recover, referen
         <p>Your rules and roadmap guide the order, not which requests you have already completed.</p>
         <label htmlFor="priority-instructions">What should come first?</label>
         <textarea id="priority-instructions" rows={8} maxLength={16000} value={draft.instructions}
-          placeholder={'Rank PR reviews in owner/repo first.\nTreat reviews requested through Slack as high priority.\nFor usersd, prioritize earlier roadmap phases. Paste the roadmap here.'}
+          placeholder={'Rank PR reviews in owner/repo first.\nTreat reviews requested through Slack as high priority.\nPrioritize earlier roadmap phases. Paste your roadmap here.'}
           onChange={event => change({ ...draft, instructions: event.target.value })} />
         <label className="task-model">Copilot model (optional)<input value={draft.model} maxLength={100}
           placeholder="Use the SDK default" onChange={event => change({ ...draft, model: event.target.value })} /></label>

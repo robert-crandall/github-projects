@@ -69,7 +69,6 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
             op,
             "connection.check"
                 | "github.refresh"
-                | "github.waiting"
                 | "github.conversation"
                 | "github.acknowledge"
                 | "github.unsubscribe"
@@ -90,9 +89,6 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
         serde_json::from_value::<crate::conversation::ConversationInput>(request["input"].clone())
             .map_err(|_| NativeError::invalid())?
             .validate()?;
-    }
-    if op == "github.waiting" && request["input"].as_object().is_none_or(|input| !input.is_empty()) {
-        return Err(NativeError::invalid());
     }
     Ok((id, op))
 }
@@ -397,7 +393,6 @@ mod tests {
         }
         for op in [
             "github.refresh",
-            "github.waiting",
             "github.acknowledge",
             "copilot.triage",
         ] {
@@ -581,20 +576,10 @@ mod tests {
     }
 
     #[test]
-    fn waiting_digest_accepts_only_the_fixed_read_only_operation() {
+    fn retired_waiting_digest_is_rejected_before_starting_a_service() {
         assert!(
-            validate_request(&json!({"v":1,"id":"digest","op":"github.waiting","input":{}})).is_ok()
+            validate_request(&json!({"v":1,"id":"digest","op":"github.waiting","input":{}})).is_err()
         );
-        for input in [
-            json!({"query":"review-requested:@me"}),
-            json!({"team":"another/team"}),
-            json!({"model":"anything"}),
-            json!({"command":"gh pr merge"}),
-        ] {
-            assert!(validate_request(
-                &json!({"v":1,"id":"digest","op":"github.waiting","input":input})
-            ).is_err());
-        }
     }
 
     #[test]

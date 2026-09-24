@@ -4,7 +4,7 @@ import { ServiceError } from '../src/errors.ts';
 import { requestSchema } from '../src/schema.ts';
 
 const at = (hour: number) => `2026-09-10T${String(hour).padStart(2, '0')}:00:00Z`;
-const reference = { repo: 'integrations/provider', number: 12, kind: 'pr' as const };
+const reference = { repo: 'sample/provider', number: 12, kind: 'pr' as const };
 const viewer = 'viewer';
 const request = (id: number, hour = id, login = viewer) => ({
   id, event: 'review_requested', created_at: at(hour), actor: { login: 'author' }, requested_reviewer: { login },
@@ -16,7 +16,7 @@ const pending = {
 };
 const notification = (id = '1', unread = true) => ({
   id, repository: { full_name: reference.repo },
-  subject: { type: 'PullRequest', url: 'https://api.github.com/repos/integrations/provider/pulls/12',
+  subject: { type: 'PullRequest', url: 'https://api.github.com/repos/sample/provider/pulls/12',
     latest_comment_url: 'https://attacker.invalid/credentials', title: 'Synthetic' },
   reason: 'review_requested', unread, updated_at: at(20), last_read_at: null,
 });
@@ -55,7 +55,7 @@ describe('authoritative current source state', () => {
   });
   test('current queue entry wins despite newer comments; null membership wins despite historical queue entry', async () => {
     const api = new FakeApi();
-    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([
+    api.overrides.set('GET /repos/sample/provider/issues/12/timeline?per_page=100&page=1', response([
       { id: 1, event: 'added_to_merge_queue', created_at: at(2) },
       { id: 2, event: 'commented', created_at: at(3), body: 'Still queued' },
     ]));
@@ -64,7 +64,7 @@ describe('authoritative current source state', () => {
     expect(result.threads[0]!.sourceState).toMatchObject({ state: 'queued', updatedAt: at(20), error: null });
     expect(result.threads[0]!.evidence.at(-1)!.kind).toBe('comment');
     api.overrides.set('POST /graphql', current());
-    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([
+    api.overrides.set('GET /repos/sample/provider/issues/12/timeline?per_page=100&page=1', response([
       { id: 1, event: 'added_to_merge_queue', created_at: at(2) },
     ]));
     result = await new GitHubService(api).refresh(signal());
@@ -78,9 +78,9 @@ describe('authoritative current source state', () => {
       expect((await new GitHubService(api).refresh(signal())).threads[0]!.sourceState.state).toBe(state === 'MERGED' ? 'merged' : 'closed');
     }
     api.overrides.set('GET /notifications?all=true&per_page=50&page=1', response([{
-      ...notification(), subject: { type: 'Issue', title: 'Issue', url: 'https://api.github.com/repos/integrations/provider/issues/12' },
+      ...notification(), subject: { type: 'Issue', title: 'Issue', url: 'https://api.github.com/repos/sample/provider/issues/12' },
     }]));
-    api.overrides.set('GET /repos/integrations/provider/issues/12', response({ number: 12, title: 'Closed issue', state: 'closed', updated_at: at(19) }));
+    api.overrides.set('GET /repos/sample/provider/issues/12', response({ number: 12, title: 'Closed issue', state: 'closed', updated_at: at(19) }));
     api.calls = [];
     const result = await new GitHubService(api).refresh(signal());
     expect(result.threads[0]!.sourceState).toMatchObject({ state: 'closed', updatedAt: at(19), error: null });
@@ -127,7 +127,7 @@ describe('authoritative current source state', () => {
 describe('GitHub evidence identity', () => {
   test('merge queue, commits and sticky reason never become a review request', async () => {
     const api = new FakeApi();
-    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([
+    api.overrides.set('GET /repos/sample/provider/issues/12/timeline?per_page=100&page=1', response([
       request(1), { id: 2, event: 'added_to_merge_queue', created_at: at(2), actor: { login: 'bot' } },
       { id: 3, event: 'committed', created_at: at(3), actor: { login: 'author' } },
       { id: 4, event: 'commented', created_at: at(4), body: 'Ordinary progress', user: { login: 'author' } },
@@ -159,18 +159,18 @@ describe('GitHub evidence identity', () => {
     expect(classify([request(1)], { ...pending, requested_reviewers: [] })[0]!.requestState).toBe('historical');
   });
   test('specific team identity/membership is not a direct assignment', () => {
-    const team = { slug: 'terraform-provider-core-maintainers' };
+    const team = { slug: 'provider-maintainers' };
     const event = { id: 1, event: 'review_requested', created_at: at(1), actor: { login: 'author' }, requested_team: team };
     const source = { ...pending, requested_teams: [team] };
     const known = classifyEvents([event, request(2)], reference, source, viewer,
-      new Set(['integrations/terraform-provider-core-maintainers'])).evidence;
-    expect(known[0]!.recipient).toEqual({ kind: 'team', team: 'integrations/terraform-provider-core-maintainers', viewerMembership: 'member' });
+      new Set(['sample/provider-maintainers'])).evidence;
+    expect(known[0]!.recipient).toEqual({ kind: 'team', team: 'sample/provider-maintainers', viewerMembership: 'member' });
     expect(known[0]!.requestState).toBe('current');
     expect(known[1]!.requestState).toBe('current');
     expect(classifyEvents([event], reference, source, viewer, null).evidence[0]!.requestState).toBe('uncertain');
     const removed = { ...event, id: 3, created_at: at(3), event: 'review_request_removed' };
     const interleaved = classifyEvents([event, request(2), removed], reference, source, viewer,
-      new Set(['integrations/terraform-provider-core-maintainers'])).evidence;
+      new Set(['sample/provider-maintainers'])).evidence;
     expect(interleaved[0]!.requestState).toBe('historical');
     expect(interleaved[1]!.requestState).toBe('current');
   });
@@ -203,7 +203,7 @@ describe('bounded GitHub refresh', () => {
   });
   test('canonical repository-ID pagination loads the newest timeline through the original repository route', async () => {
     const api = new FakeApi();
-    const path = '/repos/integrations/provider/issues/12/timeline';
+    const path = '/repos/sample/provider/issues/12/timeline';
     api.overrides.set(`GET ${path}?per_page=100&page=1`, response([request(1)], {
       link: '<https://api.github.com/repositories/42/issues/12/timeline?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/42/issues/12/timeline?per_page=100&page=2>; rel="last"',
     }));
@@ -217,7 +217,7 @@ describe('bounded GitHub refresh', () => {
     expect(api.calls.some(call => call.path.startsWith('/repositories/'))).toBe(false);
   });
   test('canonical pagination still rejects changed sources, resources, credentials, hosts and unbounded pages', () => {
-    const path = '/repos/integrations/provider/issues/12/timeline';
+    const path = '/repos/sample/provider/issues/12/timeline';
     for (const url of [
       'https://api.github.com/repositories/42/issues/13/timeline?page=2',
       'https://api.github.com/repositories/42/issues/12/comments?page=2',
@@ -239,7 +239,7 @@ describe('bounded GitHub refresh', () => {
       event: 'cross-referenced', created_at: at(hour), updated_at: at(hour),
       actor: { login: 'author' }, source: { type: 'issue', issue: { id: issueId } },
     });
-    const path = 'GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1';
+    const path = 'GET /repos/sample/provider/issues/12/timeline?per_page=100&page=1';
     const events = [request(1), crossReference(42, 2), crossReference(43, 2), crossReference(42, 3)];
     api.overrides.set(path, response([...events, crossReference(42, 2)]));
     const result = await new GitHubService(api).refresh(signal());
@@ -293,10 +293,10 @@ describe('bounded GitHub refresh', () => {
   });
   test('only newest contiguous timeline page can promote requests when coverage has gaps', async () => {
     const api = new FakeApi();
-    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([request(1)], {
-      link: '<https://api.github.com/repos/integrations/provider/issues/12/timeline?per_page=100&page=9>; rel="last"',
+    api.overrides.set('GET /repos/sample/provider/issues/12/timeline?per_page=100&page=1', response([request(1)], {
+      link: '<https://api.github.com/repos/sample/provider/issues/12/timeline?per_page=100&page=9>; rel="last"',
     }));
-    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=9', response([
+    api.overrides.set('GET /repos/sample/provider/issues/12/timeline?per_page=100&page=9', response([
       { id: 10, event: 'added_to_merge_queue', created_at: at(10) },
     ]));
     const result = await new GitHubService(api).refresh(signal());
@@ -313,7 +313,7 @@ describe('bounded GitHub refresh', () => {
   test('missing membership and malformed latest event suppress certainty', async () => {
     const api = new FakeApi();
     api.overrides.set('GET /user/teams?per_page=100&page=1', new ServiceError('access'));
-    api.overrides.set('GET /repos/integrations/provider/issues/12/timeline?per_page=100&page=1', response([request(1), { event: 'review_request_removed' }]));
+    api.overrides.set('GET /repos/sample/provider/issues/12/timeline?per_page=100&page=1', response([request(1), { event: 'review_request_removed' }]));
     const result = await new GitHubService(api).refresh(signal());
     expect(result.status).toBe('partial');
     expect(result.diagnostics.some(value => value.scope === 'teams')).toBe(true);
@@ -335,15 +335,15 @@ describe('bounded GitHub refresh', () => {
   });
   test('source access failure is explicit; it never means local work is done', async () => {
     const api = new FakeApi();
-    api.overrides.set('GET /repos/integrations/provider/pulls/12', new ServiceError('access'));
+    api.overrides.set('GET /repos/sample/provider/pulls/12', new ServiceError('access'));
     await expect(new GitHubService(api).refresh(signal())).rejects.toMatchObject({ dto: { code: 'access' } });
   });
   test('malicious source and Link URLs never get followed', async () => {
     for (const url of [
-      'https://api.github.com.evil/repos/integrations/provider/pulls/12',
-      'http://api.github.com/repos/integrations/provider/pulls/12',
-      'https://api.github.com/repos/integrations/provider/pulls/12?token=secret',
-      'https://api.github.com/repos/integrations/provider/pulls/12/../../user',
+      'https://api.github.com.evil/repos/sample/provider/pulls/12',
+      'http://api.github.com/repos/sample/provider/pulls/12',
+      'https://api.github.com/repos/sample/provider/pulls/12?token=secret',
+      'https://api.github.com/repos/sample/provider/pulls/12/../../user',
       'https://api.github.com/repos/other/repo/pulls/12',
     ]) {
       expect(() => sourceReference({ ...notification(), subject: { ...notification().subject, url } })).toThrow();
@@ -382,7 +382,7 @@ function timedApi(latency: (path: string, call: number) => number) {
   return { api, activity, counts };
 }
 describe('refresh concurrency and collection budget', () => {
-  const source = '/repos/integrations/provider/pulls/12';
+  const source = '/repos/sample/provider/pulls/12';
   test('enriches at most three threads concurrently but returns notification order', async () => {
     const { api, activity } = timedApi((path, call) => path === source ? call === 1 ? 40 : 5 : 0);
     api.overrides.set('GET /notifications?all=true&per_page=50&page=1',

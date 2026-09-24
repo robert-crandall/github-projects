@@ -17,6 +17,20 @@ async function harness(operation: (input: PassThrough, replies: Record<string, u
   return replies;
 }
 const tick = () => new Promise(resolve => setTimeout(resolve, 10));
+test('retired waiting requests are rejected without invoking a handler', async () => {
+  const operations: string[] = [];
+  const replies = await harness(async input => {
+    input.write(request('retired', 'github.waiting'));
+    input.write(request('current'));
+    await tick();
+  }, async request => { operations.push(request.op); return success; });
+  expect(operations).toEqual(['connection.check']);
+  expect(replies).toContainEqual({
+    v: 1, id: null, ok: false, error: expect.objectContaining({ code: 'invalid_input' }),
+  });
+  expect(replies).toContainEqual({ v: 1, id: 'current', ok: true, result: success });
+});
+
 test('split frames, validated output, strict input, and protocol-only stdout', async () => {
   const replies = await harness(async input => {
     const line = request('a');

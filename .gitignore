@@ -9,3 +9,5 @@ playwright-report/
 *.local
 .DS_Store
 src-tauri/binaries/
+.impeccable/hook.cache.json
+tests/browser-run.log

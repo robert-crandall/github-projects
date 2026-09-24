@@ -1,5 +1,5 @@
 import { expect, type Page } from '@playwright/test';
-import { conversationPageSchema, referenceSchema, requestSchema, type ConversationCache, type Diagnostic, type Evidence, type Request, type Thread, type WaitingDigest } from '../service/src/schema.ts';
+import { conversationPageSchema, referenceSchema, requestSchema, type ConversationCache, type Diagnostic, type Evidence, type Request, type Thread } from '../service/src/schema.ts';
 import { GitHubService } from '../service/src/github.ts';
 import { cacheKey, ConversationApi, mergeCachedPage } from './conversation-fixture.ts';
 import { snapshotSchema, type NativeSnapshot, type NativeWorkspace } from '../src/platform/native.ts';
@@ -40,7 +40,7 @@ export class NativeMock {
   appliedAppearance: { tone: string; background: string; mode: string }[] = [];
   workCollection: WorkCollection = {
     candidates: [{
-      title: 'Review the usersd rollout', action: 'review', url: 'https://github.com/octo/project/pull/123',
+      title: 'Review the relay rollout', action: 'review', url: 'https://github.com/octo/project/pull/123',
       evidence: [{
         id: 'github:request:123:1', source: 'github', streamId: 'github-reviews', at,
         url: 'https://github.com/octo/project/pull/123', summary: 'A direct review request.',
@@ -73,33 +73,10 @@ export class NativeMock {
   failSave = false;
   failBackup = false;
   failRefresh = false;
-  failWaiting = false;
-  waiting: WaitingDigest = {
-    fetchedAt: '2026-09-11T17:00:00Z', viewer: 'viewer', limitedQueries: [],
-    buckets: [
-      { id: 'direct-review', items: [{
-        reference: { repo: 'octo/project', kind: 'pr', number: 42 }, title: 'Keep thread notes', author: 'octocat',
-        updatedAt: '2026-09-04T17:00:00Z', reasons: [],
-      }] },
-      { id: 'team-review', items: [{
-        reference: { repo: 'octo/provider', kind: 'pr', number: 43 }, title: 'Validate provider configuration', author: 'octocat',
-        updatedAt: '2026-09-07T17:00:00Z', reasons: [],
-      }] },
-      { id: 'needs-fix', items: [{
-        reference: { repo: 'octo/project', kind: 'pr', number: 44 }, title: 'Load older comments', author: 'viewer',
-        updatedAt: '2026-09-08T17:00:00Z', reasons: ['changes-requested', 'conflicts', 'ci'],
-      }] },
-      { id: 'assigned', items: [{
-        reference: { repo: 'octo/project', kind: 'issue', number: 45 }, title: 'Improve keyboard navigation', author: 'octocat',
-        updatedAt: '2026-09-01T17:00:00Z', reasons: [],
-      }] },
-    ],
-  };
   failWrite = false;
   failLaunch = false;
   holdRead?: ReturnType<typeof gate>;
   holdRefresh?: ReturnType<typeof gate>;
-  holdWaiting?: ReturnType<typeof gate>;
   holdWrite?: ReturnType<typeof gate>;
   holdSave?: ReturnType<typeof gate>;
   holdConversationRead?: ReturnType<typeof gate>;
@@ -222,11 +199,6 @@ export class NativeMock {
         break;
       case 'work.ackIntake':
         result = request.input;
-        break;
-      case 'github.waiting':
-        if (this.holdWaiting) await this.holdWaiting.promise;
-        if (this.failWaiting) throw new ExpectedFailure('GitHub authentication failed. Sign in and retry.');
-        result = structuredClone(this.waiting);
         break;
       case 'github.conversation':
         result = await new GitHubService(this.conversationApi).conversation(request.input, new AbortController().signal);

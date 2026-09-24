@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import {
   AlertCircle, Archive, ArrowLeft, ArrowRight, Check, CheckCheck, ChevronDown, Circle, ExternalLink,
-  GitPullRequest, Github, Inbox, ListChecks, ListFilter, MessageSquare, Palette, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
+  GitPullRequest, Github, Inbox, ListFilter, MessageSquare, Palette, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, X,
 } from 'lucide-react';
 import { getRow, getRows } from './domain/engine.ts';
 import { conversationKey, threadIdSchema } from '../service/src/schema.ts';
@@ -11,7 +11,6 @@ import type { Destination, WorkspaceView } from './runtime/view.ts';
 import { ReaderPosition } from './runtime/ReaderPosition.tsx';
 import { placement, viewLabel } from './domain/filtering.ts';
 import { Rules } from './Rules.tsx';
-import { WaitingOnMe } from './WaitingOnMe.tsx';
 import { Appearance } from './themes/Appearance.tsx';
 
 type Dispatch = WorkspaceView['dispatch'];
@@ -284,7 +283,6 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
   const [capture, setCapture] = useState(false);
   const [demo, setDemo] = useState(false);
   const [rules, setRules] = useState(false);
-  const [waiting, setWaiting] = useState(false);
   const [appearance, setAppearance] = useState(false);
   const [destination, setDestination] = useState<Destination>();
   const openDestination = live?.open ?? setDestination;
@@ -331,7 +329,6 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
       </nav>
       <div className="sidebar-bottom">
         <button className="nav-link" onClick={() => setAppearance(true)}><Palette size={16} />Appearance</button>
-        <button className="nav-link" onClick={() => setWaiting(true)}><ListChecks size={16} />Waiting on me</button>
         <button className="nav-link" onClick={() => setRules(true)}><ListFilter size={16} />Filtering rules</button>
         <button className="nav-link" disabled={!state.undo.length} onClick={() => dispatch({ type: 'undo' }, 'Task change undone.')}><RotateCcw size={15} />Undo task change</button>
         {live ? <button className="nav-link" aria-label="Connections" aria-description={`${unconfirmed} unconfirmed GitHub writes`} onClick={live.connections}><Settings2 size={16} />Connections
@@ -381,7 +378,6 @@ export function WorkspaceApp({ workspace, children }: { workspace: WorkspaceView
     {appearance && <Modal title="Theme settings" close={() => setAppearance(false)}><Appearance /></Modal>}
     {demo && <Demo state={state} dispatch={dispatch} close={() => setDemo(false)} />}
     {rules && <Rules state={state} dispatch={dispatch} error={workspace.operationError || ''} close={() => setRules(false)} />}
-    <WaitingOnMe open={waiting} close={() => setWaiting(false)} workspace={workspace} />
     {destination && <Handoff destination={destination} state={state} dispatch={dispatch} close={() => setDestination(undefined)} />}
     {children}
   </div>;
