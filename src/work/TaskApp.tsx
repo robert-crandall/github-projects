@@ -159,6 +159,9 @@ export function TaskApp({ controller, queue, reference }: {
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
   </main>;
   const state = saved.workspace.state;
+  const runError = run.error || state.work.lastError;
+  const error = saved.persistence.error || saved.operationError || (settings ? runError : '');
+  const runDetails = [...new Set([...run.warnings, ...runError.split('\n').filter(Boolean)])];
   const profileBusy = run.running || run.unsubscribing.length > 0;
   const ranked = rankedTasks(state);
   const done = state.tasks.filter(task => task.status === 'done');
@@ -192,8 +195,8 @@ export function TaskApp({ controller, queue, reference }: {
         ? 'Profiles can be switched after the current run or unsubscribe finishes.'
         : 'Only this profile collects and ranks work. Other task lists stay saved.'}</p>
     </div>}
-    {(run.error || state.work.lastError || saved.operationError || saved.persistence.error) && <div className="task-error" role="alert">
-      <p>{saved.persistence.error || saved.operationError || run.error || state.work.lastError}</p>
+    {error && <div className="task-error" role="alert">
+      <p>{error}</p>
       {saved.persistence.error && <button className="secondary" onClick={() => invoke(() => controller.retryStorage())}>Retry storage</button>}
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
@@ -204,8 +207,8 @@ export function TaskApp({ controller, queue, reference }: {
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
         && Date.parse(state.work.collectionCursor) < Date.parse(state.work.lastStartedAt)
         && <p className="task-detail-notice" role="status">More notification history remains. The next run continues after {date(state.work.collectionCursor)}.</p>}
-      {!!run.warnings.length && <details className="task-run-details"><summary>Coverage and run details ({run.warnings.length})</summary>
-        <ul>{run.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></details>}
+      {!!runDetails.length && <details className="task-run-details"><summary>Coverage and run details ({runDetails.length})</summary>
+        <ul>{runDetails.map((detail, index) => <li key={index}>{detail}</li>)}</ul></details>}
       <div className={`task-body ${selected ? 'task-with-detail' : ''}`}>
         <main id="ranked-tasks" className="task-main">
           <nav className="task-tabs" aria-label="Task lists">{([['tasks', 'To do', ranked.length], ['done', 'Done', done.length], ['waiting', 'No action now', waiting.length]] as const).map(([value, title, count]) =>

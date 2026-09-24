@@ -183,12 +183,57 @@ test('model failure preserves discoveries and makes unranked work explicit', asy
   await add(page, 'Existing local task');
   native.failRank = true;
   await run(page);
-  await expect(page.getByRole('alert')).toContainText('Copilot ranking failed');
+  const details = page.locator('.task-run-details');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(details.locator('summary')).toHaveText('Coverage and run details (1)');
+  await expect(details).not.toHaveAttribute('open', '');
+  await details.locator('summary').click();
+  await expect(details).toContainText('Copilot ranking failed');
   await expect(page.locator('.task-title')).toHaveCount(2);
   expect(native.state.work.ranking).toBeNull();
   expect(native.state.work.lastCompletedAt).toBeNull();
+  await page.reload();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await details.locator('summary').click();
+  await expect(details).toContainText('Copilot ranking failed');
   native.failRank = false;
   await run(page);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(details).toHaveCount(0);
+});
+
+test('coverage warnings and run errors appear only once in the expandable details', async ({ page, native }) => {
+  native.workCollection.warnings = ['Search results were capped.'];
+  native.workCollection.coverageInfo = ['Older history remains.'];
+  native.failRank = true;
+  await page.goto('/');
+  await run(page);
+  const details = page.locator('.task-run-details');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(details.locator('summary')).toHaveText('Coverage and run details (5)');
+  await details.locator('summary').click();
+  await expect(details.getByRole('listitem')).toHaveCount(5);
+  for (const stream of native.state.work.settings.streams.filter(stream => stream.enabled)) {
+    await expect(page.getByText(`${stream.name}: Search results were capped.`, { exact: true })).toHaveCount(1);
+  }
+  await expect(details).toContainText('Older history remains.');
+  await expect(details).toContainText('Copilot ranking failed');
+});
+
+test('task action and storage failures remain visible outside run details', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Keep this task');
+  await page.locator('.task-row').first().click();
+  await page.getByRole('textbox', { name: 'Task', exact: true }).fill('');
+  await expect(page.getByRole('alert')).toContainText('Write a task title first.');
+  await page.getByRole('textbox', { name: 'Task', exact: true }).fill('Keep this task safely');
+  await persisted(page);
+  native.failSave = true;
+  await page.getByLabel('Task notes').fill('Unsaved note');
+  await expect(page.getByRole('alert')).toContainText('Disk unavailable');
+  native.failSave = false;
+  await page.getByRole('button', { name: 'Retry storage' }).click();
+  await persisted(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
 });
 

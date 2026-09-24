@@ -15,7 +15,7 @@ Appearance stays separate from tasks and their backups. Desktop preferences use 
 3. Work down the list. **Done** is local; it does not submit a review, close an issue or acknowledge a notification.
 4. Optionally enable a cadence. Runs continue while the app is running, including hidden in the menu bar. An overdue schedule catches up once after sleep or relaunch; quitting stops it.
 
-Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks and the failure visible. Source failures never masquerade as successful empty results.
+Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks visible. **Coverage and run details** holds source warnings and run failures without a duplicate error banner above the task list. Storage and local action failures stay visible separately. Source failures never masquerade as successful empty results.
 
 ### Work profiles
 
