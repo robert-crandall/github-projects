@@ -293,11 +293,19 @@ describe('isolated Copilot work operations', () => {
       expect(Object.keys(configs[0]!.mcpServers!)).toEqual(['slack']);
       expect(configs[0]!.mcpServers!.slack!.tools).toEqual(['search', 'thread']);
       expect(configs[0]!.mcpOAuthTokenStorage).toBe('persistent');
+      expect(configs[0]!.onMcpAuthRequest).toBeUndefined();
+      expect(clients[0]!.mode).toBe('copilot-cli');
+      expect(configs[0]!.systemMessage).toMatchObject({
+        mode: 'customize', sections: { environment_context: { action: 'remove' } },
+      });
       expect(configs[0]!.configDirectory).toBe(clients[0]!.baseDirectory);
       expect(configs[0]!.configDirectory).toBe(join(clients[0]!.env!.HOME!, 'oauth'));
       expect(configs[0]).toMatchObject({
         enableConfigDiscovery: false, enableSkills: false, enableFileHooks: false,
         enableSessionStore: false, enableHostGitOperations: false, skipCustomInstructions: true,
+        pluginDirectories: [], instructionDirectories: [], customAgents: [], tools: [],
+        requestExtensions: false, requestCanvasRenderer: false, enableMcpApps: false,
+        memory: { enabled: false }, includedBuiltinSkills: [],
       });
       expect(configs[0]!.systemMessage).toMatchObject({ content: expect.not.stringContaining(tasks.instructions) });
       expect(JSON.parse(prompts[0]!).input.query).toBe(stream.query);
@@ -317,6 +325,7 @@ describe('isolated Copilot work operations', () => {
       await sdk.rankWork(tasks, signal());
       expect(clients[2]!.env!.HOME).not.toBe(clients[0]!.env!.HOME);
       expect(clients[2]!.baseDirectory).not.toBe(clients[0]!.baseDirectory);
+      expect(clients[2]!.mode).toBe('empty');
       expect(configs[2]).toMatchObject({ availableTools: [], mcpServers: {}, mcpOAuthTokenStorage: 'in-memory' });
     });
   });
@@ -344,10 +353,7 @@ describe('isolated Copilot work operations', () => {
     await sdkHarness(async ({ sdk, setHook, setResponse }) => {
       setResponse({ requests: [], warnings: [] });
       setHook(async config => {
-        expect(await config.onMcpAuthRequest!({
-          requestId: 'auth-1', serverName: 'slack', serverUrl: 'https://mcp.slack.com/mcp', reason: 'initial',
-        }, invoke)).toEqual({ kind: 'cancelled' });
-        await sourceRead(config);
+        await sourceRead(config, { ok: false, error: 'not_authed' });
       });
       await expect(sdk.collectMcp(stream, '', { type: 'http', url: 'https://mcp.slack.com/mcp', tools: stream.tools }, null, signal()))
         .rejects.toMatchObject({ dto: { code: 'mcp_unavailable', message: expect.stringContaining('OAuth authentication') } });
