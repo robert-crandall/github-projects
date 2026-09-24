@@ -34,7 +34,7 @@ Scheduling is disabled until explicitly enabled. While the Mac app runs, includi
 
 ## Unified workspace
 
-Ranked Tasks is the only task workspace. Use navigation, the ranked list and task details as three independently scrolling panes. Settings contains appearance, sources, priorities and scheduling. Remove the old Inbox, Filtered, Archive and Tasks views; hide their menu entries until replacement destinations exist. Waiting on me and filtering rules, including their service and routing logic, are retired. Saved source queries determine discovery.
+Ranked Tasks and Filters share the same task workspace. Filters selects configured sources, manual tasks and external-agent intake locally, matching any contributing evidence source without duplicating tasks or changing order. Preserve selections and collapsed providers per profile. An empty selection shows no tasks; Ranked Tasks always shows all sources. Filtering never changes collection, ranking or task data. Use navigation, the ranked list and task details as three independently scrolling panes. Settings contains appearance, sources, priorities and scheduling. Remove the old Inbox, Filtered, Archive and Tasks views; hide their menu entries until replacement destinations exist. Waiting on me and filtering rules, including their service and routing logic, are retired. Saved source queries determine discovery.
 
 Saved thread notes stay private and editable beside matching ranked tasks. Preserve all original notes and conversations in snapshots and backups, without turning saved threads into new tasks.
 

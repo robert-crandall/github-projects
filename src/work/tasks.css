@@ -127,3 +127,34 @@
   .task-tabs button { font-size: 13px; }
   .ranked-list > li { gap: 10px; padding-left: 0; padding-right: 0; }
 }
+
+.task-filter-view { grid-template-columns: 270px minmax(0, 1fr); }
+.task-source-tree { margin: 14px 7px 0; }
+.source-tree-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--secondary); font-size: 12px; }
+.task-source-tree .text-button, .task-filter-summary .text-button { color: var(--accent); }
+.task-source-tree details { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.task-source-tree summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.task-source-tree summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.source-checkbox { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; margin: 0; font-size: 12px; cursor: pointer; }
+.source-checkbox input { flex-shrink: 0; margin-top: 3px; accent-color: var(--accent); }
+.source-checkbox > span { min-width: 0; overflow-wrap: anywhere; }
+.source-checkbox small { display: block; color: var(--secondary); font-size: 11px; }
+.source-checkbox .source-count { margin-left: auto; color: var(--secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.source-tree-children { padding-left: 12px; }
+.source-tree-local { padding-top: 8px; }
+.task-source-tree > p { margin: 14px 0; color: var(--secondary); font-size: 12px; line-height: 1.6; }
+.task-filter-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; padding: 12px 28px; border-top: 1px solid var(--border); background: var(--sidebar); font-size: 13px; }
+.task-filter-summary > span { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.task-filter-summary > span > span { color: var(--secondary); }
+.task-filter-summary > button { margin-left: auto; }
+.task-filter-order { color: var(--secondary); font-size: 12px; padding-top: 12px; }
+@media (max-width: 1100px) and (min-width: 901px) {
+  .task-filter-view { grid-template-columns: 250px minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .task-filter-view { grid-template-columns: minmax(0, 1fr); }
+  .task-filter-view .task-sidebar { max-height: 40dvh; }
+  .task-filter-view .task-sidebar nav { flex-wrap: wrap; flex-basis: 100%; }
+  .task-source-tree { flex-basis: 100%; min-width: 0; }
+  .task-filter-summary { padding: 10px 20px; }
+}
