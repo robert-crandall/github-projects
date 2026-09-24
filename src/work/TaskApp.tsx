@@ -14,6 +14,7 @@ import type { Task } from '../types.ts';
 import { WorkQueue } from './controller.ts';
 import { canonicalSource, rankedTasks } from './engine.ts';
 import { Settings } from './Settings.tsx';
+import { RunProgress } from './RunProgress.tsx';
 import { workProfiles } from './profiles.ts';
 import './tasks.css';
 
@@ -192,7 +193,7 @@ export function TaskApp({ controller, queue, remote }: {
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
   </main>;
   const state = saved.workspace.state;
-  const runError = run.error || state.work.lastError;
+  const runError = run.error || (run.running ? '' : state.work.lastError);
   const error = saved.persistence.error || saved.operationError || (settings ? runError : '');
   const runDetails = [...new Set([...run.warnings, ...runError.split('\n').filter(Boolean)])];
   const profileBusy = run.running || run.unsubscribing.length > 0;
@@ -241,13 +242,12 @@ export function TaskApp({ controller, queue, remote }: {
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
       settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)} /> : <>
-      <div className="task-context"><p>{run.running ? run.phase : state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
-        <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>
+      {!run.progress && <div className="task-context"><p>{state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
+        <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>}
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
         && Date.parse(state.work.collectionCursor) < Date.parse(state.work.lastStartedAt)
         && <p className="task-detail-notice" role="status">More notification history remains. The next run continues after {date(state.work.collectionCursor)}.</p>}
-      {!!runDetails.length && <details className="task-run-details"><summary>Coverage and run details ({runDetails.length})</summary>
-        <ul>{runDetails.map((detail, index) => <li key={index}>{detail}</li>)}</ul></details>}
+      <RunProgress key={state.activeWorkProfile.id} run={run} details={runDetails} />
       <div className={`task-body ${selected ? 'task-with-detail' : ''}`}>
         <main id="ranked-tasks" className="task-main">
           <nav className="task-tabs" aria-label="Task lists">{([['tasks', 'To do', ranked.length], ['done', 'Done', done.length], ['waiting', 'No action now', waiting.length]] as const).map(([value, title, count]) =>
@@ -280,6 +280,7 @@ export function TaskApp({ controller, queue, remote }: {
       </div>
     </>}
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved' : 'Saved on this Mac'}</span>
+      {run.progress && <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span>}
       <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last successful run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     </div>
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}

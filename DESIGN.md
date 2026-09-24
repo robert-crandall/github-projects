@@ -41,7 +41,7 @@ Task details retain editable text, Done, priority reasons, evidence and notes. M
 
 Save notes automatically and report pending or failed persistence honestly. A successful local action is not proof that its disk write finished. Keep retry, pending export and recovery visible on failure.
 
-Run progress stays near its control. Offline and partial failures preserve the workspace. No automatic refresh on focus or reconnect.
+Run progress stays near its control: a compact collection count and segmented bar, active phase and elapsed time, with a source checklist in the existing **Coverage and run details** disclosure. Keep the summary visible while the checklist scrolls. Failed sources count as processed, never done; ranking and saving remain distinct from collection completion. Use text and icons alongside color, a labeled progressbar with exact counts, and polite status updates without announcing every elapsed second. Offline and partial failures preserve the workspace. No automatic refresh on focus or reconnect.
 
 External handoff feedback reports only a requested launch. GitHub write feedback requires matching confirmation. Reopening a task cannot reverse a GitHub operation or overwrite a newer note.
 
