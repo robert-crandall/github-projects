@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import {
-  defaultWorkState, workRankOutputSchema, workSettingsSchema,
+  defaultWorkState, workRankOutputSchema, workSettingsSchema, workStateSchema,
   type workConnectionsSchema, type WorkCollection, type WorkMetadata, type WorkRankInput, type WorkSettings,
 } from '../../service/src/work-schema.ts';
 import { ServiceClient } from '../platform/service.ts';
@@ -55,6 +55,10 @@ export class WorkQueue {
         ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null } : {}),
       },
     }));
+  }
+  saveSourceFilter(filter: NonNullable<AppState['work']['sourceFilter']>): void {
+    const sourceFilter = workStateSchema.shape.sourceFilter.parse(filter);
+    this.update(current => ({ ...current, work: { ...current.work, sourceFilter } }));
   }
   private assertProfileIdle(): void {
     if (this.status.running || this.status.unsubscribing.length) {

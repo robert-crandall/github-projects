@@ -68,6 +68,10 @@ export const workRankingSchema = z.strictObject({
 });
 export const workStateSchema = z.strictObject({
   settings: workSettingsSchema,
+  sourceFilter: z.strictObject({
+    selectedSources: z.array(z.string().min(1).max(4000)).nullable(),
+    collapsedProviders: z.array(z.enum(['github', 'slack', 'mcp'])),
+  }).optional(),
   ranking: workRankingSchema.nullable(),
   lastStartedAt: time.nullable(),
   lastCompletedAt: time.nullable(),

@@ -5,19 +5,23 @@ import { sourceThread } from '../src/runtime/service-workspace.ts';
 import { snapshotSchema } from '../src/platform/native.ts';
 import { legacyFixture } from './workspace-fixtures.ts';
 
-test('ranked tasks is the only workspace, including old reference links and the browser entry', async ({ page, native }) => {
+test('ranked tasks and filters share the workspace, including old reference links and the browser entry', async ({ page, native }) => {
   for (const url of ['/#reference', 'http://127.0.0.1:5173/#reference']) {
     await page.goto(url);
     await expect(page.getByRole('heading', { name: 'Ranked Tasks', exact: true })).toBeVisible();
     await expect(page.getByRole('complementary', { name: 'Task details', exact: true })).toContainText('Select a task');
-    await expect(page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button')).toHaveText(['Ranked Tasks0']);
+    await expect(page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button')).toHaveText(['Ranked Tasks0', 'Filters0']);
     await expect(page.getByRole('button', { name: /^(Inbox|Filtered|Archive|Tasks|Waiting on me|Filtering rules|Appearance)$/ })).toHaveCount(0);
     await expect(page).not.toHaveURL(/#reference/);
+    await page.getByRole('button', { name: /^Filters/ }).click();
+    await expect(page.getByRole('heading', { name: 'Filters', exact: true })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Filter sources', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Appearance', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Open saved thread notes' })).toHaveCount(0);
     await page.getByRole('button', { name: 'Ranked Tasks', exact: false }).click();
+    await expect(page.getByRole('region', { name: 'Filter sources', exact: true })).toHaveCount(0);
   }
   expect(native.requests).toEqual([]);
 });
