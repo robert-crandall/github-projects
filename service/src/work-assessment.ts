@@ -23,9 +23,13 @@ export const savedAssessmentSchema = z.strictObject({
 export const workAssessOutputSchema = z.strictObject({
   assessments: z.array(savedAssessmentSchema).min(1).max(20),
 });
-export const assessmentHistorySchema = z.array(savedAssessmentSchema);
+export const taskAssessmentSchema = savedAssessmentSchema.extend({
+  sequence: z.number().int().nonnegative().safe().optional(),
+});
+export const assessmentHistorySchema = z.array(taskAssessmentSchema);
 export type Assessment = z.infer<typeof assessmentSchema>;
 export type SavedAssessment = z.infer<typeof savedAssessmentSchema>;
+export type TaskAssessment = z.infer<typeof taskAssessmentSchema>;
 
 export async function identityDigest(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value));

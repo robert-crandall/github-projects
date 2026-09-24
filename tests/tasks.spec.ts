@@ -79,6 +79,29 @@ test('assessment expiry never hides its history', async ({ page, native }) => {
   expect(native.state.tasks.find(task => task.id === version.id)!.assessments).toEqual([version]);
 });
 
+test('latest assessment selection follows saved logical order after the clock moves backwards', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Clock-safe history');
+  await run(page);
+  const original = native.state.tasks.find(task => task.title === 'Clock-safe history')!.assessments![0]!;
+  native.now = '2026-09-11T16:00:00.000Z';
+  await page.clock.setFixedTime(new Date(native.now));
+  await run(page);
+  const versions = native.state.tasks.find(task => task.id === original.id)!.assessments!;
+  expect(versions).toHaveLength(2);
+  expect(Date.parse(versions[1]!.evaluatedAt)).toBeLessThan(Date.parse(versions[0]!.evaluatedAt));
+  expect(versions[1]!.sequence).toBeGreaterThan(versions[0]!.sequence!);
+  await page.reload();
+  await page.locator('.task-row').filter({ hasText: 'Clock-safe history' }).click();
+  const history = page.getByRole('region', { name: 'Assessment', exact: true });
+  await expect(history.getByLabel('Assessment version')).toHaveValue(versions[1]!.resultId);
+  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
+  await run(page);
+  await expect(history.getByLabel('Assessment version')).toHaveValue(versions[1]!.resultId);
+  expect(native.state.tasks.find(task => task.id === original.id)!.assessments).toEqual(versions);
+  await history.getByLabel('Assessment version').selectOption(original.resultId);
+  await expect(history).toContainText('Historical result.');
+});
 test('saved team searches survive relaunch and collect through configured sources', async ({ page, native }) => {
   const query = 'is:pr is:open team-review-requested:sample/provider-maintainers';
   await page.goto('/');
