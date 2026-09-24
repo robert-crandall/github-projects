@@ -17,6 +17,7 @@ import { Settings } from './Settings.tsx';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
+import { AssessmentHistory } from './AssessmentHistory.tsx';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -117,6 +118,7 @@ function TaskDetail({ task, reason, queue, controller, remote, close }: {
     </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
+    <AssessmentHistory key={task.id} task={task} profileId={controller.state.activeWorkProfile.id} settings={controller.state.work.settings} />
     <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
       onChange={event => run(() => queue.edit(task.id, task.title, event.target.value))} /></label>
     <p className="field-help">Task notes inform Copilot's ranking.</p>

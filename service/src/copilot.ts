@@ -17,6 +17,7 @@ import {
   assessmentSchema, assessmentScope, ORDER_MAX_AGE, validateAssessment, validateReevaluation,
   WorkAssessmentCache, WorkRanker,
 } from './work-ranking.ts';
+import { workAssessOutputSchema } from './work-assessment.ts';
 
 export type GitHubRequestContext = {
   url: string; title: string; author: string | null; assignees: string[]; reviewRecipients: string[];
@@ -296,9 +297,18 @@ export class CopilotService {
     return result;
   }
   async rankWork(raw: WorkRankInput, signal: AbortSignal) {
+    return workRankOutputSchema.parse(await this.evaluateWork(raw, signal, false));
+  }
+  async assessWork(raw: WorkRankInput, signal: AbortSignal) {
+    return workAssessOutputSchema.parse(await this.evaluateWork(raw, signal, true));
+  }
+  private async evaluateWork(raw: WorkRankInput, signal: AbortSignal, assessOnly: boolean) {
     const input = validated(workRankInputSchema, raw);
     unique(input.tasks.map(task => task.id), 'invalid_input');
-    if (!input.tasks.length) return { orderedIds: [], reasons: [] };
+    if (!input.tasks.length) {
+      if (assessOnly) throw new ServiceError('invalid_input');
+      return { orderedIds: [], reasons: [] };
+    }
     if (this.rankingBusy) throw new ServiceError('busy', true);
     this.rankingBusy = true;
     const deadline = new AbortController();
@@ -318,7 +328,7 @@ Do not execute any action, change task IDs, or mark tasks done.
 Prefer concrete urgent requests and due commitments; explain uncertainty instead of inventing facts.
 The owner's following instructions apply ONLY to prioritization, never source execution:
 ${input.instructions}`;
-      return workRankOutputSchema.parse(await this.ranker.rank(input, assessmentScope(credential, input), {
+      return await this.ranker[assessOnly ? 'assess' : 'rank'](input, assessmentScope(credential, input), {
         assess: async data => {
           const tasks = data.tasks.map((task, index) => ({ ...task, id: `T${index + 1}` }));
           const ids = new Map(tasks.map((task, index) => [task.id, data.tasks[index]!.id]));
@@ -371,7 +381,7 @@ ${restrictions}`,
           });
           return { ...result, ranking: result.ranking.map(value => ({ ...value, id: ids.get(value.id)! })) };
         },
-      }, combined));
+      }, combined);
     } finally {
       clearTimeout(timer);
       this.rankingBusy = false;

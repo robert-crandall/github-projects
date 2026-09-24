@@ -95,6 +95,61 @@ async function fixture(run: (h: {
 }
 
 describe('durable independent assessments and comparative ordering', () => {
+  test('assess RPC returns immutable provenance; a failed order and service restart reuse the exact version', async () => {
+    await fixture(async h => {
+      const data = { ...input(), profileId: 'work-profile' };
+      const result = await new WorkService({ copilot: h.sdk }).assess(data, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess']);
+      expect(result.assessments).toHaveLength(2);
+      expect(result.assessments[0]).toMatchObject({
+        id: 'a', profileId: 'work-profile', evaluatedAt: at, assessmentVersion: ASSESSMENT_VERSION, model: 'chosen-model',
+      });
+      expect(JSON.stringify(result)).not.toContain('synthetic-test-token');
+      expect(JSON.stringify(result)).not.toContain('FULL PRIVATE EVIDENCE');
+      const ordered = { ...data, assessmentIds: result.assessments.map(value => value.resultId) };
+      h.respond(call => { if (call.phase === 'order') throw new Error('ordering offline'); });
+      await expect(h.sdk.rankWork(ordered, signal())).rejects.toMatchObject({ dto: { code: 'copilot_unavailable' } });
+      h.respond();
+      expect(await h.restart().assessWork(data, signal())).toEqual(result);
+      await h.restart().rankWork(ordered, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'order', 'order']);
+    });
+  });
+  test('bounded assess RPC delivers each subset once and only one batch invokes the model per call', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks = Array.from({ length: 21 }, (_, index) => ({ ...data.tasks[0]!, id: `task-${index}` }));
+      const first = await h.sdk.assessWork(data, signal());
+      expect(first.assessments).toHaveLength(20);
+      expect(h.calls).toHaveLength(1);
+      expect(await h.restart().assessWork(data, signal())).toEqual(first);
+      expect(h.calls).toHaveLength(1);
+      const ids = new Set(first.assessments.map(value => value.id));
+      const second = await h.sdk.assessWork({ ...data, tasks: data.tasks.filter(task => !ids.has(task.id)) }, signal());
+      expect(second.assessments).toHaveLength(1);
+      expect(h.calls).toHaveLength(2);
+    });
+  });
+  for (const change of ['profile', 'credential', 'notes', 'instructions', 'model', 'result-id', 'expired'] as const) {
+    test(`order-only refuses ${change} mismatch without silently reassessing`, async () => {
+      await fixture(async h => {
+        const data = { ...input(), profileId: 'profile' };
+        const assessed = await h.sdk.assessWork(data, signal());
+        const request = { ...structuredClone(data), assessmentIds: assessed.assessments.map(value => value.resultId) };
+        if (change === 'profile') request.profileId = 'another';
+        if (change === 'credential') h.credential('different-credential');
+        if (change === 'notes') request.tasks[0]!.notes = 'Changed notes';
+        if (change === 'instructions') request.instructions = 'Changed instructions';
+        if (change === 'model') request.model = 'different-model';
+        if (change === 'result-id') request.assessmentIds[0] = crypto.randomUUID();
+        if (change === 'expired') h.advance(86400000);
+        await expect(h.sdk.rankWork(request, signal())).rejects.toMatchObject({
+          dto: { code: change === 'result-id' ? 'assessment_storage' : 'source_changed' },
+        });
+        expect(h.calls.map(call => call.phase)).toEqual(['assess']);
+      });
+    });
+  }
   test('unchanged second run and service restart make zero model calls and keep original evaluation time', async () => {
     await fixture(async h => {
       const data = input();

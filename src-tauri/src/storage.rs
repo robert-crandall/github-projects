@@ -493,6 +493,44 @@ mod tests {
     }
 
     #[test]
+    fn task_assessment_history_roundtrips_through_export_backup_and_recovery() {
+        let dir = TempDir::new().unwrap();
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        let mut original = snapshot("owner note");
+        original.workspace["state"] = json!({
+            "version": 3,
+            "tasks": [{
+                "id": "manual", "title": "Owner task", "notes": "Keep these notes", "status": "done",
+                "assessments": [
+                    {"resultId": "first", "profileId": "default", "fingerprint": "old", "assessment": {"importance": "Original judgment"}},
+                    {"resultId": "second", "profileId": "default", "fingerprint": "new", "assessment": {"importance": "Updated judgment"}}
+                ]
+            }],
+            "inactiveWorkProfiles": [{"id": "parked", "tasks": [{"id": "other", "assessments": [{"resultId": "third"}]}]}]
+        });
+        let saved = store
+            .save(&store.read().unwrap().revision, original.clone())
+            .unwrap();
+        let backup = store.create_backup(&saved.revision).unwrap();
+        let exported: WorkspaceRead =
+            serde_json::from_str(&store.export_json(&saved.revision).unwrap()).unwrap();
+        assert_eq!(exported.snapshot.unwrap().workspace, original.workspace);
+        drop(store);
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        assert_eq!(
+            store.read().unwrap().snapshot.unwrap().workspace,
+            original.workspace
+        );
+        store
+            .save(&saved.revision, snapshot("later state"))
+            .unwrap();
+        let restored = store
+            .recover(&backup.id, &store.status().recovery_token)
+            .unwrap();
+        assert_eq!(restored.snapshot.unwrap().workspace, original.workspace);
+    }
+
+    #[test]
     fn fresh_roundtrip_cas_and_relaunch() {
         let dir = TempDir::new().unwrap();
         let mut store = Store::new(dir.path().to_owned()).unwrap();

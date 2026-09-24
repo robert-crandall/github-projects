@@ -89,14 +89,23 @@ test('invalid service output and duplicate request IDs are rejected', async () =
   expect(replies.map(reply => reply.error)).toMatchObject([{ code: 'invalid_output' }, { code: 'protocol' }]);
 });
 test('work deadline and cancellation errors never imply an external GitHub write', async () => {
-  for (const code of ['deadline', 'cancelled'] as const) {
+  for (const code of ['deadline', 'cancelled'] as const) for (const op of ['work.rank', 'work.assess']) {
     const replies = await harness(async input => {
-      input.write(request('rank', 'work.rank', { instructions: '', model: '', tasks: [] }));
+      input.write(request('rank', op, { profileId: 'default', ...(op === 'work.rank' ? { assessmentIds: [] } : {}), instructions: '', model: '', tasks: [] }));
       await tick();
     }, async () => { throw new ServiceError(code, true); });
     expect(replies[0]!.error).toMatchObject({ code, message: expect.stringContaining('read-only') });
     expect(JSON.stringify(replies)).not.toContain('external write');
   }
+});
+test('order RPC rejects missing saved result identities before invoking any handler', async () => {
+  let calls = 0;
+  const replies = await harness(async input => {
+    input.write(request('rank', 'work.rank', { profileId: 'default', instructions: '', model: '', tasks: [] }));
+    await tick();
+  }, async () => { calls++; return { orderedIds: [], reasons: [] }; });
+  expect(calls).toBe(0);
+  expect(replies[0]!.error).toMatchObject({ code: 'invalid_input' });
 });
 test('work operations get five minutes without extending legacy operation deadlines', async () => {
   const timeout = spyOn(globalThis, 'setTimeout');
@@ -108,12 +117,13 @@ test('work operations get five minutes without extending legacy operation deadli
     return success;
   });
   try {
-    input.write(request('rank', 'work.rank', { instructions: '', model: '', tasks: [] }));
+    input.write(request('rank', 'work.rank', { profileId: 'default', assessmentIds: [], instructions: '', model: '', tasks: [] }));
+    input.write(request('assess', 'work.assess', { profileId: 'default', instructions: '', model: '', tasks: [] }));
     input.write(request('collect', 'work.collect', { stream: defaultWorkState().settings.streams[0], model: '', since: null }));
     input.write(request('legacy'));
     await tick();
-    expect(replies).toHaveLength(3);
-    expect(timeout.mock.calls.filter(call => call[1] === 300_000)).toHaveLength(2);
+    expect(replies).toHaveLength(4);
+    expect(timeout.mock.calls.filter(call => call[1] === 300_000)).toHaveLength(3);
     expect(timeout.mock.calls.filter(call => call[1] === 120_000)).toHaveLength(1);
   } finally {
     input.end();

@@ -20,6 +20,65 @@ async function run(page: Page) {
   await persisted(page);
 }
 
+test('assessment history stays readable after order failure, edits, Done and relaunch', async ({ page, native }, testInfo) => {
+  await page.goto('/');
+  await add(page, 'Write the proposal');
+  native.failRank = true;
+  await run(page);
+  await page.locator('.task-row').filter({ hasText: 'Write the proposal' }).click();
+  const history = page.getByRole('region', { name: 'Assessment', exact: true });
+  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
+  await expect(history).toContainText('Assessment of Write the proposal');
+  const first = native.state.tasks.find(task => task.title === 'Write the proposal')!.assessments![0]!;
+  await history.getByText('Assessment provenance', { exact: true }).click();
+  await expect(history).toContainText('SDK default (resolved model not reported)');
+  await expect(history).toContainText(first.resultId);
+  await page.getByLabel('Task', { exact: true }).fill('Write the updated proposal');
+  await expect(history.getByRole('status')).toHaveText('Outdated: task content changed');
+  native.failRank = false;
+  native.now = '2026-09-11T18:00:00.000Z';
+  await page.clock.setFixedTime(new Date(native.now));
+  await run(page);
+  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
+  await expect(history).toContainText('Assessment of Write the updated proposal');
+  const versions = native.state.tasks.find(task => task.id === first.id)!.assessments!;
+  expect(versions).toHaveLength(2);
+  await history.getByLabel('Assessment version').selectOption(first.resultId);
+  await expect(history).toContainText('Historical result.');
+  await expect(history).toContainText('Assessment of Write the proposal');
+  await expect(history.getByRole('status')).toHaveText('Outdated: task content changed');
+  await page.screenshot({ path: testInfo.outputPath('assessment-history-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(history.getByLabel('Assessment version')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('assessment-history-narrow.png') });
+  await page.getByRole('button', { name: 'Mark done', exact: true }).click();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await page.locator('.task-row').filter({ hasText: 'Write the updated proposal' }).click();
+  await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
+  await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
+  await persisted(page);
+  expect(native.state.tasks.find(task => task.id === first.id)!.assessments).toEqual(versions);
+});
+
+test('assessment expiry never hides its history', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Keep this assessment');
+  await run(page);
+  await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
+  const history = page.getByRole('region', { name: 'Assessment', exact: true });
+  const version = native.state.tasks.find(task => task.title === 'Keep this assessment')!.assessments![0]!;
+  native.now = version.assessment.reevaluateAt;
+  await page.clock.setFixedTime(new Date(native.now));
+  await page.reload();
+  await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
+  await expect(history.getByRole('status')).toHaveText('Expired: reassessment due');
+  await expect(history).toContainText('Assessment of Keep this assessment');
+  expect(native.state.tasks.find(task => task.id === version.id)!.assessments).toEqual([version]);
+});
+
 test('saved team searches survive relaunch and collect through configured sources', async ({ page, native }) => {
   const query = 'is:pr is:open team-review-requested:sample/provider-maintainers';
   await page.goto('/');

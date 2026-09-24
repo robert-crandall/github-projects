@@ -104,6 +104,8 @@ export const workCollectOutputSchema = z.strictObject({
   collectedAt: time,
 });
 export const workRankInputSchema = z.strictObject({
+  profileId: z.string().min(1).max(100).optional(),
+  assessmentIds: z.array(z.uuid()).max(2000).optional(),
   instructions: z.string().max(16000), model: z.string().max(100),
   tasks: z.array(z.strictObject({
     id, title: z.string().max(2000), notes: z.string().max(16000),

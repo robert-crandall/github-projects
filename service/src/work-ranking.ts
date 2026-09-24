@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, closeSync, mkdirSync, openSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { z } from 'zod';
@@ -7,30 +7,16 @@ import { checkAbort, ServiceError } from './errors.ts';
 import { LIMITS } from './schema.ts';
 import { semanticRankTask, type SemanticRankTask } from './work-rank-input.ts';
 import { workRankOutputSchema, type WorkRankInput } from './work-schema.ts';
+import {
+  ASSESSMENT_VERSION, ASSESSMENT_MAX_AGE, savedAssessmentSchema, type Assessment, type SavedAssessment,
+} from './work-assessment.ts';
+export { ASSESSMENT_VERSION, ASSESSMENT_MAX_AGE, assessmentSchema, type Assessment, type SavedAssessment } from './work-assessment.ts';
 
-// Bump when assessment meaning, canonical inputs, or either prompt changes.
-export const ASSESSMENT_VERSION = 'work-assessment-v1';
-export const ASSESSMENT_MAX_AGE = 24 * 60 * 60 * 1000;
 export const ORDER_MAX_AGE = 60 * 60 * 1000;
 export const MIN_REEVALUATION = 60 * 1000;
 export const CACHE_LIMITS = { records: 10000, bytes: 32 * 1024 * 1024, fileBytes: 64 * 1024 * 1024 } as const;
 const time = z.iso.datetime();
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-const text = z.string().trim().min(1).max(400);
-export const assessmentSchema = z.strictObject({
-  importance: text, urgency: text, blockers: text,
-  supportingEvidence: z.array(z.strictObject({
-    reference: z.string().min(1).max(500), summary: z.string().trim().min(1).max(240),
-  })).min(1).max(8),
-  uncertainty: z.string().max(400),
-  reevaluateAt: time,
-});
-export type Assessment = z.infer<typeof assessmentSchema>;
-const savedAssessmentSchema = z.strictObject({
-  id: z.string().min(1).max(500), fingerprint: hash,
-  evaluatedAt: time, assessment: assessmentSchema,
-});
-export type SavedAssessment = z.infer<typeof savedAssessmentSchema>;
 const savedOrderSchema = z.strictObject({
   fingerprint: hash, result: workRankOutputSchema.extend({ evaluatedAt: time, expiresAt: time }),
 });
@@ -40,7 +26,7 @@ export function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 export function assessmentScope(credential: string, input: WorkRankInput, version = ASSESSMENT_VERSION): string {
-  return digest(['github-projects:work-assessments', credential, input.instructions, input.model, version]);
+  return digest(['github-projects:work-assessments', credential, input.profileId ?? 'default', input.instructions, input.model, version]);
 }
 export function exactPermutation(expected: string[], actual: string[], code: 'copilot_output' | 'assessment_storage' = 'copilot_output'): void {
   const ids = new Set(actual);
@@ -139,51 +125,72 @@ export type RankingModels = {
 export class WorkRanker {
   constructor(private readonly cache: WorkAssessmentCache, private readonly now: () => Date = () => new Date()) {}
 
-  async rank(input: WorkRankInput, scope: string, models: RankingModels, signal: AbortSignal) {
+  private current(value: SavedAssessment | undefined, task: SemanticRankTask, input: WorkRankInput): value is SavedAssessment {
+    if (!value) return false;
+    return value.fingerprint === digest(task) && value.profileId === (input.profileId ?? 'default')
+      && value.instructionsFingerprint === digest(input.instructions) && value.model === input.model
+      && value.assessmentVersion === ASSESSMENT_VERSION
+      && Date.parse(value.evaluatedAt) <= this.now().getTime()
+      && Date.parse(value.assessment.reevaluateAt) > this.now().getTime();
+  }
+
+  async assess(input: WorkRankInput, scope: string, models: RankingModels, signal: AbortSignal) {
     checkAbort(signal);
     const tasks = input.tasks.map(semanticRankTask).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
     const evaluatedAt = this.now().toISOString();
-    const now = Date.parse(evaluatedAt);
-    const { assessments, order } = this.cache.load(scope, tasks.map(task => task.id));
-    const fingerprints = new Map(tasks.map(task => [task.id, digest(task)]));
-    const changed = tasks.filter(task => {
-      const cached = assessments.get(task.id);
-      if (!cached) return true;
-      // A backwards clock or stale content can never extend a model judgment.
-      return cached.fingerprint !== fingerprints.get(task.id) || Date.parse(cached.evaluatedAt) > now
-        || Date.parse(cached.assessment.reevaluateAt) <= now;
-    });
-    const batches: SemanticRankTask[][] = [];
-    const bytes = (tasks: SemanticRankTask[]) => Buffer.byteLength(JSON.stringify({ evaluatedAt, tasks }));
-    let batch: SemanticRankTask[] = [];
-    for (const task of changed) {
-      if (bytes([task]) > LIMITS.workModelBytes) throw new ServiceError('limit');
-      if (batch.length && (batch.length >= LIMITS.workAssessmentTasks || bytes([...batch, task]) > LIMITS.workModelBytes)) {
-        batches.push(batch);
-        batch = [];
+    const { assessments } = this.cache.load(scope, tasks.map(task => task.id));
+    const reusable = tasks.flatMap(task => {
+      const value = assessments.get(task.id);
+      if (!this.current(value, task, input)) return [];
+      try { validateAssessment(value.assessment, task, value.evaluatedAt); }
+      catch (error) {
+        if (error instanceof ServiceError && error.dto.code === 'copilot_output') throw new ServiceError('assessment_storage');
+        throw error;
       }
+      return [value];
+    }).slice(0, LIMITS.workAssessmentTasks);
+    // Deliver cached work before invoking another model; each response is saved by the caller.
+    if (reusable.length) return { assessments: reusable };
+    const bytes = (tasks: SemanticRankTask[]) => Buffer.byteLength(JSON.stringify({ evaluatedAt, tasks }));
+    const batch: SemanticRankTask[] = [];
+    for (const task of tasks) {
+      if (bytes([task]) > LIMITS.workModelBytes) throw new ServiceError('limit');
+      if (batch.length && (batch.length >= LIMITS.workAssessmentTasks || bytes([...batch, task]) > LIMITS.workModelBytes)) break;
       batch.push(task);
     }
-    if (batch.length) batches.push(batch);
-    for (const tasks of batches) {
-      checkAbort(signal);
-      const assessedAt = this.now().toISOString();
-      const assessmentInput = { evaluatedAt: assessedAt, tasks };
-      const result = await models.assess(assessmentInput);
-      checkAbort(signal);
-      exactPermutation(tasks.map(task => task.id), result.assessments.map(value => value.id));
-      const values = result.assessments.map(({ id, ...assessment }) => {
-        const task = tasks.find(task => task.id === id)!;
-        validateAssessment(assessment, task, assessedAt);
-        if (Date.parse(assessment.reevaluateAt) <= this.now().getTime()) throw new ServiceError('copilot_output');
-        return { id, fingerprint: fingerprints.get(id)!, evaluatedAt: assessedAt, assessment };
-      });
-      // Commit each batch before continuing so a later failure retains paid-for assessments.
-      this.cache.saveAssessments(scope, values);
-      for (const value of values) assessments.set(value.id, value);
+    if (!batch.length) throw new ServiceError('invalid_input');
+    const result = await models.assess({ evaluatedAt, tasks: batch });
+    checkAbort(signal);
+    exactPermutation(batch.map(task => task.id), result.assessments.map(value => value.id));
+    const values = result.assessments.map(({ id, ...assessment }) => {
+      const task = batch.find(task => task.id === id)!;
+      validateAssessment(assessment, task, evaluatedAt);
+      if (Date.parse(assessment.reevaluateAt) <= this.now().getTime()) throw new ServiceError('copilot_output');
+      return {
+        resultId: randomUUID(), id, profileId: input.profileId ?? 'default', fingerprint: digest(task),
+        instructionsFingerprint: digest(input.instructions), assessmentVersion: ASSESSMENT_VERSION,
+        model: input.model, evaluatedAt, assessment,
+      };
+    });
+    this.cache.saveAssessments(scope, values);
+    return { assessments: values };
+  }
+
+  async rank(input: WorkRankInput, scope: string, models: RankingModels, signal: AbortSignal) {
+    checkAbort(signal);
+    if (!input.assessmentIds) {
+      let pending = input.tasks;
+      while (pending.length) {
+        const result = await this.assess({ ...input, tasks: pending }, scope, models, signal);
+        const received = new Set(result.assessments.map(value => value.id));
+        pending = pending.filter(task => !received.has(task.id));
+      }
     }
+    const tasks = input.tasks.map(semanticRankTask).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const { assessments, order } = this.cache.load(scope, tasks.map(task => task.id));
     const current = tasks.map(task => {
-      const cached = assessments.get(task.id)!;
+      const cached = assessments.get(task.id);
+      if (!this.current(cached, task, input)) throw new ServiceError('source_changed');
       try { validateAssessment(cached.assessment, task, cached.evaluatedAt); }
       catch (error) {
         if (error instanceof ServiceError && error.dto.code === 'copilot_output') throw new ServiceError('assessment_storage');
@@ -191,6 +198,7 @@ export class WorkRanker {
       }
       return cached;
     });
+    if (input.assessmentIds) exactPermutation(current.map(value => value.resultId), input.assessmentIds, 'assessment_storage');
     const fingerprint = digest(current);
     const orderAt = this.now().toISOString();
     const earliestExpiry = Math.min(...current.map(value => Date.parse(value.assessment.reevaluateAt)));

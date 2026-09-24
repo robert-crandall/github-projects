@@ -7,6 +7,7 @@ import { desktopEnvelopeSchema } from '../src/runtime/desktop-workspace.ts';
 import { at, test as browserTest } from './workspace-fixtures.ts';
 import type { WorkCollection } from '../service/src/work-schema.ts';
 import { preferencesSchema, type Preferences } from '../src/themes/controller.ts';
+import { assessmentBatch } from './assessment-fixture.ts';
 
 export function evidence(id = 'request-1', kind: Evidence['kind'] = 'review-request'): Evidence {
   return {
@@ -185,6 +186,9 @@ export class NativeMock {
         break;
       case 'work.collect':
         result = structuredClone(this.workCollection);
+        break;
+      case 'work.assess':
+        result = await assessmentBatch(request.input, this.now);
         break;
       case 'work.rank':
         if (this.holdRank) await this.holdRank.promise;

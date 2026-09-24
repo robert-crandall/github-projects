@@ -18,6 +18,12 @@ export function validateWorkProfiles(state: AppState): void {
     || tasks.some(task => task.threadId && !threads.has(task.threadId))) {
     throw new Error('Saved work profiles have inconsistent task references. Export them before explicit recovery.');
   }
+  for (const profile of [{ ...state.activeWorkProfile, tasks: state.tasks }, ...state.inactiveWorkProfiles]) {
+    if (profile.tasks.some(task => task.assessments?.some(value => value.profileId !== profile.id)
+      || new Set(task.assessments?.map(value => value.resultId)).size !== (task.assessments?.length ?? 0))) {
+      throw new Error('Saved assessments have inconsistent profile or version identities. Export them before explicit recovery.');
+    }
+  }
 }
 
 export function renameWorkProfile(state: AppState, name: string): AppState {
