@@ -224,18 +224,22 @@ impl Store {
         let mut connection = self.connection()?;
         let saved = read_connection(&connection)?;
         if let Some(mut snapshot) = saved.snapshot.clone() {
+            let original = snapshot.encode()?;
             let entries = crate::assessments::extract(&mut snapshot)?;
-            if serde_json::to_value(&snapshot).ok() != serde_json::to_value(&saved.snapshot).ok() {
+            let json = snapshot.encode()?;
+            if json != original {
                 // The immutable original includes every embedded result before normalization.
                 self.backup_connection(&connection, &Uuid::new_v4().to_string())?;
-                let json = snapshot.encode()?;
                 let transaction =
                     connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 crate::assessments::save_entries(&transaction, &entries)?;
-                transaction.execute(
+                let rows = transaction.execute(
                     "UPDATE workspace SET revision=?,snapshot=?,checksum=? WHERE id=1 AND revision=?",
                     params![Uuid::new_v4().to_string(), json, digest(json.as_bytes()), saved.revision],
                 )?;
+                if rows != 1 {
+                    return Err(NativeError::conflict());
+                }
                 transaction.commit()?;
                 return read_connection(&connection);
             }

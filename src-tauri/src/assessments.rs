@@ -130,7 +130,7 @@ fn exists(connection: &Connection) -> Result<bool> {
 fn decode(sequence: i64, payload: String, checksum: String) -> Result<HistoryEntry> {
     if sequence <= 0
         || sequence > 9_007_199_254_740_991
-        || payload.len() > 16_384
+        || payload.len() > 65_536
         || digest(payload.as_bytes()) != checksum
     {
         return Err(NativeError::corrupt());
@@ -198,7 +198,6 @@ pub(crate) fn parse_export(json: &str) -> Result<WorkspaceExport> {
         .snapshot
         .as_ref()
         .ok_or_else(NativeError::invalid)?;
-    snapshot.encode()?;
     let mut ids = HashSet::new();
     let mut sequences = HashSet::new();
     for entry in &document.assessments {
@@ -698,6 +697,39 @@ mod tests {
             .assessments
             .is_empty());
     }
+
+    #[test]
+    fn json_import_bounds_transport_and_rejects_duplicate_versions_without_mutation() {
+        let (_dir, mut store) = setup();
+        store
+            .assessment_append("default", vec![result("manual")])
+            .unwrap();
+        let revision = store.read().unwrap().revision;
+        let original = store.export_json(&revision).unwrap();
+        let mut malformed: Value = serde_json::from_str(&original).unwrap();
+        let value = malformed["assessments"][0].clone();
+        malformed["assessments"].as_array_mut().unwrap().push(value);
+        assert!(store
+            .import_json(&revision, &malformed.to_string())
+            .is_err());
+        assert_eq!(store.export_json(&revision).unwrap(), original);
+        store.connection().unwrap().execute_batch(
+            "CREATE TRIGGER fail_import BEFORE INSERT ON task_assessments BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;"
+        ).unwrap();
+        assert!(store.import_json(&revision, &original).is_err());
+        assert_eq!(store.export_json(&revision).unwrap(), original);
+        store
+            .connection()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_import")
+            .unwrap();
+        let oversized = " ".repeat(MAX_EXPORT_BYTES + 1);
+        assert_eq!(
+            store.import_json(&revision, &oversized).unwrap_err().code,
+            "import-too-large"
+        );
+        assert_eq!(store.export_json(&revision).unwrap(), original);
+    }
 }
 impl Store {
     pub fn assessment_read(
@@ -733,6 +765,12 @@ impl Store {
                 decode(seq, json, hash)
             })
             .collect::<Result<Vec<_>>>()?;
+        if assessments
+            .iter()
+            .any(|entry| entry.result.profile_id != profile_id || !ids.contains(&entry.result.id))
+        {
+            return Err(NativeError::corrupt());
+        }
         let more = assessments.len() > 20;
         assessments.truncate(20);
         let before = if more {
