@@ -12,5 +12,5 @@ const controller = new DesktopWorkspace();
 const remote = new ServiceWorkspace(controller);
 const queue = new WorkQueue(controller);
 void themes.load().then(() => {
-  createRoot(document.getElementById('root')!).render(<><AppearanceNotice /><TaskApp controller={controller} queue={queue} reference={remote} /></>);
+  createRoot(document.getElementById('root')!).render(<><AppearanceNotice /><TaskApp controller={controller} queue={queue} remote={remote} /></>);
 });

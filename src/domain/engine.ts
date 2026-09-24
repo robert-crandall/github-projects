@@ -1,8 +1,7 @@
-import { inboxSchema, ruleSchema, type Activity, type AppState, type Command, type Row, type Scenario, type Thread, type View } from '../types.ts';
+import { type Activity, type AppState, type Command, type Row, type Scenario, type Thread, type View } from '../types.ts';
 import { addMinutes, initialClock, instant } from './clock.ts';
 import { archiveBoundary } from './archive.ts';
 import { LIMITS } from '../../service/src/schema.ts';
-import { placement, validateFilters } from './filtering.ts';
 import { reconcileTerminal } from './terminal.ts';
 import { defaultWorkState } from '../../service/src/work-schema.ts';
 import { completeWorkTask, restoreWorkTask } from '../work/engine.ts';
@@ -40,11 +39,10 @@ export function pendingEvidence(state: AppState, thread: Thread): Activity[] {
 function threadRow(state: AppState, thread: Thread): Row {
   const events = pendingEvidence(state, thread);
   const latest = thread.events.at(-1);
-  const location = placement(state, thread);
-  const available = location.view !== 'archive' && location.view !== 'filtered';
+  const available = !thread.archive && !(thread.terminal && thread.sourceState?.state !== 'unknown');
   return {
     key: `t:${thread.id}`, title: thread.title, kind: thread.kind === 'pr' ? 'review' : 'update',
-    reason: available ? latest?.summary ?? 'No source activity saved yet.' : location.reason, thread, events,
+    reason: available ? latest?.summary ?? 'No source activity saved yet.' : thread.archive ? 'Archived conversation.' : 'No action on this source.', thread, events,
     fresh: available && state.newKeys.includes(`t:${thread.id}`), available,
   };
 }
@@ -64,7 +62,8 @@ export function getRow(state: AppState, key: string): Row | undefined {
 
 export function getRows(state: AppState, view: View = state.view): Row[] {
   const rows = view === 'tasks' ? state.tasks.map(task => getRow(state, `a:${task.id}`)!)
-    : state.threads.filter(thread => placement(state, thread).view === view).map(thread => threadRow(state, thread));
+    : state.threads.filter(thread => (thread.archive ? 'archive'
+      : thread.terminal && thread.sourceState?.state !== 'unknown' ? 'filtered' : 'inbox') === view).map(thread => threadRow(state, thread));
   const positions = new Map(state.order.map((key, index) => [key, index]));
   return rows.sort((a, b) => (positions.get(a.key) ?? Number.MAX_SAFE_INTEGER) - (positions.get(b.key) ?? Number.MAX_SAFE_INTEGER));
 }
@@ -120,7 +119,6 @@ export function initialState(timeZone = 'UTC'): AppState {
       reconcileTerminal(undefined, thread);
       return thread;
     }),
-    inboxes: [], rules: [],
     tasks: [{ id: 'demo-local-task', title: 'Write a short rollout checklist', notes: 'Synthetic local task. No GitHub reference required.',
       status: 'open', createdAt: clock }],
     notes: [{ id: 'demo-review-note', threadId: PREVIOUS, text: 'Review finished. No need to wait for merge.' },
@@ -228,45 +226,7 @@ export function transition(state: AppState, command: Command): AppState {
       next.selectedKey = command.key;
       break;
     case 'view':
-      validateFilters({ ...next, view: command.view });
       next.view = command.view; next.selectedKey = null; break;
-    case 'save-inbox': {
-      const inbox = inboxSchema.parse(command.inbox);
-      const index = next.inboxes.findIndex(value => value.id === inbox.id);
-      if (index < 0) next.inboxes.push(inbox); else next.inboxes[index] = inbox;
-      validateFilters(next);
-      break;
-    }
-    case 'delete-inbox': {
-      if (!next.inboxes.some(inbox => inbox.id === command.id)) throw new Error('This inbox no longer exists.');
-      if (next.rules.some(rule => rule.action.type === 'inbox' && rule.action.inboxId === command.id)) {
-        throw new Error('Edit or delete rules targeting this inbox before deleting it, including disabled rules.');
-      }
-      next.inboxes = next.inboxes.filter(inbox => inbox.id !== command.id);
-      if (next.view === `inbox:${command.id}`) next.view = 'inbox';
-      break;
-    }
-    case 'save-rule': {
-      const rule = ruleSchema.parse(command.rule);
-      const index = next.rules.findIndex(value => value.id === rule.id);
-      if (index < 0) next.rules.push(rule); else next.rules[index] = rule;
-      validateFilters(next);
-      break;
-    }
-    case 'enable-rule':
-    case 'move-rule':
-    case 'delete-rule': {
-      const index = next.rules.findIndex(rule => rule.id === command.id);
-      if (index < 0) throw new Error('This rule no longer exists.');
-      if (command.type === 'enable-rule') next.rules[index]!.enabled = command.enabled;
-      else if (command.type === 'delete-rule') next.rules.splice(index, 1);
-      else {
-        const target = index + (command.direction === 'up' ? -1 : 1);
-        if (target < 0 || target >= next.rules.length) throw new Error('This rule is already at the end of the list.');
-        [next.rules[index], next.rules[target]] = [next.rules[target]!, next.rules[index]!];
-      }
-      break;
-    }
     case 'draft': next.draft = command.text; break;
     case 'capture': {
       const task = addTask(next, next.draft);

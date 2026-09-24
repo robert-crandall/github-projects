@@ -14,7 +14,7 @@ export function emptyWorkspace(now: string, timeZone: string): AppState {
     version: 3, runtime: 'desktop', clock: instant(now), timeZone, work: defaultWorkState(),
     activeWorkProfile: defaultWorkProfile(), inactiveWorkProfiles: [],
     threads: [], tasks: [], notes: [], staged: [], handled: [], seen: [], order: [], newKeys: [],
-    selectedKey: null, view: 'inbox', draft: '', operations: [], rules: [], inboxes: [],
+    selectedKey: null, view: 'inbox', draft: '', operations: [],
     refresh: { lastSuccessAt: null, status: 'saved', message: 'Refresh loads GitHub activity. Notes and tasks are available without a connection.' },
     failures: { refresh: 'none', storage: false, external: false }, undo: [], sequence: 0,
   };

@@ -87,7 +87,7 @@ All objects are strict: unknown keys fail validation. Thread IDs are positive de
 
 ### Workstreams
 
-[`src/work-schema.ts`](src/work-schema.ts) defines the shared workstream DTOs. Run `work.collect` separately for each enabled stream, reconcile and save its results, then call `work.rank` once for the entire active queue. `createHandler` accepts an optional fourth `WorkService` dependency. The service does not schedule runs.
+[`src/work-schema.ts`](src/work-schema.ts) defines the shared workstream DTOs. Run `work.collect` separately for each enabled stream, reconcile and save its results, then call `work.rank` once for the entire active queue. `createHandler` accepts an optional third `WorkService` dependency. The service does not schedule runs.
 
 `work.collect` takes `{stream, model, since, knownUrls?, observeOnly?}`. `knownUrls` defaults to `[]` and accepts at most 100 tracked source URLs. Pass tracked GitHub issue/PR URLs even when they no longer match the saved query. For additional tracked-source batches, set `observeOnly: true` (default false) to read source state without repeating GitHub search or MCP extraction. Those reads yield `open`, `queued`, `closed`, `merged`, or explicit `unknown` observations. An absent search result is never evidence of completion. MCP pull also performs bounded actual GitHub state reads for linked targets and tracked URLs; it never invents their state from Slack text. Canonical `/issues/N` URLs for PRs are detected through the issue API's `pull_request` field and read as PRs, including current merge queue membership.
 
@@ -283,7 +283,7 @@ Tests use synthetic gh/API and SDK responses. They cover pagination, read/unread
 
 The merge-queue regression was verified by temporarily classifying queue events as review requests: the test failed at that exact event kind. The correct classification was restored and the suite passed.
 
-The compiled roundtrip test skips only when no artifact exists; build before running release tests. No automated test sends a GitHub write or uses a real model. `test/waiting.test.ts` covers exact search/view arguments and fixed-team scope, bucket priority and case-insensitive deduplication, draft/author rules, inclusive time boundaries, ordering, CI states and failure precedence, all reasons, limits, all-or-nothing validation/errors, three-worker cleanup, deadlines, cancellation, strict JSONL, and absence of Copilot calls. Its clock and runner are synthetic.
+The compiled roundtrip test skips only when no artifact exists; build before running release tests. No automated test sends a GitHub write or uses a real model.
 
 The explicit optional smoke below performs one tiny synthetic SDK inference (at most one corrective format retry), from a temporary non-repository cwd. It requires authorization because it consumes Copilot service access:
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Download, RefreshCw } from 'lucide-react';
-import { Modal } from '../App.tsx';
+import { Modal } from '../Modal.tsx';
 import type { DesktopWorkspace } from './desktop-workspace.ts';
 import { downloadBackup } from '../storage.ts';
 
@@ -50,7 +50,7 @@ export function ConnectionsPanel({ controller, checking, diagnostics, check, rec
   recover: () => void; retryOperation: (id: string) => void; close: () => void;
 }) {
   return <Modal title="Connections" close={close}>
-    <section className="demo-section"><h3>GitHub and Copilot</h3><p>Local work needs no sign-in. Check connections only when you choose; Refresh is always manual.</p>
+    <section className="demo-section"><h3>GitHub and Copilot</h3><p>Local work needs no sign-in. Check connections only when you choose.</p>
       <button className="secondary" disabled={checking} onClick={check}><RefreshCw size={15} />{checking ? 'Checking connections...' : 'Check connections'}</button>
       {diagnostics.map((diagnostic, index) => <p className="notice-inline" key={index}>{diagnostic}</p>)}
       {!diagnostics.length && <p className="muted">Not checked. Install GitHub CLI and sign in with <code>gh auth login</code>. Copilot requires an account with access.</p>}

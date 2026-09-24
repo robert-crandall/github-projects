@@ -1,12 +1,11 @@
 import { expect, type Page } from '@playwright/test';
 import { test as nativeTest } from './native-fixture.ts';
-import { test as browserTest } from './workspace-fixtures.ts';
 import { catalog } from '../src/themes/controller.ts';
 
 nativeTest.use({ referenceWorkspace: false });
 
 async function settings(page: Page) {
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   return page.getByRole('region', { name: 'Appearance', exact: true });
 }
 async function painted(page: Page) {
@@ -31,7 +30,7 @@ nativeTest('desktop persists theme independently of task settings and paints it 
     }).observe(document, { childList: true, subtree: true });
   });
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'What’s next' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ranked Tasks' })).toBeVisible();
   expect(await painted(page)).toEqual({ name: 'Fox', tone: 'light', surface: '#f6f2ee', scheme: 'light', meta: '#f6f2ee' });
   await expect(page.locator('html')).toHaveAttribute('data-first-paint-theme', 'Fox');
   const appearance = await settings(page);
@@ -49,7 +48,7 @@ nativeTest('desktop persists theme independently of task settings and paints it 
   expect(native.appliedAppearance.at(-1)?.background).toBe((await painted(page)).surface);
 });
 
-nativeTest('System follows OS changes, explicit modes do not, and reference dialogs share the theme', async ({ page, native }) => {
+nativeTest('System follows OS changes, explicit modes do not, and task dialogs share the theme', async ({ page, native }) => {
   native.appearance = { name: 'Fox', mode: 'system' };
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('/');
@@ -62,20 +61,18 @@ nativeTest('System follows OS changes, explicit modes do not, and reference dial
   await page.emulateMedia({ colorScheme: 'light' });
   await page.emulateMedia({ colorScheme: 'dark' });
   await expect(page.locator('html')).toHaveAttribute('data-theme-tone', 'light');
-  await page.getByRole('button', { name: 'Open saved thread notes' }).click();
-  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
-  await expect(page.getByRole('dialog').getByRole('combobox', { name: 'Theme', exact: true })).toHaveValue('Fox');
-  await page.getByRole('dialog').getByRole('combobox', { name: 'Theme', exact: true }).selectOption('GitHub');
+  await appearance.getByRole('combobox', { name: 'Theme', exact: true }).selectOption('GitHub');
+  await page.getByRole('button', { name: 'Add task', exact: false }).click();
   await expect(page.getByRole('dialog')).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: 'Appearance', exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: 'Add task', exact: false })).toBeFocused();
   expect(native.requests).toEqual([]);
 });
 
 nativeTest('theme storage errors do not block tasks and have working retries', async ({ page, native }) => {
   native.failAppearanceRead = true;
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'What’s next' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ranked Tasks' })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('Could not read your theme');
   native.failAppearanceRead = false;
   native.appearance = { name: 'Fox', mode: 'light' };
@@ -114,17 +111,4 @@ nativeTest('all catalog themes render on desktop and narrow settings without los
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('fox-light-narrow.png') });
   expect(native.requests).toEqual([]);
-});
-
-browserTest('prototype saves appearance in browser storage without touching task state', async ({ page }) => {
-  await page.goto('http://127.0.0.1:5173');
-  await page.getByRole('button', { name: 'Appearance', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Theme settings' });
-  await dialog.getByRole('combobox', { name: 'Theme', exact: true }).selectOption('Fox');
-  await dialog.getByLabel('Color mode').selectOption('light');
-  await page.reload();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'Fox');
-  await expect(page.locator('html')).toHaveAttribute('data-theme-tone', 'light');
-  expect(await page.evaluate(() => JSON.parse(localStorage.getItem('github-projects:appearance:v1')!)))
-    .toEqual({ name: 'Fox', mode: 'light' });
 });

@@ -19,7 +19,7 @@ async function run(page: Page) {
 test('saved team searches survive relaunch and collect through configured sources', async ({ page, native }) => {
   const query = 'is:pr is:open team-review-requested:sample/provider-maintainers';
   await page.goto('/');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Add source', exact: true }).click();
   const source = page.locator('.task-stream').last();
   await source.getByLabel('Name', { exact: true }).fill('Team reviews');
@@ -31,7 +31,7 @@ test('saved team searches survive relaunch and collect through configured source
   await persisted(page);
   const settings = structuredClone(native.state.work.settings);
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'What’s next' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ranked Tasks' })).toBeVisible();
   expect(native.state.work.settings).toEqual(settings);
   await run(page);
   const collection = native.requests.find(request => request.op === 'work.collect'
@@ -46,7 +46,7 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await page.goto('/');
   await add(page, 'Regular task');
   await page.getByRole('button', { name: 'Mark done: Regular task', exact: true }).click();
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByLabel('What should come first?').fill('Roadmap first');
   await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
@@ -84,7 +84,7 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await expect(page.locator('.task-title')).toHaveCount(0);
   await page.getByRole('button', { name: /^Done/ }).click();
   await expect(page.locator('.task-title')).toHaveText('Regular task');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByLabel('What should come first?')).toHaveValue('Roadmap first');
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   await page.getByLabel('Work profile', { exact: true }).selectOption(profileId);
@@ -133,7 +133,7 @@ test('profile selection and creation wait for an in-flight ranking', async ({ pa
 
 test('task-first home captures and completes work offline across relaunch', async ({ page, native }) => {
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'What’s next' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Ranked Tasks' })).toBeVisible();
   await add(page, 'Prepare the roadmap');
   expect(native.requests).toEqual([]);
   await page.getByRole('button', { name: 'Mark done: Prepare the roadmap', exact: true }).click();
@@ -150,7 +150,7 @@ test('every run ranks all tasks with saved instructions without reading notifica
   await page.goto('/');
   await add(page, 'Prepare roadmap');
   await add(page, 'Read release notes');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByLabel('What should come first?').fill('Prioritize relay roadmap phase one and Slack reviews.');
   await page.getByRole('button', { name: 'Save settings' }).click();
   await page.getByRole('button', { name: 'Back to tasks' }).click();
@@ -305,7 +305,7 @@ test('local capture and Done during ranking survive the result', async ({ page, 
 
 test('settings accept explicit read tools and scheduled native ticks use the same run', async ({ page, native }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Add source' }).click();
   const stream = page.locator('.task-stream').last();
   await stream.getByLabel('Name', { exact: true }).fill('Slack requests');
@@ -328,7 +328,7 @@ test('settings accept explicit read tools and scheduled native ticks use the sam
 
 test('completed-review extraction is offered only for MCP sources', async ({ page, native }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const stream = page.locator('.task-stream').first();
   const action = stream.getByLabel('Action to take on matches');
   await expect(action.locator('option[value="review-result"]')).toHaveCount(0);
@@ -348,7 +348,7 @@ test('completed-review extraction is offered only for MCP sources', async ({ pag
 
 test('notification source is opt-in, automatic, and keeps backlog searches', async ({ page, native }, testInfo) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const before = structuredClone(native.state.work.settings.streams);
   await page.getByRole('button', { name: 'Add GitHub notifications' }).click();
   const notification = page.locator('.task-stream').last();

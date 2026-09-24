@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { ArrowLeft, Check, ExternalLink, ListOrdered, Plus, RefreshCw, Settings2, X } from 'lucide-react';
-import { Modal } from '../App.tsx';
-import { RecoveryPanel } from '../runtime/NativePanels.tsx';
-import { DesktopApp } from '../runtime/DesktopApp.tsx';
+import { Check, ExternalLink, Github, ListOrdered, Plus, RefreshCw, Settings2, SlidersHorizontal, X } from 'lucide-react';
+import { Modal } from '../Modal.tsx';
+import { ConnectionsPanel, RecoveryPanel } from '../runtime/NativePanels.tsx';
+import { DestinationPanel } from '../runtime/DestinationPanel.tsx';
+import { ConversationReader } from '../runtime/ConversationReader.tsx';
+import { getRow } from '../domain/engine.ts';
+import { referenceSchema } from '../../service/src/schema.ts';
+import type { Destination } from '../runtime/view.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { ServiceWorkspace } from '../runtime/service-workspace.ts';
 import type { Task } from '../types.ts';
@@ -67,14 +71,26 @@ function NewProfile({ queue, currentName, close, created }: {
     </form>
   </Modal>;
 }
-function TaskDetail({ task, reason, queue, controller, close }: {
-  task: Task; reason?: string; queue: WorkQueue; controller: DesktopWorkspace; close: () => void;
+function TaskDetail({ task, reason, queue, controller, remote, close }: {
+  task: Task; reason?: string; queue: WorkQueue; controller: DesktopWorkspace; remote: ServiceWorkspace; close: () => void;
 }) {
   const [confirmUnsubscribe, setConfirmUnsubscribe] = useState(false);
   const [unsubscribeError, setUnsubscribeError] = useState('');
   const status = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
   const unsubscribing = !!task.work && status.unsubscribing.includes(canonicalSource(task.work.url));
   const subscription = task.work?.unsubscribe;
+  const threads = controller.state.threads.filter(thread => thread.id === task.threadId
+    || (task.work && canonicalSource(`https://github.com/${thread.repo}/issues/${thread.number}`) === canonicalSource(task.work.url)));
+  const notes = controller.state.notes.filter(note => threads.some(thread => thread.id === note.threadId));
+  const url = task.work ? new URL(task.work.url) : null;
+  const match = url?.hostname === 'github.com' ? /^\/([^/]+\/[^/]+)\/(pull|pulls|issues)\/(\d+)\/?$/.exec(url.pathname) : null;
+  const thread = threads[0];
+  const parsed = referenceSchema.safeParse(task.work?.notification?.reference ?? (thread && {
+    repo: thread.repo, kind: thread.kind, number: thread.number,
+  }) ?? (match && {
+    repo: match[1], kind: match[2] === 'issues' ? 'issue' : 'pr', number: Number(match[3]),
+  }));
+  const reference = parsed.success ? parsed.data : null;
   const run = (operation: () => void | Promise<unknown>) => {
     try { Promise.resolve(operation()).catch(error => controller.report(error)); }
     catch (error) { controller.report(error); }
@@ -107,6 +123,18 @@ function TaskDetail({ task, reason, queue, controller, close }: {
         <p>{item.summary}</p><span>{item.source} · {date(item.at)}</span>
         <button className="text-button" onClick={() => run(() => controller.platform.launchWebUrl(item.url))}>Open request<ExternalLink size={12} /></button>
       </li>)}</ol></section>}
+    {notes.length > 0 && <section><h3>Saved thread notes</h3>
+      <p className="field-help">Private notes from the previous workspace. These do not inform Copilot's ranking.</p>
+      {notes.map((note, index) => <div key={note.id}>
+        <label htmlFor={`thread-note-${index}`}>{index ? `Thread note ${index + 1}` : 'Thread notes'}</label>
+        {note.sourceTitle && <p className="field-help">{note.sourceTitle}</p>}
+        <textarea id={`thread-note-${index}`} rows={4} value={note.text} onChange={event => controller.dispatch({
+          type: 'note', threadId: note.threadId, noteId: note.id, text: event.target.value,
+        })} />
+      </div>)}
+    </section>}
+    {reference && <ConversationReader reference={reference} controller={remote.conversation}
+      platform={controller.platform} refreshing={false} timeZone={controller.state.timeZone} />}
     {confirmUnsubscribe && <Modal title="Unsubscribe on GitHub" close={() => { if (!unsubscribing) setConfirmUnsubscribe(false); }}>
       <p>Stop following this conversation on GitHub? Your task, Done status and notes will stay unchanged.</p>
       <p>Direct mentions, team mentions and review requests can still notify you again.</p>
@@ -121,20 +149,25 @@ function TaskDetail({ task, reason, queue, controller, close }: {
   </aside>;
 }
 
-export function TaskApp({ controller, queue, reference }: {
-  controller: DesktopWorkspace; queue: WorkQueue; reference: ServiceWorkspace;
+export function TaskApp({ controller, queue, remote }: {
+  controller: DesktopWorkspace; queue: WorkQueue; remote: ServiceWorkspace;
 }) {
   const saved = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const run = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
+  const network = useSyncExternalStore(remote.subscribe, remote.getSnapshot);
   const [capture, setCapture] = useState(false);
   const [newProfile, setNewProfile] = useState(false);
   const [settings, setSettings] = useState(false);
   const [recovery, setRecovery] = useState(false);
-  const [oldWorkspace, setOldWorkspace] = useState(() => window.location.hash === '#reference');
+  const [connections, setConnections] = useState(false);
+  const [destination, setDestination] = useState<Destination>();
   const [selection, setSelection] = useState<string | null>(null);
   const [view, setView] = useState<'tasks' | 'done' | 'waiting'>('tasks');
   const invoke = (operation: () => Promise<unknown>) => { void operation().catch(error => controller.report(error)); };
   useEffect(() => { invoke(async () => { await controller.load(); if (controller.getSnapshot().workspace) await queue.tick(); }); }, [controller, queue]);
+  useEffect(() => {
+    if (window.location.hash === '#reference') window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }, []);
   useEffect(() => {
     let stopped = false;
     let unlisten: (() => void) | undefined;
@@ -147,7 +180,7 @@ export function TaskApp({ controller, queue, reference }: {
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setCapture(true); }
-      if (event.key === 'Escape') setSelection(null);
+      if (event.key === 'Escape' && !document.querySelector('dialog[open]')) setSelection(null);
     };
     window.addEventListener('keydown', key);
     return () => window.removeEventListener('keydown', key);
@@ -169,17 +202,24 @@ export function TaskApp({ controller, queue, reference }: {
   const visible = view === 'done' ? done : view === 'waiting' ? waiting : ranked;
   const selected = state.tasks.find(task => task.id === selection);
   const reasons = new Map(state.work.ranking?.reasons.map(item => [item.id, item.reason]) ?? []);
-  if (oldWorkspace) return <div className="task-reference"><div className="task-reference-back"><button className="secondary" onClick={() => {
-    window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    setOldWorkspace(false); setSettings(false);
-  }}><ArrowLeft size={16} />Back to ranked tasks</button>
-    <span>Saved conversations and thread notes</span></div><DesktopApp controller={controller} remote={reference} /></div>;
   return <div className="task-app">
-    <a className="skip-link" href="#ranked-tasks">Skip to tasks</a>
-    {!settings && <header className="task-top"><div className="task-brand"><ListOrdered size={22} /><h1>What’s next</h1></div>
-      <div className="button-row"><button className="secondary" onClick={() => setCapture(true)}><Plus size={16} />Add task<span className="task-shortcut">⌘K</span></button>
-        <button className="primary" disabled={run.running} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
-        <button className="quiet" aria-label="Sources and priorities" onClick={() => setSettings(true)}><Settings2 size={18} /></button></div>
+    <a className="skip-link" href={settings ? '#task-settings' : '#ranked-tasks'}>Skip to {settings ? 'settings' : 'tasks'}</a>
+    <aside className="task-sidebar" aria-label="Workspace navigation">
+      <div className="task-brand"><Github size={20} /><span>GitHub Projects</span></div>
+      <button className="secondary task-capture" onClick={() => setCapture(true)}><Plus size={16} />Add task<span className="task-shortcut">⌘K</span></button>
+      <nav aria-label="Workspace">
+        <button className="nav-link" aria-current={!settings ? 'page' : undefined} onClick={() => setSettings(false)}>
+          <ListOrdered size={17} />Ranked Tasks<span className="count">{ranked.length}</span></button>
+      </nav>
+      <div className="task-sidebar-bottom">
+        <button className="nav-link" aria-current={settings ? 'page' : undefined} onClick={() => setSettings(true)}><Settings2 size={17} />Settings</button>
+        <button className="nav-link" onClick={() => setConnections(true)}><SlidersHorizontal size={17} />Connections</button>
+        <p>Local workspace</p>
+      </div>
+    </aside>
+    <div className="task-workspace">
+    {!settings && <header className="task-top"><h1>Ranked Tasks</h1>
+      <button className="primary" disabled={run.running} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
     </header>}
     {!settings && <div className="task-profile-bar">
       <label htmlFor="work-profile">Work profile</label>
@@ -200,8 +240,7 @@ export function TaskApp({ controller, queue, reference }: {
       {saved.persistence.error && <button className="secondary" onClick={() => invoke(() => controller.retryStorage())}>Retry storage</button>}
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
-      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
-      reference={() => { window.history.replaceState(null, '', '#reference'); setOldWorkspace(true); }} /> : <>
+      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)} /> : <>
       <div className="task-context"><p>{run.running ? run.phase : state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
         <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
@@ -235,14 +274,25 @@ export function TaskApp({ controller, queue, reference }: {
               <button className="quiet" onClick={() => setSettings(true)}>Choose sources and priorities</button></div>}
           </div>}
         </main>
-        {selected && <TaskDetail key={selected.id} task={selected} reason={reasons.get(selected.id)} queue={queue} controller={controller} close={() => setSelection(null)} />}
+        {selected ? <TaskDetail key={`${state.activeWorkProfile.id}:${selected.id}`} task={selected} reason={reasons.get(selected.id)}
+          queue={queue} controller={controller} remote={remote} close={() => setSelection(null)} />
+          : <aside className="task-detail task-detail-empty" aria-label="Task details"><h2>Select a task</h2><p>See why it ranks here, read its source, and keep your notes alongside.</p></aside>}
       </div>
     </>}
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved' : 'Saved on this Mac'}</span>
       <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last successful run: ${date(state.work.lastCompletedAt)}`}</span></footer>
+    </div>
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}
     {newProfile && <NewProfile queue={queue} currentName={state.activeWorkProfile.name} close={() => setNewProfile(false)}
       created={() => { setSelection(null); setView('tasks'); setSettings(true); }} />}
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
+    {connections && <ConnectionsPanel controller={controller} checking={network.checking} diagnostics={network.diagnostics}
+      check={() => invoke(() => remote.check())} recover={() => { setConnections(false); setRecovery(true); }}
+      close={() => setConnections(false)} retryOperation={id => {
+        const operation = state.operations.find(operation => operation.id === id);
+        const row = operation && getRow(state, `t:${operation.threadId}`);
+        if (row && operation) { setConnections(false); setDestination({ row, kind: 'notification', action: operation.action, retryId: id }); }
+      }} />}
+    {destination && <DestinationPanel destination={destination} controller={controller} remote={remote} close={() => setDestination(undefined)} />}
   </div>;
 }
