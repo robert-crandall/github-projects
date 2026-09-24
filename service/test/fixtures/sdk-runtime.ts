@@ -3,6 +3,10 @@ import { writeFileSync } from 'node:fs';
 const marker = process.argv[2]!;
 process.on('SIGTERM', () => { writeFileSync(`${marker}.term`, 'ignored'); });
 writeFileSync(marker, String(process.pid));
+writeFileSync(`${marker}.environment`, JSON.stringify({
+  keychainDisabled: process.env.COPILOT_DISABLE_KEYTAR ?? null,
+  home: process.env.HOME, copilotHome: process.env.COPILOT_HOME,
+}));
 setInterval(() => {}, 1000);
 
 if (process.argv[3] === 'respond') {

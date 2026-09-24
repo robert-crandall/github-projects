@@ -99,7 +99,9 @@ export function clientOptions(cli: string, root: string, gitHubToken: string, oa
       args: ['--disable-builtin-mcps', '--no-custom-instructions', '--no-remote',
         '--no-remote-export', '--no-ask-user', '--no-experimental'],
     }),
-    mode: 'empty', workingDirectory: join(root, 'work'), baseDirectory: oauth?.configDirectory ?? join(root, 'config'),
+    // Empty mode disables keychain access even when a session requests persistent OAuth.
+    mode: oauth ? 'copilot-cli' : 'empty',
+    workingDirectory: join(root, 'work'), baseDirectory: oauth?.configDirectory ?? join(root, 'config'),
     builtinPluginDirectories: [], logLevel: 'none', useLoggedInUser: false, gitHubToken,
     enableRemoteSessions: false,
     env: {
@@ -490,11 +492,12 @@ Return warnings when search caps, missing thread context, or source limits leave
 At most 20 read tool calls; collect at most 200 requests. A completed AI review is review-result, never review.`,
       configure: config => ({
         ...config, availableTools: [...allowed], mcpServers: { [stream.server]: server },
-        mcpOAuthTokenStorage: 'persistent',
-        onMcpAuthRequest: () => {
-          failure ??= new ServiceError('mcp_unavailable');
-          return { kind: 'cancelled' };
+        systemMessage: {
+          ...config.systemMessage, mode: 'customize',
+          sections: { environment_context: { action: 'remove' } },
         },
+        mcpOAuthTokenStorage: 'persistent',
+        // Leave OAuth runtime-owned so it can reuse CLI sign-in, rather than requesting host tokens.
         onPermissionRequest: request => {
           if (request.kind === 'mcp' && request.serverName === stream.server
             && stream.tools.includes(request.toolName) && request.readOnly === true) return { kind: 'approved' };

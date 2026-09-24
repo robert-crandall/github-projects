@@ -3,11 +3,34 @@ import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { CopilotService } from '../src/copilot.ts';
+import { clientOptions, CopilotService } from '../src/copilot.ts';
 import { ServiceError } from '../src/errors.ts';
 
 const delay = () => new Promise(resolve => setTimeout(resolve, 10));
 const fixture = resolve(import.meta.dir, 'fixtures/sdk-runtime.ts');
+test('SDK child permits persistent OAuth only for explicitly selected MCP collectors', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'github-projects-sdk-oauth-'));
+  try {
+    for (const oauth of [undefined, { homeDirectory: directory, configDirectory: join(directory, 'oauth') }]) {
+      const marker = join(directory, oauth ? 'collector' : 'isolated');
+      const client = new CopilotClient({
+        ...clientOptions(process.execPath, directory, 'synthetic-not-a-credential', oauth),
+        workingDirectory: directory,
+        connection: RuntimeConnection.forStdio({
+          path: process.execPath, args: ['run', fixture, marker, 'respond', '--'],
+        }),
+      });
+      try {
+        await client.start();
+        expect(JSON.parse(await readFile(`${marker}.environment`, 'utf8'))).toEqual({
+          keychainDisabled: oauth ? null : '1',
+          home: directory, copilotHome: oauth?.configDirectory ?? join(directory, 'config'),
+        });
+      } finally { await client.forceStop(); }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) {
