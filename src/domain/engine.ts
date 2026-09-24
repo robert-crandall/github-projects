@@ -92,8 +92,8 @@ export function initialState(timeZone = 'UTC'): AppState {
       id: TEAM, repo: 'sample/terraform-provider', number: 202, kind: 'pr',
       title: 'Support import of integration settings', reason: 'review_requested',
       state: 'open', notification: 'unread', subscribed: true, lines: 180,
-      events: [{ ...event(TEAM, 'request-1', 'team-request', 'Review requested from integrations/terraform-provider-core-maintainers.'),
-        recipient: { kind: 'team', name: 'integrations/terraform-provider-core-maintainers', viewerIsMember: true } }],
+      events: [{ ...event(TEAM, 'request-1', 'team-request', 'Review requested from sample/provider-maintainers.'),
+        recipient: { kind: 'team', name: 'sample/provider-maintainers', viewerIsMember: true } }],
     },
     {
       id: MENTION, repo: 'sample/docs', number: 303, kind: 'issue',
@@ -273,11 +273,6 @@ export function transition(state: AppState, command: Command): AppState {
       next.draft = '';
       next.view = 'tasks';
       next.selectedKey = `a:${task.id}`;
-      break;
-    }
-    case 'capture-tasks': {
-      if (!command.tasks.length || command.tasks.length > 300) throw new Error('Select between 1 and 300 items to add to Tasks.');
-      for (const task of command.tasks) addTask(next, task.title, task.notes);
       break;
     }
     case 'note': {

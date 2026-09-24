@@ -16,7 +16,7 @@ Keep the native Tauri shell, CLI authentication and current SQLite namespace. Pr
 
 **Run now** and the opt-in schedule use one pipeline: collect from enabled sources, reconcile against the latest local tasks, then use the Copilot SDK to rank every actionable task. Owner-authored priority instructions and roadmap text guide ranking. Task notes may inform ranking; unrelated private thread notes never do. Source content remains untrusted data, not instructions to execute.
 
-GitHub discovery combines saved backlog queries with an opt-in notification source. Notifications identify conversations to inspect, never obligations by themselves. Inspect actual requests before choosing an action; deduplicate them with requests found through saved searches. Preserve project backlog queries, including Usersd, separately from activity discovery. Slack and generic MCP sources use a selected connection with explicitly named read tools. The SDK extracts actionable requests from the source evidence. Do not silently enable broader tools, scrape credentials or pretend an unavailable connection works.
+GitHub discovery combines saved backlog queries with an opt-in notification source. Notifications identify conversations to inspect, never obligations by themselves. Inspect actual requests before choosing an action; deduplicate them with requests found through saved searches. Preserve project backlog queries separately from activity discovery. Slack and generic MCP sources use a selected connection with explicitly named read tools. The SDK extracts actionable requests from the source evidence. Do not silently enable broader tools, scrape credentials or pretend an unavailable connection works.
 
 The notification source initially inspects 30 days of issue/PR activity, then changes since the last successful run. Fetch read and unread notifications: reading elsewhere is not Done. Process large backlogs oldest-first across bounded runs and show when history remains, including after relaunch. Advance the saved collection cursor only after successful collection, ranking and durable saving, through inspected history and never past the run's start. Repeated notification reasons and notification timestamps are discovery metadata, not fresh request evidence.
 
@@ -83,20 +83,6 @@ Manual Archive takes precedence over filtering. Otherwise confirmed merged PRs, 
 Current queue membership comes only from GitHub GraphQL `PullRequest.mergeQueueEntry`, not historical timeline entries, auto-merge, mergeability or CI. A successful null means not currently queued; denied, unsupported, malformed or partial state results remain unknown. Source-state freshness is independent of notification timestamps and historical messages.
 
 Terminal checkpoints preserve the notification/evidence boundary. New activity while confirmed terminal advances that boundary but does not return the thread. After a confirmed exit/reopen, genuinely newer activity resumes normal routing; old-history hydration does not. Unknown/failed/missing state checks fail open with a warning, while retaining checkpoint provenance so later old history cannot become new activity. Manual Archive is not cleared by an unknown check. Saved observations survive relaunch; only explicit Refresh checks them again.
-
-## Waiting on me
-
-**Waiting on me** is an explicitly generated, read-only digest across GitHub, independent of notification placement and Tasks. Opening it never fetches data. **Generate digest** / **Regenerate digest** runs the fixed search and bucketing rules in [README.md](README.md#waiting-on-me) for the authenticated github.com viewer. Ordinary Refresh, startup, focus, clocks and reconnect never generate a digest.
-
-Keep direct review requests separate from requests to `integrations/terraform-provider-core-maintainers`; do not broaden either query. Exclude archived repositories from every search before applying result limits; local Archive placement is unrelated. Enrich non-draft authored PRs for review decision, mergeability and CI. Use first-match identity deduplication and oldest-update-first ordering within each bucket. Recent mentions and reviewed-PR activity remain explicitly uncertain signals, not proven commitments.
-
-The digest does not use AI. If Copilot ranking is added later, it must be explicitly requested and offer a selectable model; it cannot run automatically. No private notes, Tasks or conversation-cache bodies enter digest requests.
-
-Show result time, query limits, loading, empty and error states. Any failed read stops the new report without replacing the previous result with partial or empty success. Results and checklist marks live only in memory, separate from the workspace snapshot. Closing keeps them available; successful regeneration or restart resets marks. Checking alone never changes GitHub or Tasks. Copy the dated Markdown checklist or explicitly open an item on GitHub; no merge, review, comment, notification write or Copilot session is dispatched by generation.
-
-**Add checked items to Tasks** at the bottom explicitly captures only the checked items as open local Tasks. Keep each source title, suggested action, uncertainty, fix causes and GitHub URL, without linking a thread or fetching more context. Apply the batch in one local transition and preserve the unfinished capture, existing Tasks and selected reader. Clear the accepted selection to prevent repeated-click duplicates. Persistence and recovery use the existing workspace contract; failed saves retain pending Tasks and offer storage retry without recapturing. **Open Tasks** is a separate navigation action.
-
-The prototype offers clearly labeled synthetic samples only. It never invokes the native service or opens sample destinations.
 
 ## Refresh and saves
 

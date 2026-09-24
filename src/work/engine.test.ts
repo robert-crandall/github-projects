@@ -257,17 +257,17 @@ describe('saved task consolidation', () => {
   test('different actions on one GitHub issue share a row while other sources and captures remain separate', () => {
     const incoming = batch();
     incoming.candidates = [
-      { ...incoming.candidates[0]!, url: 'https://github.com/github/usersd/issues/1897', action: 'implement' },
-      { ...incoming.candidates[0]!, url: 'https://github.com/GitHub/Usersd/issues/01897#issuecomment-1', action: 'follow-up' },
-      { ...incoming.candidates[0]!, url: 'https://github.com/github/usersd/issues/1982', action: 'implement' },
-      { ...incoming.candidates[0]!, url: 'https://tracker.example/task?id=1897', action: 'implement' },
-      { ...incoming.candidates[0]!, url: 'https://tracker.example/task?id=1897', action: 'follow-up' },
+      { ...incoming.candidates[0]!, url: 'https://github.com/sample/relay/issues/123', action: 'implement' },
+      { ...incoming.candidates[0]!, url: 'https://github.com/Sample/Relay/issues/00123#issuecomment-1', action: 'follow-up' },
+      { ...incoming.candidates[0]!, url: 'https://github.com/sample/relay/issues/456', action: 'implement' },
+      { ...incoming.candidates[0]!, url: 'https://tracker.example/task?id=123', action: 'implement' },
+      { ...incoming.candidates[0]!, url: 'https://tracker.example/task?id=123', action: 'follow-up' },
     ];
     const initial = state();
     initial.tasks.push({ id: 'capture', title: incoming.candidates[0]!.url, notes: '', status: 'open', createdAt: before });
     const next = reconcileWork(initial, incoming, after);
     expect(next.tasks).toHaveLength(5);
-    expect(next.tasks.filter(task => task.work?.url.includes('/usersd/issues/1897'))).toHaveLength(1);
+    expect(next.tasks.filter(task => task.work?.url.includes('/relay/issues/123'))).toHaveLength(1);
     expect(next.tasks[0]).toEqual(initial.tasks[0]);
   });
 

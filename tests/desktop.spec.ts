@@ -5,204 +5,26 @@ import { evidence, gate, persisted, refresh, test, thread } from './native-fixtu
 import { rawMessage } from './conversation-fixture.ts';
 import { ServiceError } from '../service/src/errors.ts';
 
-test('Waiting on me is explicitly generated, read-only, and keeps checklist state across closing', async ({ page, native }, testInfo) => {
+test('reference workspace omits the retired digest and keeps saved tasks and notes', async ({ page, native }, testInfo) => {
   await page.goto('/');
-  await expect(page.getByRole('button', { name: 'Waiting on me', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Inbox', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Waiting on me', exact: true })).toHaveCount(0);
   expect(native.requests).toEqual([]);
   await refresh(page);
   await row(page, 't:123').click();
-  await page.getByLabel('Thread notes', { exact: true }).fill('PRIVATE note stays here');
-  await capture(page, 'PRIVATE standalone task');
+  await page.getByLabel('Thread notes', { exact: true }).fill('Keep my saved note');
+  await capture(page, 'Keep my captured task');
   await persisted(page);
   const before = structuredClone(native.state);
-  const writesBefore = native.writes.length;
-  const requestsBefore = native.requests.length;
-  const opener = page.getByRole('button', { name: 'Waiting on me', exact: true });
-  await opener.click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on me', exact: true });
-  await expect(dialog.getByRole('button', { name: 'Generate digest', exact: true })).toBeFocused();
-  expect(native.requests).toHaveLength(requestsBefore);
-  expect(await dialog.getByRole('combobox').count()).toBe(0);
-  native.holdWaiting = gate();
-  await dialog.getByRole('button', { name: 'Generate digest', exact: true }).click();
-  await expect(dialog.getByRole('button', { name: 'Generating...', exact: true })).toBeDisabled();
-  await expect(dialog.getByRole('status')).toContainText('Reading GitHub searches');
-  await page.keyboard.press('Escape');
-  await expect(opener).toBeFocused();
-  native.holdWaiting.release(); native.holdWaiting = undefined;
-  await opener.click();
-  await expect(dialog.getByRole('region', { name: 'Review requested of me', exact: true })).toContainText('octo/project#42 - @octocat, 7d');
-  await expect(dialog.getByRole('region', { name: 'Team review requested - integrations/terraform-provider-core-maintainers', exact: true })).toContainText('octo/provider#43');
-  await expect(dialog.getByText('Fix: changes requested / conflicts / CI failing', { exact: true })).toBeVisible();
-  await expect(dialog.locator('.waiting-summary')).toContainText('Direct reviews: 1; Provider Core Maintainers team reviews: 1');
-  await dialog.getByRole('checkbox', { name: 'Checked locally: octo/project#42' }).check();
-  await page.evaluate(() => {
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
-      writeText: async (text: string) => { document.documentElement.dataset.digestClipboard = text; },
-    } });
-  });
-  await dialog.getByRole('button', { name: 'Copy Markdown', exact: true }).click();
-  await expect(dialog.getByRole('status')).toHaveText('Markdown copied.');
-  const copied = await page.locator('html').getAttribute('data-digest-clipboard');
-  expect(copied).toContain('- [x] octo/project#42 - Keep thread notes (@octocat, 7d)');
-  expect(copied).toContain('https://github.com/octo/project/issues/45');
-  expect(copied).not.toContain('PRIVATE');
-  await dialog.getByRole('button', { name: 'Open octo/project#42 on GitHub', exact: true }).click();
-  expect(native.launches.at(-1)).toEqual({
-    command: 'launch_github', args: { identity: { source: 'github', owner: 'octo', repo: 'project', kind: 'pr', number: 42 } },
-  });
-  await dialog.evaluate(element => { element.scrollTop = 0; });
-  await page.screenshot({ path: testInfo.outputPath('waiting-desktop.png') });
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath('waiting-narrow.png') });
-  await page.keyboard.press('Escape');
-  await opener.click();
-  await expect(dialog.getByRole('checkbox', { name: 'Checked locally: octo/project#42' })).toBeChecked();
-  expect(native.writes).toHaveLength(writesBefore);
-  expect(native.state).toEqual(before);
-  expect(native.requests.slice(requestsBefore).map(request => request.op)).toEqual(['github.waiting']);
-  expect(native.requests.at(-1)?.input).toEqual({});
-  await page.keyboard.press('Escape');
   await page.reload();
-  await opener.click();
-  await expect(dialog.getByRole('button', { name: 'Generate digest', exact: true })).toBeVisible();
-  await expect(dialog.getByRole('region', { name: 'Waiting on me digest', exact: true })).toHaveCount(0);
-  expect(native.requests.slice(requestsBefore).map(request => request.op)).toEqual(['github.waiting']);
-});
-
-test('Waiting on me retains prior results on failure, reports limits and needs explicit retry', async ({ page, native }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Waiting on me', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on me', exact: true });
-  native.failWaiting = true;
-  await dialog.getByRole('button', { name: 'Generate digest', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toContainText('No digest was produced');
-  await expect(dialog.getByText('Nothing is waiting on you right now.')).toHaveCount(0);
-  native.failWaiting = false;
-  native.waiting.limitedQueries = ['team-review'];
-  await dialog.getByRole('button', { name: 'Generate digest', exact: true }).click();
-  await expect(dialog.getByText(/Search limit reached \(50 results\): Team review requested/)).toBeVisible();
-  await dialog.getByRole('checkbox', { name: 'Checked locally: octo/project#42' }).check();
-  native.failWaiting = true;
-  await dialog.getByRole('button', { name: 'Regenerate digest', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toContainText('The previous digest is unchanged');
-  await expect(dialog.getByRole('checkbox', { name: 'Checked locally: octo/project#42' })).toBeChecked();
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event('focus')); window.dispatchEvent(new Event('online'));
-  });
-  await page.clock.fastForward('01:00:00');
-  expect(native.requests.filter(request => request.op === 'github.waiting')).toHaveLength(3);
-  native.failWaiting = false;
-  native.waiting = { ...native.waiting, buckets: [], limitedQueries: [] };
-  await dialog.getByRole('button', { name: 'Regenerate digest', exact: true }).click();
-  await expect(dialog.getByText('Nothing is waiting on you right now.', { exact: true })).toBeVisible();
-  await expect(dialog.getByRole('checkbox')).toHaveCount(0);
-  expect(native.requests.every(request => request.op === 'github.waiting')).toBe(true);
-});
-
-test('Waiting on me surfaces clipboard and launch failures and renders source titles as inert text', async ({ page, native }) => {
-  native.waiting.buckets[0]!.items[0]!.title = '<img src="https://untrusted.test/pixel"> ' + 'Long source title '.repeat(25);
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Waiting on me', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on me', exact: true });
-  await dialog.getByRole('button', { name: 'Generate digest', exact: true }).click();
-  await expect(dialog.locator('.waiting-title').first()).toContainText('<img src=');
-  await expect(dialog.locator('img')).toHaveCount(0);
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.evaluate(() => {
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
-      writeText: async () => { throw new Error('Blocked clipboard'); },
-    } });
-  });
-  await dialog.getByRole('button', { name: 'Copy Markdown', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toContainText('clipboard is unavailable');
-  native.failLaunch = true;
-  await dialog.getByRole('button', { name: 'Open octo/project#42 on GitHub', exact: true }).click();
-  await expect(dialog.getByRole('alert')).toContainText('destination app is unavailable');
-  expect(native.requests.map(request => request.op)).toEqual(['github.waiting']);
-  expect(native.state.operations).toEqual([]);
-});
-
-test('Waiting on me adds only checked items as persisted Tasks without replacing the draft or reader', async ({ page, native }, testInfo) => {
-  await page.goto('/');
-  await refresh(page);
-  await row(page, 't:123').click();
-  await page.getByLabel('Thread notes', { exact: true }).fill('Private note');
-  await page.getByRole('button', { name: /^Capture/ }).click();
-  await page.getByLabel('What do you want to remember?').fill('Unfinished capture');
-  await page.getByRole('button', { name: 'Close dialog', exact: true }).click();
-  await persisted(page);
-  const before = structuredClone(native.state);
-  await page.getByRole('button', { name: 'Waiting on me', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on me', exact: true });
-  await dialog.getByRole('button', { name: 'Generate digest', exact: true }).click();
-  const add = dialog.getByRole('button', { name: /^Add checked items to Tasks/ });
-  await expect(add).toBeDisabled();
-  const requests = native.requests.length;
-  for (const number of [42, 44, 45]) await dialog.getByRole('checkbox', { name: `Checked locally: octo/project#${number}` }).check();
-  await expect(add).toHaveText('Add checked items to Tasks (3)');
-  await add.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: testInfo.outputPath('waiting-task-capture-desktop.png') });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await add.scrollIntoViewIfNeeded();
-  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-  await page.screenshot({ path: testInfo.outputPath('waiting-task-capture-narrow.png') });
-  await add.evaluate(button => {
-    if (!(button instanceof HTMLButtonElement)) throw new Error('Expected the task capture button.');
-    button.click(); button.click();
-  });
-  await expect(add).toBeDisabled();
-  await expect(dialog.locator('.waiting-task-status')).toContainText('3 tasks added here. Saved locally.');
-  expect(native.state.tasks).toHaveLength(before.tasks.length + 3);
-  const added = native.state.tasks.slice(-3);
-  expect(added.map(task => ({ title: task.title, notes: task.notes, status: task.status }))).toEqual([
-    { title: 'Keep thread notes', notes: 'I need to review.\nhttps://github.com/octo/project/pull/42', status: 'open' },
-    { title: 'Load older comments', notes: 'I need to fix the listed blockers.\nFix: changes requested / conflicts / CI failing\nhttps://github.com/octo/project/pull/44', status: 'open' },
-    { title: 'Improve keyboard navigation', notes: 'My task.\nhttps://github.com/octo/project/issues/45', status: 'open' },
-  ]);
-  expect(added.every(task => task.threadId === undefined)).toBe(true);
-  expect(native.state.tasks.slice(0, before.tasks.length)).toEqual(before.tasks);
-  expect(native.state.draft).toBe('Unfinished capture');
-  expect(native.state.selectedKey).toBe(before.selectedKey);
-  expect(native.state.view).toBe(before.view);
-  expect(native.state.threads).toEqual(before.threads);
-  expect(native.state.notes).toEqual(before.notes);
-  expect(native.state.operations).toEqual(before.operations);
-  expect(native.requests).toHaveLength(requests);
-  expect(native.launches).toEqual([]);
-  await dialog.getByRole('button', { name: 'Open Tasks', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Tasks', exact: true })).toBeVisible();
-  await row(page, `a:${added[0]!.id}`).click();
-  await expect(page.getByLabel('Task notes', { exact: true })).toHaveValue(added[0]!.notes);
-  await persisted(page);
-  await page.reload();
-  await expect(page.getByLabel('Task notes', { exact: true })).toHaveValue(added[0]!.notes);
-  expect(native.state.tasks.slice(-3)).toEqual(added);
-  expect(native.requests).toHaveLength(requests);
-});
-
-test('Waiting on me keeps pending Tasks on save failure and retries storage without creating duplicates', async ({ page, native }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Waiting on me', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Waiting on me', exact: true });
-  await dialog.getByRole('button', { name: 'Generate digest', exact: true }).click();
-  await persisted(page);
-  const before = structuredClone(native.state.tasks);
-  await dialog.getByRole('checkbox', { name: 'Checked locally: octo/project#42' }).check();
-  native.failSave = true;
-  await dialog.getByRole('button', { name: /^Add checked items to Tasks/ }).click();
-  await expect(dialog.locator('.waiting-task-status')).toContainText('1 task added here. Not saved yet.');
-  await expect(dialog.locator('.waiting-task-status').getByRole('alert')).toContainText('Disk unavailable');
-  await expect(dialog.getByRole('button', { name: /^Add checked items to Tasks/ })).toBeDisabled();
-  expect(native.state.tasks).toEqual(before);
-  native.failSave = false;
-  await dialog.getByRole('button', { name: 'Retry storage', exact: true }).click();
-  await expect(dialog.locator('.waiting-task-status')).toContainText('1 task added here. Saved locally.');
-  expect(native.state.tasks).toHaveLength(before.length + 1);
-  expect(native.requests.map(request => request.op)).toEqual(['github.waiting']);
-  expect(native.state.operations).toEqual([]);
+  expect(native.state.tasks).toEqual(before.tasks);
+  expect(native.state.notes).toEqual(before.notes);
+  expect(native.requests.map(request => request.op)).toEqual(['github.refresh']);
+  await page.screenshot({ path: testInfo.outputPath('reference-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('reference-narrow.png') });
 });
 
 test('filter rules preview literal matches, persist ordered CRUD and named inboxes without network or task changes', async ({ page, native }, testInfo) => {

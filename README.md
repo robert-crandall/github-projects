@@ -45,7 +45,7 @@ Done records handled evidence and a completion boundary. A repeated search, an o
 
 ### GitHub notifications
 
-In **Sources and priorities**, choose **Add GitHub notifications**, then **Save settings**. The source joins the same manual or scheduled run as saved searches. Use it instead of broad mentions searches; keep assigned-work, review-request and project backlog searches (such as Usersd) separately. Adding notifications does not rewrite or remove saved queries.
+In **Sources and priorities**, choose **Add GitHub notifications**, then **Save settings**. The source joins the same manual or scheduled run as saved searches. Use it instead of broad mentions searches; keep assigned-work, review-request and project backlog searches separately. Adding notifications does not rewrite or remove saved queries.
 
 The first scan covers the last **30 days**. Later scans include both read and unread issue/PR notifications updated since the last successful run. Reading a notification elsewhere does not finish a task. Large backlogs advance oldest-first across runs, with the remaining history shown in the task list. The saved cursor advances only through successfully inspected history, never beyond the run's start, after collection, ranking and persistence succeed. Failures retain the previous boundary for retry.
 
@@ -65,7 +65,9 @@ See the [service contract](service/README.md) for source configuration, intake a
 
 ### Saved reference material
 
-**Sources and priorities → Open saved thread notes** opens the previous conversation workspace. Its notification controls, fixed Waiting on me digest and filtering rules remain available as reference tools, not the task discovery or ranking pipeline. The older browser prototype is also separate from the desktop task list.
+**Sources and priorities → Open saved thread notes** opens the previous conversation workspace. Its notification controls and filtering rules remain available as reference tools, not the task discovery or ranking pipeline. The older browser prototype is also separate from the desktop task list.
+
+The legacy **Waiting on me** digest has been removed because its fixed queries duplicated configurable sources. Saved sources, including team-review searches, and previously captured tasks remain unchanged.
 
 ## Run the desktop
 
@@ -134,32 +136,6 @@ The reader shows real issue/PR descriptions, comments, reviews and grouped inlin
 Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns archived/terminal threads to Inbox.
 
 Normal refresh loads up to 50 recent threads and bounded recent timeline history. Reaching those built-in limits is not an error: the refresh timestamp advances, and a neutral note beside **Refresh** identifies the limited notification batch. Saved source history retains its timeline coverage details. Actual failures keep a compact summary above the workspace; **Refresh details** lists each distinct warning once. Saved notes and tasks remain available; use **Refresh** to retry failed reads.
-
-### Reference workspace: Waiting on me
-
-Open **Waiting on me**, then choose **Generate digest** for a read-only checklist across GitHub, including sources outside your saved Inbox. Opening the panel, ordinary Refresh, startup, focus and reconnect never generate it. **Regenerate digest** is the only way to update the snapshot.
-
-All six searches exclude archived repositories before applying their result limits. This does not exclude threads merely placed in this app's **Archive**; repository archival and local thread placement are separate.
-
-The digest uses fixed rules, not Copilot, so there is no model call or model selector. It uses the account signed into `gh` on github.com, not a hardcoded personal login. Generating it never merges, reviews, comments, changes notifications, creates Tasks, or sends local notes to a model.
-
-Items appear once, in the first matching group below. Oldest updates come first within each group.
-
-| Group | Included items |
-| --- | --- |
-| Review requested of me | Non-draft PRs from `user-review-requested:@me`. Team requests do not count as direct requests. |
-| Team review requested | Non-draft PRs requested of **integrations/terraform-provider-core-maintainers** only. No other team is queried. |
-| My PR - ready to merge | Authored non-drafts with APPROVED reviews, MERGEABLE status, and passing checks or no checks. |
-| My PR - needs my fix | Authored non-drafts with changes requested, conflicts, or failing CI. Every applicable cause is shown. |
-| Mentioned - may owe a reply | PRs mentioning me, authored by someone else and updated within 3 days. This does not prove a reply is owed. |
-| PR I reviewed - recent activity | PRs I reviewed, authored by someone else and updated within 2 days. This is a light re-review signal. |
-| Assigned issue | Open issues assigned to me and updated within 30 days. |
-
-An empty review decision is not a fix blocker; unknown mergeability is not a known conflict. Neither is enough to label a PR ready to merge. Draft authored PRs are skipped. Each search returns at most 50 results; the report names searches that reach the cap rather than claiming complete coverage. Any failed search or authored-PR enrichment stops the new digest and leaves the previous result visible with its timestamp.
-
-Check items, then choose **Add checked items to Tasks** at the bottom. Each checked item becomes an open local Task with its source title, suggested action and GitHub URL in notes, including any fix causes or uncertainty. The batch preserves your unfinished capture and current reader. Checkmarks clear after adding, preventing a repeated click from adding the same selection twice. Saves use the normal local recovery controls; a failed save keeps the Tasks pending for **Retry storage**. **Open Tasks** takes you to them.
-
-Checking alone never creates or completes Tasks or changes GitHub. Checkmarks survive closing the panel, but reset after a successful regeneration or app restart. Added Tasks persist independently and never complete themselves from GitHub activity. **Copy Markdown** copies the dated checklist with its current checkmarks; **Open on GitHub** opens the source without acting on it. The browser prototype offers **Generate sample** instead and adds sample Tasks only in its isolated local workspace.
 
 ### Reference workspace: filtering threads
 

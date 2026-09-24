@@ -137,7 +137,6 @@ export type AppState = z.infer<typeof stateSchema>;
 export type LegacyState = z.infer<typeof legacyStateSchema>;
 export type LegacyAction = z.infer<typeof actionSchema>;
 export type Task = z.infer<typeof taskSchema>;
-export type TaskCapture = Pick<Task, 'title' | 'notes'>;
 export type ThreadNote = z.infer<typeof noteSchema>;
 export type LocalHistory = z.infer<typeof historySchema>;
 export type Thread = z.infer<typeof threadSchema>;
@@ -158,7 +157,6 @@ export type Command =
   | { type: 'view'; view: View }
   | { type: 'draft'; text: string }
   | { type: 'capture' }
-  | { type: 'capture-tasks'; tasks: TaskCapture[] }
   | { type: 'edit'; key: string; title?: string; notes?: string }
   | { type: 'note'; threadId: string; noteId?: string; text: string }
   | { type: 'save-inbox'; inbox: NamedInbox }

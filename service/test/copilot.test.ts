@@ -174,7 +174,7 @@ describe('bounded previews and grounding', () => {
       { ...input.items[0]!, evidence: [{ ...evidence, requestState: 'historical' as const }] },
       { ...input.items[0]!, evidence: [{ ...evidence, kind: 'merge-queue' as const, requestState: 'not-request' as const }] },
       { ...input.items[0]!, evidence: [{ ...evidence, recipient: { kind: 'user' as const, login: 'another', isViewer: false } }] },
-      { ...input.items[0]!, evidence: [{ ...evidence, recipient: { kind: 'team' as const, team: 'integrations/terraform-provider-core-maintainers', viewerMembership: 'unknown' as const } }] },
+      { ...input.items[0]!, evidence: [{ ...evidence, recipient: { kind: 'team' as const, team: 'sample/provider-maintainers', viewerMembership: 'unknown' as const } }] },
     ]) {
       await expect(service().sdk.triage({ items: [item] }, signal())).rejects.toMatchObject({ dto: { code: 'copilot_output' } });
     }

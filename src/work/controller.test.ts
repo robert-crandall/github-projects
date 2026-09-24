@@ -758,7 +758,7 @@ describe('notification task controls', () => {
   test('enabling notifications preserves saved backlog searches and resets the successful scan boundary', async () => {
     const saved = initial();
     saved.work.settings.streams = [{
-      ...defaultWorkState().settings.streams[1]!, name: 'Usersd backlog', query: 'repo:github/usersd is:issue',
+      ...defaultWorkState().settings.streams[1]!, name: 'Relay backlog', query: 'repo:sample/relay is:issue',
     }];
     saved.work.collectionCursor = before;
     const mock = await fixture(saved);

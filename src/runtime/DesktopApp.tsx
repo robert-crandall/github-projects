@@ -95,13 +95,6 @@ export function DesktopApp({ controller, remote }: { controller: DesktopWorkspac
     desktop: {
       saving: status.persistence.pending, refreshing: network.refreshing, refresh: () => run(() => remote.refresh()),
       open: setDestination, archive: row => run(() => remote.archive(row)), connections: () => setConnections(true),
-      waiting: network.waiting, generateWaiting: () => run(() => remote.generateWaiting()),
-      openWaiting: async reference => {
-        const [owner, repo] = reference.repo.split('/');
-        await controller.platform.launchGitHub(githubIdentitySchema.parse({
-          source: 'github', owner, repo, kind: reference.kind, number: reference.number,
-        }));
-      },
       conversation: reference => <ConversationReader reference={reference} controller={remote.conversation}
         platform={controller.platform} refreshing={network.refreshing} timeZone={timeZone} />,
       readerReady: reference => !conversation.reading && !!conversation.reference

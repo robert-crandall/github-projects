@@ -142,7 +142,7 @@ test('failed migration backup blocks conversion and leaves original workspace re
 });
 
 function duplicateSnapshot(): NativeWorkspace {
-  const url = 'https://github.com/github/usersd/issues/1897';
+  const url = 'https://github.com/sample/relay/issues/123';
   const state = reconcileWork(emptyWorkspace(now, 'UTC'), {
     candidates: [{
       title: 'Implement the repair', action: 'implement', url,
