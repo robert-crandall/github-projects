@@ -303,6 +303,62 @@ test('local capture and Done during ranking survive the result', async ({ page, 
   await expect(page.locator('.ranked-list > li').filter({ hasText: 'Arrived during the run' })).toContainText('Not ranked yet');
 });
 
+test('Slack sources start with official read tools and retain them across relaunch', async ({ page, native }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Add source' }).click();
+  const stream = page.locator('.task-stream').last();
+  await expect(stream.getByLabel('Source type')).toHaveValue('slack');
+  await expect(stream.getByLabel('Allowed read tools, comma-separated'))
+    .toHaveValue('slack_search_public_and_private,slack_read_thread');
+  await expect(stream.getByLabel('Enabled')).not.toBeChecked();
+  await expect(stream.getByLabel('MCP server name')).toHaveValue('');
+  await stream.getByLabel('What should Copilot look for?').fill('Find direct requests in my team channel.');
+  await stream.getByLabel('MCP server name').fill('Slack');
+  await stream.getByLabel('Enabled').check();
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await expect(stream.getByLabel('Allowed read tools, comma-separated'))
+    .toHaveValue('slack_search_public_and_private,slack_read_thread');
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await run(page);
+  const request = native.requests.find(request => request.op === 'work.collect' && request.input.stream.kind === 'slack');
+  if (request?.op !== 'work.collect') throw new Error('Slack collection request missing');
+  expect(request.input.stream.tools).toEqual(['slack_search_public_and_private', 'slack_read_thread']);
+});
+
+test('selecting Slack fills only empty tool lists and preserves saved choices', async ({ page, native }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  const stream = page.locator('.task-stream').first();
+  const type = stream.getByLabel('Source type');
+  const tools = stream.getByLabel('Allowed read tools, comma-separated');
+  await type.selectOption('mcp');
+  await expect(tools).toHaveValue('');
+  await tools.fill(' , ');
+  await type.selectOption('slack');
+  await expect(tools).toHaveValue('slack_search_public_and_private,slack_read_thread');
+  await tools.fill('slack_search_public, slack_read_thread');
+  await type.selectOption('mcp');
+  await type.selectOption('slack');
+  await expect(tools).toHaveValue('slack_search_public, slack_read_thread');
+  await stream.getByLabel('Enabled').uncheck();
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await expect(tools).toHaveValue('slack_search_public,slack_read_thread');
+  await tools.fill('');
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await expect(tools).toHaveValue('');
+  expect(native.state.work.settings.streams[0]?.tools).toEqual([]);
+});
+
 test('settings accept explicit read tools and scheduled native ticks use the same run', async ({ page, native }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -311,7 +367,7 @@ test('settings accept explicit read tools and scheduled native ticks use the sam
   await stream.getByLabel('Name', { exact: true }).fill('Slack requests');
   await stream.getByLabel('What should Copilot look for?').fill('Find direct requests in my team channel.');
   await stream.getByLabel('MCP server name').fill('slack');
-  await stream.getByLabel('Allowed read tools, comma-separated').pressSequentially('search_messages, get_thread');
+  await stream.getByLabel('Allowed read tools, comma-separated').fill('search_messages, get_thread');
   await stream.getByLabel('Enabled').check();
   await page.getByLabel('Collect and prioritize automatically').check();
   await page.getByLabel('Minutes between runs').fill('5');

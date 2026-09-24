@@ -57,7 +57,9 @@ Notifications identify conversations to inspect, not obligations. Actual source 
 
 Slack uses a selected existing MCP server and explicitly named read tools. Connection credentials stay backend-only. Choose **Read MCP connections** for the available shared configuration and setup instructions. A connection saved only in Copilot app settings is not automatically available to this separate SDK runtime.
 
-Server and tool names must match exactly, including case. For the official Slack server, use its `slack_search_public` or explicitly authorized `slack_search_public_and_private` search tool and `slack_read_thread`, not generic `search_messages` or `get_threads` names. A configured wildcard does not approve all tools in this app; select the read tools explicitly.
+New Slack sources prefill **Allowed read tools** with `slack_search_public_and_private, slack_read_thread`. Selecting Slack for a source with an empty tool list fills the same defaults. Saved settings and custom tool lists stay unchanged. Choose the server, review the tools and enable the source before saving; new sources start disabled.
+
+Server and tool names must match exactly, including case. For public-only Slack searches, replace `slack_search_public_and_private` with `slack_search_public`. A configured wildcard does not approve all tools in this app; select the read tools explicitly.
 
 Other apps can submit tasks through the packaged service's `--mcp` stdio entry. For a completed Copilot review, submit a `review-result` task with the PR URL, a stable event ID and the source event time. The producer must call the tool; installing the server does not itself install an automatic review-completion hook. Intake is durable even while the desktop is closed, and is acknowledged only after the task reaches the workspace's durable save.
 
