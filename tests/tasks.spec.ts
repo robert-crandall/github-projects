@@ -1,5 +1,9 @@
 import { expect, type Page } from '@playwright/test';
-import { test, gate, persisted } from './native-fixture.ts';
+import { test, gate, persisted, type NativeMock } from './native-fixture.ts';
+import { emptyWorkspace } from '../src/domain/live.ts';
+import { reconcileWork } from '../src/work/engine.ts';
+import { createWorkProfile, switchWorkProfile } from '../src/work/profiles.ts';
+import { snapshotSchema } from '../src/platform/native.ts';
 
 test.use({ referenceWorkspace: false });
 
@@ -532,7 +536,6 @@ test('ranked list and details stay readable on desktop and narrow screens', asyn
   await expect(page.locator('.ranked-list')).toBeVisible();
 });
 
-
 test('live collection progress shows partial failure, elapsed time and a keyboard-accessible source checklist', async ({ page, native }, testInfo) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
@@ -641,4 +644,151 @@ test('manual-only progress omits the collection bar and stays active through ran
   native.holdRank.release();
   await expect(region).toContainText('Run complete');
   expect(native.requests.some(request => request.op === 'work.collect')).toBe(false);
+});
+
+function sourceFilterFixture(native: NativeMock) {
+  let state = emptyWorkspace(native.now, 'UTC');
+  const template = state.work.settings.streams[0]!;
+  state.work.settings.streams.push(
+    { ...template, id: 'team', name: 'Team requests', kind: 'slack', enabled: false },
+    { ...template, id: 'roadmap', name: 'Roadmap requests', kind: 'mcp', enabled: false },
+  );
+  state = reconcileWork(state, {
+    candidates: [
+      { title: 'Shared review', action: 'review', url: 'https://github.com/octo/project/issues/1', evidence: [
+        { id: 'request-1', source: 'github', streamId: 'github-reviews', at: native.now, url: 'https://github.com/octo/project/issues/1', summary: 'Review request' },
+        { id: 'request-2', source: 'slack', streamId: 'team', at: native.now, url: 'https://team.slack.com/archives/C1/p1789473600000000', summary: 'Team request' },
+      ] },
+      { title: 'Assigned issue', action: 'fix', url: 'https://github.com/octo/project/issues/2', evidence: [
+        { id: 'request-3', source: 'github', streamId: 'github-assigned', at: native.now, url: 'https://github.com/octo/project/issues/2', summary: 'Issue request' },
+      ] },
+      { title: 'Agent result', action: 'review-result', url: 'https://github.com/octo/project/issues/3', evidence: [
+        { id: 'request-4', source: 'mcp', streamId: 'push:mcp', at: native.now, url: 'https://github.com/octo/project/issues/3', summary: 'Agent request' },
+      ] },
+    ],
+    observations: [1, 2, 3].map(number => ({ url: `https://github.com/octo/project/issues/${number}`, state: 'open', observedAt: native.now, reason: '' })),
+    warnings: [], collectedAt: native.now,
+  }, native.now);
+  const review = state.tasks[0]!;
+  state.tasks.push(
+    { id: 'manual', title: 'Manual follow-up', notes: '', status: 'open', createdAt: native.now },
+    { ...review, id: 'done-review', title: 'Completed review', status: 'done', completedAt: native.now,
+      work: { ...review.work!, identity: 'https://github.com/octo/project/issues/4', url: 'https://github.com/octo/project/issues/4' } },
+    { ...review, id: 'waiting-review', title: 'Queued review', work: { ...review.work!, availability: 'waiting', availabilityReason: 'Queued',
+      identity: 'https://github.com/octo/project/issues/5', url: 'https://github.com/octo/project/issues/5' } },
+  );
+  state.work.ranking = { orderedIds: ['manual', ...state.tasks.slice(0, 3).map(task => task.id)], reasons: [], rankedAt: native.now };
+  state = switchWorkProfile(createWorkProfile(state, 'On call', true), 'default');
+  native.saved.snapshot = snapshotSchema.parse({ formatVersion: 1, workspace: { version: 1, state, scroll: {} }, reminders: [] });
+  return state;
+}
+
+test('source filters match merged provenance once, preserve ranks and keep task actions working', async ({ page, native }) => {
+  const original = sourceFilterFixture(native);
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  const tree = page.getByRole('region', { name: 'Filter sources' });
+  await expect(page.locator('.task-title')).toHaveText(['Manual follow-up', 'Shared review', 'Assigned issue', 'Agent result']);
+  await tree.getByRole('checkbox', { name: 'Manual tasks', exact: true }).uncheck();
+  await tree.getByRole('checkbox', { name: 'External-agent intake', exact: true }).uncheck();
+  await tree.getByRole('checkbox', { name: 'Issues assigned to me', exact: true }).uncheck();
+  await expect(tree.getByRole('checkbox', { name: 'Select all GitHub sources' })).toBeChecked({ indeterminate: true });
+  await expect(page.locator('.task-title')).toHaveText(['Shared review']);
+  await expect(page.locator('.task-rank')).toHaveText('2');
+  await expect(page.locator('.task-filter-summary')).toContainText('1 of 4 to dos');
+  await expect(tree.locator('label').filter({ has: page.getByRole('checkbox', { name: 'Team requests', exact: true }) })).toContainText('1');
+  await tree.getByRole('checkbox', { name: 'Select all GitHub sources' }).click();
+  await expect(page.locator('.task-title')).toHaveText(['Shared review', 'Assigned issue']);
+  await tree.getByRole('checkbox', { name: 'Select all GitHub sources' }).uncheck();
+  await expect(page.locator('.task-title')).toHaveText(['Shared review']);
+  await page.locator('.task-row').click();
+  await tree.getByRole('checkbox', { name: 'Team requests', exact: true }).uncheck();
+  await expect(page.getByRole('heading', { name: 'Select a task', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'No matching tasks', exact: true })).toBeVisible();
+  await tree.getByRole('checkbox', { name: 'Roadmap requests', exact: true }).uncheck();
+  await expect(page.getByRole('heading', { name: 'No sources selected', exact: true })).toBeVisible();
+  await tree.getByRole('checkbox', { name: 'Team requests', exact: true }).check();
+  await page.getByRole('button', { name: /^No action now/ }).click();
+  await expect(page.locator('.task-title')).toHaveText(['Queued review']);
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await expect(page.locator('.task-title')).toHaveText(['Completed review']);
+  await page.getByRole('button', { name: /^To do/ }).click();
+  await persisted(page);
+  expect(native.state.tasks).toEqual(original.tasks);
+  expect(native.state.work.settings).toEqual(original.work.settings);
+  expect(native.state.work.ranking).toEqual(original.work.ranking);
+  expect(native.requests).toEqual([]);
+  await page.getByRole('button', { name: 'Mark done: Shared review', exact: true }).click();
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
+  await page.getByRole('button', { name: /^To do/ }).click();
+  await expect(page.locator('.task-title')).toHaveText(['Shared review']);
+  await page.getByRole('button', { name: /^Ranked Tasks/ }).click();
+  await expect(page.locator('.task-title')).toHaveCount(4);
+});
+
+test('source selections and collapsed groups persist per profile and report failed saves', async ({ page, native }) => {
+  sourceFilterFixture(native);
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  await page.getByRole('checkbox', { name: 'Manual tasks', exact: true }).uncheck();
+  await page.locator('.task-source-tree summary').filter({ hasText: /^GitHub$/ }).click();
+  await persisted(page);
+  const selected = structuredClone(native.state.work.sourceFilter);
+  await page.getByLabel('Work profile', { exact: true }).selectOption({ label: 'On call' });
+  await expect(page.getByRole('checkbox', { name: 'Manual tasks', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).toBeVisible();
+  await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await expect(page.getByRole('checkbox', { name: 'Manual tasks', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).not.toBeVisible();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  await expect(page.getByRole('checkbox', { name: 'Manual tasks', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).not.toBeVisible();
+  expect(native.state.work.sourceFilter).toEqual(selected);
+  native.failSave = true;
+  await page.getByRole('checkbox', { name: 'Manual tasks', exact: true }).check();
+  await expect(page.getByRole('alert')).toContainText('Disk unavailable');
+  expect(native.state.work.sourceFilter).toEqual(selected);
+  native.failSave = false;
+  await page.getByRole('button', { name: 'Retry storage', exact: true }).click();
+  await persisted(page);
+  await page.getByRole('button', { name: 'Show all sources', exact: true }).click();
+  await persisted(page);
+  expect(native.state.work.sourceFilter?.selectedSources).toBeNull();
+  expect(native.requests).toEqual([]);
+});
+
+test('source sidebar remains keyboard accessible and scrolls without overflowing narrow windows', async ({ page, native }) => {
+  sourceFilterFixture(native);
+  await page.goto('/');
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  const manual = page.getByRole('checkbox', { name: 'Manual tasks', exact: true });
+  await manual.focus();
+  await page.keyboard.press('Space');
+  await expect(manual).not.toBeChecked();
+  await expect(manual).toBeFocused();
+  const github = page.locator('.task-source-tree summary').filter({ hasText: /^GitHub$/ });
+  await github.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).not.toBeVisible();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).toBeVisible();
+  for (const width of [1440, 901, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    const list = await page.locator('.task-main').boundingBox();
+    expect(list!.height).toBeGreaterThan(100);
+  }
+  const sidebar = page.locator('.task-sidebar');
+  expect(await sidebar.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  await page.getByRole('checkbox', { name: 'PRs awaiting my review', exact: true }).uncheck();
+  await page.getByRole('button', { name: 'Select all', exact: true }).click();
+  await expect(manual).toBeChecked();
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  await expect(page.getByRole('button', { name: 'Close task details', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Close task details', exact: true }).click();
+  await expect(page.locator('.task-main')).toBeVisible();
 });

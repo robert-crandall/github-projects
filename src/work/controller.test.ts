@@ -90,6 +90,27 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
 }
 
 describe('durable local work', () => {
+  test('source filters persist without changing collection, ranking or coverage', async () => {
+    const initialState = initial();
+    initialState.work.settings = defaultWorkState().settings;
+    initialState.work.collectionCursor = before;
+    const mock = await fixture(initialState);
+    mock.queue.capture('Hidden manual task');
+    mock.queue.saveSourceFilter({ selectedSources: [], collapsedProviders: ['github'] });
+    await mock.workspace.flush();
+    expect(mock.saved().work.sourceFilter).toEqual({ selectedSources: [], collapsedProviders: ['github'] });
+    expect(mock.saved().work.collectionCursor).toBe(before);
+    expect(mock.requests).toEqual([]);
+    await mock.queue.run();
+    expect(mock.requests.filter(request => request.op === 'work.collect').map(request => request.input.stream.id))
+      .toEqual(initialState.work.settings.streams.map(stream => stream.id));
+    const ranking = mock.requests.find(request => request.op === 'work.rank');
+    if (ranking?.op !== 'work.rank') throw new Error('Missing ranking request');
+    expect(ranking.input.tasks.map(task => task.title)).toContain('Hidden manual task');
+    expect(ranking.input.tasks.map(task => task.title)).toContain('Review the change');
+    expect(mock.saved().work.sourceFilter?.selectedSources).toEqual([]);
+    expect(mock.queue.getSnapshot().error).toBe('');
+  });
   test('offline capture, edits, Done and restore persist through the native workspace', async () => {
     const mock = await fixture();
     mock.queue.capture(' Offline task ', 'Private task note');

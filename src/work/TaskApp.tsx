@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Check, ExternalLink, Github, ListOrdered, Plus, RefreshCw, Settings2, SlidersHorizontal, X } from 'lucide-react';
+import { Check, ExternalLink, Github, ListFilter, ListOrdered, Plus, RefreshCw, Settings2, SlidersHorizontal, X } from 'lucide-react';
 import { Modal } from '../Modal.tsx';
 import { ConnectionsPanel, RecoveryPanel } from '../runtime/NativePanels.tsx';
 import { DestinationPanel } from '../runtime/DestinationPanel.tsx';
@@ -16,6 +16,8 @@ import { canonicalSource, rankedTasks } from './engine.ts';
 import { Settings } from './Settings.tsx';
 import { RunProgress } from './RunProgress.tsx';
 import { workProfiles } from './profiles.ts';
+import { matchesSources, sourceCounts, taskSources } from './filters.ts';
+import { SourceTree } from './SourceTree.tsx';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -159,6 +161,7 @@ export function TaskApp({ controller, queue, remote }: {
   const [capture, setCapture] = useState(false);
   const [newProfile, setNewProfile] = useState(false);
   const [settings, setSettings] = useState(false);
+  const [filters, setFilters] = useState(false);
   const [recovery, setRecovery] = useState(false);
   const [connections, setConnections] = useState(false);
   const [destination, setDestination] = useState<Destination>();
@@ -200,17 +203,45 @@ export function TaskApp({ controller, queue, remote }: {
   const ranked = rankedTasks(state);
   const done = state.tasks.filter(task => task.status === 'done');
   const waiting = state.tasks.filter(task => task.status === 'open' && task.work?.availability === 'waiting');
-  const visible = view === 'done' ? done : view === 'waiting' ? waiting : ranked;
-  const selected = state.tasks.find(task => task.id === selection);
+  const sources = taskSources(state.work.settings, state.tasks);
+  const sourceFilter = state.work.sourceFilter ?? { selectedSources: null, collapsedProviders: [] };
+  const selectedSources = sourceFilter.selectedSources;
+  const selectedSourceCount = sources.filter(item => selectedSources === null || selectedSources.includes(item.id)).length;
+  const filterTasks = (tasks: Task[]) => filters ? tasks.filter(task => matchesSources(task, selectedSources)) : tasks;
+  const filteredRanked = filterTasks(ranked);
+  const filteredDone = filterTasks(done);
+  const filteredWaiting = filterTasks(waiting);
+  const unfiltered = view === 'done' ? done : view === 'waiting' ? waiting : ranked;
+  const visible = view === 'done' ? filteredDone : view === 'waiting' ? filteredWaiting : filteredRanked;
+  const selected = state.tasks.find(task => task.id === selection && (!filters || matchesSources(task, selectedSources)));
+  const positions = new Map(ranked.map((task, index) => [task.id, index + 1]));
+  const saveFilter = (next: typeof sourceFilter) => {
+    try {
+      queue.saveSourceFilter(next);
+      if (selected && !matchesSources(selected, next.selectedSources)) setSelection(null);
+    } catch (error) { controller.report(error); }
+  };
+  const selectAllSources = () => saveFilter({ ...sourceFilter, selectedSources: null });
   const reasons = new Map(state.work.ranking?.reasons.map(item => [item.id, item.reason]) ?? []);
-  return <div className="task-app">
+  return <div className={`task-app ${filters && !settings ? 'task-filter-view' : ''}`}>
     <a className="skip-link" href={settings ? '#task-settings' : '#ranked-tasks'}>Skip to {settings ? 'settings' : 'tasks'}</a>
     <aside className="task-sidebar" aria-label="Workspace navigation">
       <div className="task-brand"><Github size={20} /><span>GitHub Projects</span></div>
       <button className="secondary task-capture" onClick={() => setCapture(true)}><Plus size={16} />Add task<span className="task-shortcut">⌘K</span></button>
       <nav aria-label="Workspace">
-        <button className="nav-link" aria-current={!settings ? 'page' : undefined} onClick={() => setSettings(false)}>
+        <button className="nav-link" aria-current={!settings && !filters ? 'page' : undefined} onClick={() => { setSettings(false); setFilters(false); }}>
           <ListOrdered size={17} />Ranked Tasks<span className="count">{ranked.length}</span></button>
+        <button className="nav-link" aria-current={!settings && filters ? 'page' : undefined}
+          aria-expanded={!settings && filters} aria-controls="task-source-tree" onClick={() => { setSettings(false); setFilters(true); }}>
+          <ListFilter size={17} />Filters<span className="count">{ranked.filter(task => matchesSources(task, selectedSources)).length}</span></button>
+        {filters && !settings && <SourceTree key={state.activeWorkProfile.id} sources={sources} selected={selectedSources}
+          collapsed={sourceFilter.collapsedProviders} counts={sourceCounts(unfiltered)} selectAll={selectAllSources}
+          toggle={(ids, checked) => {
+            const next = new Set(selectedSources ?? sources.map(item => item.id));
+            for (const id of ids) { if (checked) next.add(id); else next.delete(id); }
+            saveFilter({ ...sourceFilter, selectedSources: [...next] });
+          }} collapse={(provider, closed) => saveFilter({ ...sourceFilter, collapsedProviders: closed
+            ? [...sourceFilter.collapsedProviders, provider] : sourceFilter.collapsedProviders.filter(item => item !== provider) })} />}
       </nav>
       <div className="task-sidebar-bottom">
         <button className="nav-link" aria-current={settings ? 'page' : undefined} onClick={() => setSettings(true)}><Settings2 size={17} />Settings</button>
@@ -219,7 +250,7 @@ export function TaskApp({ controller, queue, remote }: {
       </div>
     </aside>
     <div className="task-workspace">
-    {!settings && <header className="task-top"><h1>Ranked Tasks</h1>
+    {!settings && <header className="task-top"><h1>{filters ? 'Filters' : 'Ranked Tasks'}</h1>
       <button className="primary" disabled={run.running} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
     </header>}
     {!settings && <div className="task-profile-bar">
@@ -248,13 +279,19 @@ export function TaskApp({ controller, queue, remote }: {
         && Date.parse(state.work.collectionCursor) < Date.parse(state.work.lastStartedAt)
         && <p className="task-detail-notice" role="status">More notification history remains. The next run continues after {date(state.work.collectionCursor)}.</p>}
       <RunProgress key={state.activeWorkProfile.id} run={run} details={runDetails} />
+      {filters && <div className="task-filter-summary">
+        <span role="status"><strong>{visible.length} of {unfiltered.length} {view === 'tasks' ? 'to dos' : view === 'done' ? 'completed tasks' : 'tasks with no action now'}</strong>
+          <span>From {selectedSourceCount} selected {selectedSourceCount === 1 ? 'source' : 'sources'}</span></span>
+        <button className="text-button" onClick={selectAllSources}>Show all sources</button>
+      </div>}
       <div className={`task-body ${selected ? 'task-with-detail' : ''}`}>
         <main id="ranked-tasks" className="task-main">
-          <nav className="task-tabs" aria-label="Task lists">{([['tasks', 'To do', ranked.length], ['done', 'Done', done.length], ['waiting', 'No action now', waiting.length]] as const).map(([value, title, count]) =>
+          <nav className="task-tabs" aria-label="Task lists">{([['tasks', 'To do', filteredRanked.length], ['done', 'Done', filteredDone.length], ['waiting', 'No action now', filteredWaiting.length]] as const).map(([value, title, count]) =>
             <button key={value} aria-current={view === value ? 'page' : undefined} onClick={() => { setView(value); setSelection(null); }}>{title}<span>{count}</span></button>)}</nav>
+          {filters && view === 'tasks' && <p className="task-filter-order">Original ranks · Same order as Ranked Tasks</p>}
           {visible.length ? <ol className="ranked-list" aria-label={view === 'tasks' ? 'Prioritized tasks' : view === 'done' ? 'Completed tasks' : 'Tasks with no action now'}>
-            {visible.map((task, index) => <li key={task.id} data-task-id={task.id} className={task.id === selection ? 'task-selected' : ''}>
-              <span className="task-rank" aria-label={view === 'tasks' ? `Rank ${index + 1}` : undefined}>{view === 'tasks' ? index + 1 : task.status === 'done' ? <Check size={16} /> : '—'}</span>
+            {visible.map(task => <li key={task.id} data-task-id={task.id} className={task.id === selection ? 'task-selected' : ''}>
+              <span className="task-rank" aria-label={view === 'tasks' ? `Rank ${positions.get(task.id)}` : undefined}>{view === 'tasks' ? positions.get(task.id) : task.status === 'done' ? <Check size={16} /> : '—'}</span>
               <button className="task-row" aria-current={task.id === selection ? 'true' : undefined} onClick={() => setSelection(task.id)}>
                 <span className="task-title">{task.title}</span>
                 <span className="task-source">{source(task)}</span>
@@ -266,7 +303,12 @@ export function TaskApp({ controller, queue, remote }: {
                 try { queue.complete(task.id); } catch (error) { controller.report(error); }
               }}><Check size={17} /></button>}
             </li>)}
-          </ol> : <div className="task-empty"><h2>{view === 'done' ? 'Nothing completed yet' : view === 'waiting' ? 'No tasks waiting on other people or systems' : 'No tasks to act on'}</h2>
+          </ol> : filters ? <div className="task-empty">
+            <h2>{selectedSourceCount ? 'No matching tasks' : 'No sources selected'}</h2>
+            <p>{selectedSourceCount ? 'The selected sources have no tasks in this tab. Choose another source or task tab.'
+              : 'Select a source in the sidebar to show its tasks. Your tasks are still saved.'}</p>
+            <div className="button-row"><button className="secondary" onClick={selectAllSources}>Show all sources</button></div>
+          </div> : <div className="task-empty"><h2>{view === 'done' ? 'Nothing completed yet' : view === 'waiting' ? 'No tasks waiting on other people or systems' : 'No tasks to act on'}</h2>
             <p>{view === 'done' ? 'Completed work stays here. Repeated searches will not put it back on your list.'
               : view === 'waiting' ? 'Tasks linked to queued, closed or merged work leave the active list without being marked Done.'
                 : 'Add a task, or run your sources to find work. Only actionable requests belong on this list.'}</p>

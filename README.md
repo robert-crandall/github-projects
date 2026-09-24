@@ -19,6 +19,14 @@ Manual tasks save offline immediately and join the ranking on the next run. A fa
 
 While a run is active, the summary beside **Run now** shows collections processed, done, failed and remaining, plus the active source and elapsed time. One collection is one enabled source, including its follow-up reads and saves; failed collections count as processed, not successful. These counts are not time estimates. Intake, ranking and saving have separate phase labels, and 100% collected does not mean the run has finished. Expand **Coverage and run details** for a scrollable source checklist and diagnostics, without duplicating source warnings. Sources skipped after a storage failure are labeled **Not run**. Local task edits stay available. The completed checklist remains for the current session until the next run or profile switch; saved run errors and the last successful run time remain available after relaunch.
 
+### Filters
+
+Choose **Filters** in the left menu to keep a source tree beside your tasks. Toggle an entire GitHub, Slack or MCP group, or individual configured sources. Manual tasks and external-agent intake have separate checkboxes. Tasks matching any checked source appear once, in the same order and with the same ranks as **Ranked Tasks**. Filtering applies to To do, Done and No action now; source counts follow the current tab and can overlap.
+
+Selections and collapsed groups save automatically per work profile, including across relaunch and in backups. New profiles start with all sources selected. **Select all** / **Show all sources** also includes sources added later; a custom selection includes only the sources you checked. Selecting nothing shows an empty view, never deletes tasks. Disabled sources remain available for filtering saved tasks; removed sources use their saved source ID as a label. Tasks without saved provenance appear under **Other saved tasks**.
+**Ranked Tasks** always shows the full list. Filters do not change source collection, schedules, ranking, Done or notes.
+**Ranked Tasks** always shows the full list. Filters do not change source collection, schedules, ranking, Done or notes.
+
 ### Work profiles
 
 Use **Work profile** above the task list to switch between named setups, such as regular work and on-call work. Your existing setup becomes **Default**, without changing its tasks or settings. **Add profile** creates and selects an empty task list, then opens its settings. Optionally copy the current profile's saved instructions, sources and model; automatic runs start off. Rename the selected profile in **Settings**.
@@ -69,7 +77,7 @@ See the [service contract](service/README.md) for source configuration, intake a
 
 ### One workspace
 
-Ranked Tasks uses three panels: navigation, the ranked list and task details. Settings replaces Appearance in the sidebar and includes themes, sources, priorities and scheduling. On narrow windows, task details replace the list until closed.
+Ranked Tasks uses three panels: navigation, the ranked list and task details. Filters adds a locally filtered view of the same tasks with a scrollable, collapsible source tree. Settings replaces Appearance in the sidebar and includes themes, sources, priorities and scheduling. On narrow windows, task details replace the list until closed.
 
 The old Inbox, Filtered, Archive, Tasks and saved-reference views are retired. Waiting on me and filtering rules are removed, including their logic. Source queries control discovery. Saved thread notes remain private and editable beside matching tasks; backups retain all notes and conversations. Existing saved filtering rules and named inboxes are retired only after an original backup succeeds.
 
