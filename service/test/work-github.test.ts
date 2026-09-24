@@ -250,7 +250,8 @@ describe('saved GitHub workstream reads', () => {
     const b = second.candidates[0]!.evidence[0]!;
     expect([a.id, a.at]).toEqual([b.id, b.at]);
     expect(a.at).toBe(at);
-    expect(first.warnings.join(' ')).toContain('original request event');
+    expect(first.warnings).toEqual([]);
+    expect(first.coverageInfo!.join(' ')).toContain('original request event');
   });
   test('only a direct viewer or explicitly selected current team request qualifies', async () => {
     const teams = { ...root, requested_reviewers: [{ login: 'someone-else' }], requested_teams: [{ slug: 'reviewers' }] };
@@ -306,7 +307,7 @@ describe('saved GitHub workstream reads', () => {
   test('search and history caps remain explicit; authentication fails rather than empty success', async () => {
     const result = await harness({ total: 400, lastPage: 5 }).service.collect(input(), signal());
     expect(result.warnings.join(' ')).toContain('incomplete results');
-    expect(result.warnings.join(' ')).toContain('timeline is capped');
+    expect(result.coverageInfo!.join(' ')).toContain('timeline is capped');
     await expect(harness({ failAuth: true }).service.collect(input(), signal())).rejects.toMatchObject({ dto: { code: 'authentication' } });
   });
   test('merge needs actual approval, mergeability, and complete passing check coverage', async () => {
@@ -323,7 +324,8 @@ describe('saved GitHub workstream reads', () => {
     } } }] } };
     const partial = await harness({ graph: capped }).service.collect(input({ action: 'merge' }), signal());
     expect(partial.candidates).toEqual([]);
-    expect(partial.warnings.join(' ')).toContain('checks are capped');
+    expect(partial.warnings).toEqual([]);
+    expect(partial.coverageInfo!.join(' ')).toContain('checks are capped');
   });
   test('linked MCP targets and canonical /issues PR identities receive real queue observations without searches', async () => {
     const { service, calls } = harness({ graph: { ...graph, mergeQueueEntry: { id: 'queue' } } });
@@ -361,5 +363,19 @@ describe('saved GitHub workstream reads', () => {
       id: 'github:octo/repo:12:commented:500', at: requestedAt, url: commentUrl,
     });
     expect(result.warnings.join(' ')).toContain('context may be incomplete');
+  });
+  test.each([401, 429])('observation stops remaining reads on HTTP %i rather than consuming every tracked URL', async status => {
+    let calls = 0;
+    const service = new WorkGitHub({
+      cache: null, resolve: async () => '/synthetic/gh',
+      runner: async () => {
+        calls++;
+        return { code: 1, stdout: `HTTP/2 ${status} Failed\r\nContent-Type: application/json\r\n\r\n{}` };
+      },
+    });
+    await expect(service.observe(Array.from({ length: 100 }, (_, index) =>
+      `https://github.com/octo/repo/issues/${index + 1}`), signal()))
+      .rejects.toMatchObject({ dto: { code: status === 401 ? 'authentication' : 'rate_limit' } });
+    expect(calls).toBeLessThanOrEqual(3);
   });
 });

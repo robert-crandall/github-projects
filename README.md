@@ -25,13 +25,15 @@ Each profile keeps its own instructions, sources, model, schedule, tasks, notes,
 
 External-agent intake goes into whichever profile runs next, and is acknowledged only after saving. Saved thread notes, connections, appearance and backups remain shared. Backups include every profile, and the selected profile survives relaunch.
 
-Copilot saves an independent assessment of each task's importance, urgency, blockers and supporting evidence. Only new, changed or expired tasks send full evidence again; ordering uses concise assessments for the entire active queue. Changes to task text, evidence, current source content or availability, priority instructions, model or assessment format invalidate reuse. Collection timestamps and duplicate stream provenance do not.
+Copilot saves an independent assessment of each task's importance, urgency, blockers and supporting evidence. Only new, changed or expired tasks send full evidence again, in batches of up to 20 tasks and 240,000 UTF-8 bytes. Each batch saves before the next starts, so retrying a failed run reuses completed assessments. Ordering uses concise assessments for the entire active queue. Changes to task text, evidence, current source content or availability, priority instructions, model or assessment format invalidate reuse. Collection timestamps and duplicate stream provenance do not.
 
 Assessments expire within **24 hours**, earlier for time-sensitive work. Comparative ordering expires within **1 hour**, or sooner when an assessment expires or priorities may cross over. An unchanged run before expiry makes no ranking model calls, including after relaunch. Order expiry alone reorders cached assessments without rereading full evidence. Valid assessments survive a failed order attempt. The private local cache is credential-scoped; switching accounts or rotating credentials starts fresh. Cache hits do not verify current account access, and collection still runs normally.
 
 Each saved GitHub query collects up to **200 matches**, using pages of 100. Larger or incomplete searches show a coverage warning; missing matches never mark tasks Done. Reply extraction batches source comments, and ranking still considers the whole active queue together.
 
-Saved searches cache timelines and reply extraction across restarts. After a complete baseline, safe queries fetch issues **updated** since the saved scan boundary, with a five-minute overlap and full reconciliation every six hours. Every cached source still receives a live permission/state check, and PR checks and merge queues stay live. Relative or complex queries keep full searches; failed or unsaved runs retain discoveries for replay.
+Saved searches cache timelines and reply extraction across restarts. After a complete baseline, safe queries fetch issues **updated** since the saved scan boundary, with a five-minute overlap and full reconciliation every six hours. Every cached source still receives a live permission/state check, and PR checks and merge queues stay live. Later streams do not repeat tracked-only checks for sources already observed in the same run. Relative or complex queries keep full searches; failed or unsaved runs retain discoveries for replay.
+
+Timeline gaps, unknown request ages and the 100-check limit remain visible as coverage notes, not failed reads that block a completed scan. Incomplete checks still prevent a PR from being declared ready to merge. Authentication and rate-limit failures stop the remaining reads in that GitHub operation; saved tasks remain intact.
 
 ### Identity and Done
 
@@ -54,6 +56,8 @@ Notifications identify conversations to inspect, not obligations. Actual source 
 ### Slack and MCP
 
 Slack uses a selected existing MCP server and explicitly named read tools. Connection credentials stay backend-only. Choose **Read MCP connections** for the available shared configuration and setup instructions. A connection saved only in Copilot app settings is not automatically available to this separate SDK runtime.
+
+Server and tool names must match exactly, including case. For the official Slack server, use its `slack_search_public` or explicitly authorized `slack_search_public_and_private` search tool and `slack_read_thread`, not generic `search_messages` or `get_threads` names. A configured wildcard does not approve all tools in this app; select the read tools explicitly.
 
 Other apps can submit tasks through the packaged service's `--mcp` stdio entry. For a completed Copilot review, submit a `review-result` task with the PR URL, a stable event ID and the source event time. The producer must call the tool; installing the server does not itself install an automatic review-completion hook. Intake is durable even while the desktop is closed, and is acknowledged only after the task reaches the workspace's durable save.
 

@@ -223,8 +223,9 @@ export class WorkGitHub {
       if (!sources.has(key)) sources.set(key, url);
     }
     const urls = [...sources.values()];
+    const stop = new AbortController();
     const deadline = new AbortController();
-    const combined = AbortSignal.any([signal, deadline.signal]);
+    const combined = AbortSignal.any([signal, deadline.signal, stop.signal]);
     const timer = setTimeout(() => deadline.abort(new ServiceError('deadline', true, 'read')), LIMITS.refreshMs);
     const observations: WorkObservation[] = [];
     let cursor = 0;
@@ -248,7 +249,9 @@ export class WorkGitHub {
             });
           } catch (error) {
             checkAbort(combined);
-            observations.push({ url, state: 'unknown', observedAt, reason: sanitized(error).message });
+            const failure = sanitized(error);
+            if (failure.code === 'authentication' || failure.code === 'rate_limit') { stop.abort(error); throw error; }
+            observations.push({ url, state: 'unknown', observedAt, reason: failure.message });
           }
         }
       }));
@@ -591,11 +594,16 @@ export class WorkGitHub {
             && Date.parse(collectedAt) - Date.parse(previous.fetchedAt) < SEARCH_RECONCILE_MS) {
             events = parse(z.array(eventSchema).max(200), previous.events);
             warnings.push(...previous.warnings);
+            coverageInfo.push(...previous.coverageInfo);
           } else {
             const sourceWarnings: string[] = [];
-            events = await this.timeline(sourceRef, signal, sourceWarnings, notificationStream ? coverageInfo : sourceWarnings);
+            const sourceInfo: string[] = [];
+            events = await this.timeline(sourceRef, signal, sourceWarnings, sourceInfo);
             warnings.push(...sourceWarnings);
-            if (cache && source.updated_at && !sourceWarnings.length) timelines.set(url, { revision, fetchedAt: collectedAt, events, warnings: [] });
+            coverageInfo.push(...sourceInfo);
+            if (cache && source.updated_at && !sourceWarnings.length) {
+              timelines.set(url, { revision, fetchedAt: collectedAt, events, warnings: [], coverageInfo: sourceInfo });
+            }
           }
           if (notificationStream) {
             const sourceEvents = [
@@ -617,7 +625,7 @@ export class WorkGitHub {
             }
             requestInputs.push(context);
           } else {
-            const evidence = this.evidence(source, graph, events, ref, stream, viewer, url, warnings);
+            const evidence = this.evidence(source, graph, events, ref, stream, viewer, url, warnings, coverageInfo);
             if (evidence.length > 200) warnings.push(`${ref.repo}#${ref.number}: evidence is capped at 200 events.`);
             if (evidence.length) candidates.push({
               title: source.title, action: stream.action, url, evidence: evidence.slice(-200),
@@ -733,9 +741,9 @@ export class WorkGitHub {
       warnings: uniqueWarnings.length > 30
         ? [...uniqueWarnings.slice(0, 29), `${uniqueWarnings.length - 29} additional source warnings omitted; coverage remains incomplete.`]
         : uniqueWarnings,
-      ...(notificationStream || cache ? { coverageInfo: uniqueInfo.length > 30
+      coverageInfo: uniqueInfo.length > 30
         ? [...uniqueInfo.slice(0, 29), `${uniqueInfo.length - 29} additional bounded-context or exclusion notes omitted.`]
-        : uniqueInfo } : {}),
+        : uniqueInfo,
       ...(discovery?.coveredThrough ? { coveredThrough: discovery.coveredThrough } : {}),
       collectedAt,
     });

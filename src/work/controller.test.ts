@@ -558,6 +558,56 @@ describe('runs and persistence barriers', () => {
     expect(mock.queue.getSnapshot().error).toBe('');
   });
 
+  test('tracked sources are checked once per run across streams, including canonical aliases and unknown results', async () => {
+    const saved = reconcileWork(initial(), collection(), before);
+    saved.work.settings.streams = defaultWorkState().settings.streams;
+    const mock = await fixture(saved, request => {
+      if (request.op !== 'work.collect') return;
+      return {
+        ...collection(), observations: [{ url, state: 'unknown', observedAt: before, reason: 'Access denied' }],
+      };
+    });
+    await mock.queue.run();
+    const expected = saved.work.settings.streams.map((_, index) => index === 0 ? ['https://github.com/owner/repo/issues/42'] : []);
+    expect(mock.requests.filter(request => request.op === 'work.collect').map(request => request.input.knownUrls)).toEqual(expected);
+    await mock.queue.run();
+    expect(mock.requests.filter(request => request.op === 'work.collect').map(request => request.input.knownUrls)).toEqual([...expected, ...expected]);
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.saved().tasks[0]!.work!.availability).toBe('unknown');
+  });
+
+  test('failed collections leave tracked sources eligible for observation by the next stream', async () => {
+    const saved = reconcileWork(initial(), collection(), before);
+    saved.work.settings.streams = defaultWorkState().settings.streams.slice(0, 2);
+    let calls = 0;
+    const mock = await fixture(saved, request => {
+      if (request.op !== 'work.collect') return;
+      if (calls++ === 0) throw new Error('Temporary source failure');
+      return collection();
+    });
+    await mock.queue.run();
+    expect(calls).toBe(2);
+    expect(mock.requests.filter(request => request.op === 'work.collect').map(request => request.input.knownUrls))
+      .toEqual([['https://github.com/owner/repo/issues/42'], ['https://github.com/owner/repo/issues/42']]);
+    expect(mock.queue.getSnapshot().error).toContain('Temporary source failure');
+  });
+
+  test('a search observation outside its tracked page avoids a redundant observe-only request', async () => {
+    const candidates = Array.from({ length: 101 }, (_, index) => ({
+      ...candidate(`github:${index}`), url: `https://github.com/owner/repo/pull/${index + 1}`,
+    }));
+    const batch = {
+      candidates, observations: candidates.map(item => ({ url: item.url, state: 'open' as const, observedAt: before, reason: 'Open' })),
+      collectedAt: before, warnings: [],
+    };
+    const saved = reconcileWork(initial(), batch, before);
+    saved.work.settings.streams = defaultWorkState().settings.streams.slice(0, 1);
+    const mock = await fixture(saved, request => request.op === 'work.collect' ? batch : undefined);
+    await mock.queue.run();
+    expect(mock.requests.filter(request => request.op === 'work.collect')).toHaveLength(1);
+    expect(mock.saved().tasks).toHaveLength(101);
+  });
+
   test('the completion watermark rolls back when its final durable save fails', async () => {
     const saved = initial();
     saved.work.lastCompletedAt = previousCompleted;

@@ -19,6 +19,7 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 export const cachedTimelineSchema = z.strictObject({
   revision: digest, fetchedAt: time, events: z.array(z.unknown()).max(200),
   warnings: z.array(z.string().max(1000)).max(30),
+  coverageInfo: z.array(z.string().max(1000)).max(30).default([]),
 });
 const cachedCandidateSchema = workCandidateSchema.extend({ url: sourceUrl });
 const replySchema = z.strictObject({

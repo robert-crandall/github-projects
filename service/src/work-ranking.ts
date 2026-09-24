@@ -153,19 +153,32 @@ export class WorkRanker {
       return cached.fingerprint !== fingerprints.get(task.id) || Date.parse(cached.evaluatedAt) > now
         || Date.parse(cached.assessment.reevaluateAt) <= now;
     });
-    if (changed.length) {
-      const assessmentInput = { evaluatedAt, tasks: changed };
-      if (Buffer.byteLength(JSON.stringify(assessmentInput)) > LIMITS.workModelBytes) throw new ServiceError('limit');
+    const batches: SemanticRankTask[][] = [];
+    const bytes = (tasks: SemanticRankTask[]) => Buffer.byteLength(JSON.stringify({ evaluatedAt, tasks }));
+    let batch: SemanticRankTask[] = [];
+    for (const task of changed) {
+      if (bytes([task]) > LIMITS.workModelBytes) throw new ServiceError('limit');
+      if (batch.length && (batch.length >= LIMITS.workAssessmentTasks || bytes([...batch, task]) > LIMITS.workModelBytes)) {
+        batches.push(batch);
+        batch = [];
+      }
+      batch.push(task);
+    }
+    if (batch.length) batches.push(batch);
+    for (const tasks of batches) {
+      checkAbort(signal);
+      const assessedAt = this.now().toISOString();
+      const assessmentInput = { evaluatedAt: assessedAt, tasks };
       const result = await models.assess(assessmentInput);
       checkAbort(signal);
-      exactPermutation(changed.map(task => task.id), result.assessments.map(value => value.id));
+      exactPermutation(tasks.map(task => task.id), result.assessments.map(value => value.id));
       const values = result.assessments.map(({ id, ...assessment }) => {
-        const task = changed.find(task => task.id === id)!;
-        validateAssessment(assessment, task, evaluatedAt);
+        const task = tasks.find(task => task.id === id)!;
+        validateAssessment(assessment, task, assessedAt);
         if (Date.parse(assessment.reevaluateAt) <= this.now().getTime()) throw new ServiceError('copilot_output');
-        return { id, fingerprint: fingerprints.get(id)!, evaluatedAt, assessment };
+        return { id, fingerprint: fingerprints.get(id)!, evaluatedAt: assessedAt, assessment };
       });
-      // This transaction deliberately precedes ordering: a failed order must not lose paid-for assessments.
+      // Commit each batch before continuing so a later failure retains paid-for assessments.
       this.cache.saveAssessments(scope, values);
       for (const value of values) assessments.set(value.id, value);
     }

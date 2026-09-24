@@ -10,6 +10,7 @@ import {
   type AssessmentInput, type OrderInput, type SavedAssessment,
 } from '../src/work-ranking.ts';
 import { semanticRankTask } from '../src/work-rank-input.ts';
+import { LIMITS } from '../src/schema.ts';
 import type { WorkRankInput } from '../src/work-schema.ts';
 import { WorkService } from '../src/work.ts';
 
@@ -151,6 +152,89 @@ describe('durable independent assessments and comparative ordering', () => {
       expect((h.calls[2]!.input as AssessmentInput).tasks[0]!.context!.body).toHaveLength(99002);
       expect(h.calls[3]!.input.tasks).toHaveLength(3);
       expect(JSON.stringify(h.calls[3]!.input)).not.toContain('x'.repeat(100));
+    });
+  });
+  test('a cold queue larger than the model budget is assessed in bounded batches and ordered together', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks = Array.from({ length: 127 }, (_, index) => ({
+        ...structuredClone(data.tasks[0]!), id: `task-${String(index).padStart(3, '0')}`,
+        title: `Task ${index}`, context: { ...data.tasks[0]!.context!, body: '界'.repeat(2200) },
+      }));
+      expect(Buffer.byteLength(JSON.stringify(data))).toBeGreaterThan(900000);
+      const result = await h.sdk.rankWork(data, signal());
+      const assessments = h.calls.filter(call => call.phase === 'assess');
+      expect(assessments.length).toBeGreaterThan(1);
+      for (const call of assessments) {
+        expect(Buffer.byteLength(JSON.stringify(call.input))).toBeLessThanOrEqual(LIMITS.workModelBytes);
+        expect(call.input.tasks.length).toBeLessThanOrEqual(20);
+        expect((call.input as AssessmentInput).tasks.every(task => task.context!.body === '界'.repeat(2200))).toBe(true);
+      }
+      expect(assessments.flatMap(call => (call.input as AssessmentInput).tasks.map(task => task.title)).sort())
+        .toEqual(data.tasks.map(task => task.title).sort());
+      expect(h.calls.filter(call => call.phase === 'order')).toHaveLength(1);
+      expect(h.calls.at(-1)!.input.tasks).toHaveLength(127);
+      expect(result.orderedIds).toEqual(data.tasks.map(task => task.id).reverse());
+      const calls = h.calls.length;
+      expect(await h.restart().rankWork(data, signal())).toEqual(result);
+      expect(h.calls).toHaveLength(calls);
+    });
+  });
+  test('UTF-8 byte boundaries split batches without clipping individual task evidence', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks = ['a', 'b', 'c'].map(id => ({
+        ...structuredClone(data.tasks[0]!), id, title: id,
+        context: { ...data.tasks[0]!.context!, body: '界'.repeat(39000) },
+      }));
+      await h.sdk.rankWork(data, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'assess', 'order']);
+      expect(h.calls.slice(0, 2).map(call => call.input.tasks.length)).toEqual([2, 1]);
+      for (const call of h.calls.slice(0, 2)) {
+        expect(Buffer.byteLength(JSON.stringify(call.input))).toBeLessThanOrEqual(LIMITS.workModelBytes);
+        expect((call.input as AssessmentInput).tasks.every(task => task.context!.body.length === 39000)).toBe(true);
+      }
+    });
+  });
+  test('a later failed batch preserves earlier assessments and resumes only remaining tasks after restart', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks = ['a', 'b', 'c'].map(id => ({
+        ...structuredClone(data.tasks[0]!), id, title: id,
+        context: { ...data.tasks[0]!.context!, body: 'x'.repeat(99000) },
+      }));
+      h.respond((call, result) => {
+        if (call.phase === 'assess' && (call.input.tasks[0] as AssessmentInput['tasks'][number]).title === 'c') {
+          throw new ServiceError('copilot_unavailable');
+        }
+        return result;
+      });
+      await expect(h.sdk.rankWork(data, signal())).rejects.toMatchObject({ dto: { code: 'copilot_unavailable' } });
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'assess']);
+      const saved = new WorkAssessmentCache(h.path).load(assessmentScope('synthetic-test-token', data), ['a', 'b', 'c']);
+      expect([...saved.assessments.keys()]).toEqual(['a', 'b']);
+      expect(saved.order).toBeUndefined();
+      h.respond();
+      expect((await h.restart().rankWork(data, signal())).orderedIds).toEqual(['c', 'b', 'a']);
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'assess', 'assess', 'order']);
+      expect(h.calls[2]!.input.tasks).toHaveLength(1);
+      expect(h.calls[2]!.input.tasks[0]).toMatchObject({ title: 'c' });
+    });
+  });
+  test('each assessment batch uses its own current evaluation time', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks = ['a', 'b', 'c'].map(id => ({
+        ...structuredClone(data.tasks[0]!), id, title: id,
+        context: { ...data.tasks[0]!.context!, body: 'x'.repeat(99000) },
+      }));
+      h.respond((call, result) => {
+        if (call.phase === 'assess') h.advance(60000);
+        return result;
+      });
+      await h.sdk.rankWork(data, signal());
+      expect(h.calls.map(call => call.input.evaluatedAt))
+        .toEqual([at, '2026-09-18T12:01:00.000Z', '2026-09-18T12:02:00.000Z']);
     });
   });
   test('queue order, stream provenance, duplicate evidence and label order do not invalidate', async () => {
