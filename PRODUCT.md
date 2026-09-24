@@ -32,6 +32,8 @@ Each run applies results to the latest state so concurrent captures, notes and D
 
 Successful assessments are permanent versions on each task, including manual tasks, in its work profile. Save each assessed subset before ordering or assessing more tasks. Task details show the latest result, evidence, evaluation time and provenance, with earlier versions available in a compact selector. Distinguish changed task content or assessment settings from time expiry; neither removes history. Done, restore, reconciliation, duplicate consolidation, profile switching and backups retain versions. Retries reuse immutable result IDs without duplicating history. Concurrent edits retain their text and leave the submitted assessment historical, not current. Old replaceable cache entries do not become invented history.
 
+Keep permanent assessment rows separately paged in the existing local SQLite database, outside the bounded task snapshot. Read versions by logical append order, not wall-clock timestamps. History growth or a failed history append must not exhaust snapshot capacity or block ordinary notes, Done and capture saves. Keep failed append results visible for explicit retry/export. Migrate embedded histories transactionally and idempotently after preserving a recoverable original. Database backups and bounded JSON export/import include complete history and profile/task associations; restoring a copy replaces state and history together, never mixes unrelated rows.
+
 Scheduling is disabled until explicitly enabled. While the Mac app runs, including hidden, a native clock triggers due checks. Catch up once after sleep or relaunch; do not overlap or replay every missed interval. Quitting stops runs. Legacy reminder schedules never resume.
 
 ## Unified workspace

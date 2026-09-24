@@ -10,7 +10,6 @@ import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWor
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
-import { attachAssessments } from './assessments.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type WorkQueueSnapshot = {
@@ -177,7 +176,11 @@ export class WorkQueue {
   private assertProfile(current: AppState, profileId: string): void {
     if (current.activeWorkProfile.id !== profileId) throw new Error('The work profile changed during the run. The previous order is retained.');
   }
-  private async persist(batch: WorkCollection, profileId: string): Promise<void> {
+  private assertWorkspace(generation: number): void {
+    if (generation !== this.controller.assessmentGeneration) throw new Error('The workspace was replaced during this run. Its previous results cannot change the restored workspace.');
+  }
+  private async persist(batch: WorkCollection, profileId: string, generation: number): Promise<void> {
+    this.assertWorkspace(generation);
     this.update(current => {
       this.assertProfile(current, profileId);
       return reconcileWork(current, batch, new Date());
@@ -185,7 +188,7 @@ export class WorkQueue {
     await this.controller.flush();
   }
 
-  private async intake(profileId: string): Promise<void> {
+  private async intake(profileId: string, generation: number): Promise<void> {
     const seen = new Set<string>();
     for (let page = 0; page < 20; page += 1) {
       const intake = await this.service.call('work.intake', {});
@@ -196,7 +199,8 @@ export class WorkQueue {
       if (intake.items.length) {
         await this.persist({
           candidates: intake.items.map(item => item.candidate), observations: [], warnings: [], collectedAt: new Date().toISOString(),
-        }, profileId);
+        }, profileId, generation);
+        this.assertWorkspace(generation);
         const ack = await this.service.call('work.ackIntake', { ids });
         if (!exactIds(ids, ack.ids)) throw new Error('Task intake acknowledgement did not match the saved items.');
         for (const id of ids) seen.add(id);
@@ -206,7 +210,8 @@ export class WorkQueue {
     throw new Error('More task intake remains. Saved tasks are retained; run again to continue.');
   }
 
-  private async rank(profileId: string): Promise<string[]> {
+  private async rank(profileId: string, assessmentGeneration: number): Promise<string[]> {
+    this.assertWorkspace(assessmentGeneration);
     this.assertProfile(this.controller.state, profileId);
     const input = { ...rankInput(this.controller.state), profileId };
     const submitted = new Map(input.tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
@@ -226,13 +231,13 @@ export class WorkQueue {
           || value.model !== input.model || value.assessmentVersion !== ASSESSMENT_VERSION)) {
         throw new Error('Assessment results did not match the submitted tasks and settings. The previous order is retained.');
       }
-      this.update(current => attachAssessments(current, profileId, batch.assessments));
-      await this.controller.flush();
+      await this.controller.saveAssessments(profileId, batch.assessments, assessmentGeneration);
       for (const value of batch.assessments) assessments.set(value.id, value);
       pending = pending.filter(task => !assessments.has(task.id));
       this.assertProfile(this.controller.state, profileId);
     }
     const assertSettings = (current: AppState) => {
+      this.assertWorkspace(assessmentGeneration);
       if (current.activeWorkProfile.id !== input.profileId || current.work.settings.instructions !== input.instructions
         || current.work.settings.model !== input.model) {
         throw new Error('Ranking settings changed during the run. The previous order is retained; run again with the saved settings.');
@@ -279,6 +284,7 @@ export class WorkQueue {
 
   private async execute(now: Date): Promise<void> {
     const profileId = this.controller.state.activeWorkProfile.id;
+    const generation = this.controller.assessmentGeneration;
     const errors: string[] = [];
     const warnings: string[] = [];
     let previousCompletedAt: string | null | undefined;
@@ -292,17 +298,19 @@ export class WorkQueue {
         return { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } };
       });
       await this.controller.flush();
+      await this.controller.retryAssessments();
       const { settings, collectionCursor } = this.controller.state.work;
       scannedSettings = sourceSettings(settings);
       const streams = structuredClone(settings.streams.filter(stream => stream.enabled));
       this.publish({ phase: 'intake' });
-      try { await this.intake(profileId); }
+      try { await this.intake(profileId, generation); }
       catch (error) {
         if (this.controller.getSnapshot().persistence.error) throw error;
         errors.push(`Task intake: ${message(error)}`);
       }
       const observed = new Set<string>();
       for (const stream of streams) {
+        this.assertWorkspace(generation);
         this.assertProfile(this.controller.state, profileId);
         this.publish({ phase: `collecting: ${stream.name}` });
         const knownUrls = [...new Set(this.controller.state.tasks
@@ -325,7 +333,7 @@ export class WorkQueue {
               }
               if (boundary < Date.parse(coveredThrough)) coveredThrough = result.coveredThrough;
             }
-            await this.persist(result, profileId);
+            await this.persist(result, profileId, generation);
             for (const observation of result.observations) observed.add(canonicalSource(observation.url));
             warnings.push(...(result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`));
             for (const warning of result.warnings) {
@@ -339,9 +347,10 @@ export class WorkQueue {
         }
       }
       this.publish({ phase: 'ranking', warnings: [...warnings] });
-      try { warnings.push(...await this.rank(profileId)); }
+      try { warnings.push(...await this.rank(profileId, generation)); }
       catch (error) { errors.push(`Ranking: ${message(error)}`); }
       this.update(current => {
+        this.assertWorkspace(generation);
         this.assertProfile(current, profileId);
         if (sourceSettings(current.work.settings) !== scannedSettings) {
           errors.push('Source settings changed during the run. Run again to collect the saved sources.');
@@ -359,7 +368,7 @@ export class WorkQueue {
     } catch (error) {
       errors.push(message(error));
       try {
-        this.update(current => current.activeWorkProfile.id !== profileId ? {
+        this.update(current => generation !== this.controller.assessmentGeneration ? current : current.activeWorkProfile.id !== profileId ? {
           ...current, inactiveWorkProfiles: current.inactiveWorkProfiles.map(profile => profile.id === profileId
             ? { ...profile, work: { ...profile.work, lastError: errors.join('\n').slice(0, 4000) } } : profile),
         } : ({

@@ -1,5 +1,4 @@
 import { ASSESSMENT_VERSION, type SavedAssessment, type TaskAssessment } from '../../service/src/work-assessment.ts';
-import type { AppState, Task } from '../types.ts';
 
 export function mergeAssessments(previous: TaskAssessment[], incoming: TaskAssessment[]): TaskAssessment[] {
   const versions = new Map(previous.map(value => [value.resultId, value]));
@@ -12,34 +11,6 @@ export function mergeAssessments(previous: TaskAssessment[], incoming: TaskAsses
   }
   // Old unsequenced snapshots retain their recorded order; wall time never establishes recency.
   return [...versions.values()].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
-}
-
-export function attachAssessments(state: AppState, profileId: string, values: SavedAssessment[]): AppState {
-  if (values.some(value => value.profileId !== profileId)) throw new Error('The assessment belongs to a different work profile.');
-  const attach = (tasks: Task[]) => {
-    if (values.some(value => !tasks.some(task => task.id === value.id))) {
-      throw new Error('An assessed task no longer exists. The previous order is retained.');
-    }
-    let sequence = tasks.reduce((max, task) =>
-      (task.assessments ?? []).reduce((max, value) => Math.max(max, value.sequence ?? 0), max), 0);
-    return tasks.map(task => {
-      const incoming = values.filter(value => value.id === task.id).map(value => {
-        const existing = task.assessments?.find(saved => saved.resultId === value.resultId);
-        if (existing) return { ...value, ...(existing.sequence === undefined ? {} : { sequence: existing.sequence }) };
-        if (sequence === Number.MAX_SAFE_INTEGER) throw new Error('The assessment sequence limit was reached. Export history before recovery.');
-        return { ...value, sequence: ++sequence };
-      });
-      return incoming.length ? { ...task, assessments: mergeAssessments(task.assessments ?? [], incoming) } : task;
-    });
-  };
-  if (state.activeWorkProfile.id === profileId) return { ...state, tasks: attach(state.tasks) };
-  if (!state.inactiveWorkProfiles.some(profile => profile.id === profileId)) {
-    throw new Error('The assessed work profile no longer exists. The previous order is retained.');
-  }
-  return {
-    ...state, inactiveWorkProfiles: state.inactiveWorkProfiles.map(profile => profile.id === profileId
-      ? { ...profile, tasks: attach(profile.tasks) } : profile),
-  };
 }
 
 export function assessmentFreshness(value: SavedAssessment, current: {

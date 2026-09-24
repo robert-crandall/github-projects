@@ -4,6 +4,8 @@ import { emptyWorkspace } from '../src/domain/live.ts';
 import { reconcileWork } from '../src/work/engine.ts';
 import { createWorkProfile, switchWorkProfile } from '../src/work/profiles.ts';
 import { snapshotSchema } from '../src/platform/native.ts';
+import { assessmentBatch } from './assessment-fixture.ts';
+import { rankInput } from '../src/work/engine.ts';
 
 test.use({ referenceWorkspace: false });
 
@@ -29,7 +31,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   await expect(history).toContainText('Assessment of Write the proposal');
-  const first = native.state.tasks.find(task => task.title === 'Write the proposal')!.assessments![0]!;
+  const first = native.assessments.values(native.state.tasks.find(task => task.title === 'Write the proposal')!.id)[0]!;
   await history.getByText('Assessment provenance', { exact: true }).click();
   await expect(history).toContainText('SDK default (resolved model not reported)');
   await expect(history).toContainText(first.resultId);
@@ -41,7 +43,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   await run(page);
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   await expect(history).toContainText('Assessment of Write the updated proposal');
-  const versions = native.state.tasks.find(task => task.id === first.id)!.assessments!;
+  const versions = [...native.assessments.values(first.id)];
   expect(versions).toHaveLength(2);
   await history.getByLabel('Assessment version').selectOption(first.resultId);
   await expect(history).toContainText('Historical result.');
@@ -60,7 +62,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
   await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
   await persisted(page);
-  expect(native.state.tasks.find(task => task.id === first.id)!.assessments).toEqual(versions);
+  expect(native.assessments.values(first.id)).toEqual(versions);
 });
 
 test('assessment expiry never hides its history', async ({ page, native }) => {
@@ -69,25 +71,25 @@ test('assessment expiry never hides its history', async ({ page, native }) => {
   await run(page);
   await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
-  const version = native.state.tasks.find(task => task.title === 'Keep this assessment')!.assessments![0]!;
+  const version = native.assessments.values(native.state.tasks.find(task => task.title === 'Keep this assessment')!.id)[0]!;
   native.now = version.assessment.reevaluateAt;
   await page.clock.setFixedTime(new Date(native.now));
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
   await expect(history.getByRole('status')).toHaveText('Expired: reassessment due');
   await expect(history).toContainText('Assessment of Keep this assessment');
-  expect(native.state.tasks.find(task => task.id === version.id)!.assessments).toEqual([version]);
+  expect(native.assessments.values(version.id)).toEqual([version]);
 });
 
 test('latest assessment selection follows saved logical order after the clock moves backwards', async ({ page, native }) => {
   await page.goto('/');
   await add(page, 'Clock-safe history');
   await run(page);
-  const original = native.state.tasks.find(task => task.title === 'Clock-safe history')!.assessments![0]!;
+  const original = native.assessments.values(native.state.tasks.find(task => task.title === 'Clock-safe history')!.id)[0]!;
   native.now = '2026-09-11T16:00:00.000Z';
   await page.clock.setFixedTime(new Date(native.now));
   await run(page);
-  const versions = native.state.tasks.find(task => task.id === original.id)!.assessments!;
+  const versions = [...native.assessments.values(original.id)];
   expect(versions).toHaveLength(2);
   expect(Date.parse(versions[1]!.evaluatedAt)).toBeLessThan(Date.parse(versions[0]!.evaluatedAt));
   expect(versions[1]!.sequence).toBeGreaterThan(versions[0]!.sequence!);
@@ -98,9 +100,67 @@ test('latest assessment selection follows saved logical order after the clock mo
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   await run(page);
   await expect(history.getByLabel('Assessment version')).toHaveValue(versions[1]!.resultId);
-  expect(native.state.tasks.find(task => task.id === original.id)!.assessments).toEqual(versions);
+  expect(native.assessments.values(original.id)).toEqual(versions);
   await history.getByLabel('Assessment version').selectOption(original.resultId);
   await expect(history).toContainText('Historical result.');
+});
+
+test('paged history remains readable and can export and import without embedding results in task saves', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Paged history');
+  const id = native.state.tasks[0]!.id;
+  const first = (await assessmentBatch(rankInput(native.state), native.now)).assessments[0]!;
+  native.assessments.append('default', Array.from({ length: 45 }, () => ({ ...first, resultId: crypto.randomUUID() })), native.state);
+  await page.reload();
+  await page.locator('.task-row').filter({ hasText: 'Paged history' }).click();
+  const history = page.getByRole('region', { name: 'Assessment', exact: true });
+  await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(20);
+  await page.getByRole('button', { name: 'Older assessments', exact: true }).click();
+  await expect(history).toContainText('Historical result.');
+  await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(20);
+  await page.getByRole('button', { name: 'Older assessments', exact: true }).click();
+  await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(5);
+  await page.getByRole('button', { name: 'Latest assessments', exact: true }).click();
+  await expect(history).toContainText('Latest saved result.');
+  await page.getByLabel('Task notes', { exact: true }).fill('Notes after long history');
+  await persisted(page);
+  expect(native.state.tasks[0]!.assessments).toBeUndefined();
+  expect(native.assessments.values(id)).toHaveLength(45);
+  const exported = JSON.stringify({ ...native.saved, assessments: native.assessments.entries });
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Backups & recovery' }).click();
+  await page.getByLabel('Import a workspace JSON export').setInputFiles({
+    name: 'history.json', mimeType: 'application/json', buffer: Buffer.from(exported),
+  });
+  await page.getByLabel('I exported pending edits and assessments.', { exact: false }).check();
+  await page.getByRole('button', { name: 'Import workspace', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(native.assessments.values(id)).toHaveLength(45);
+  expect(native.state.tasks[0]!.notes).toBe('Notes after long history');
+});
+
+test('failed history append leaves editable tasks and visible retryable exportable results', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Keep paid result');
+  native.assessments.fail = true;
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  await expect(page.getByRole('alert').first()).toContainText('Assessment history is not saved');
+  await page.locator('.task-row').filter({ hasText: 'Keep paid result' }).click();
+  await expect(page.getByRole('region', { name: 'Unsaved assessments' })).toContainText('Task edits save separately');
+  await page.getByLabel('Task notes', { exact: true }).fill('Preserved while history fails');
+  await page.getByRole('button', { name: 'Mark done', exact: true }).click();
+  await expect.poll(() => native.state.tasks.find(task => task.title === 'Keep paid result')!.notes).toBe('Preserved while history fails');
+  await expect(page.getByRole('status').filter({ hasText: 'Task edits saved; assessments pending' })).toBeVisible();
+  await page.getByRole('button', { name: 'Export pending results', exact: true }).click();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export pending assessments', exact: true }).click();
+  expect((await download).suggestedFilename()).toBe('github-projects-pending-assessments.json');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  native.assessments.fail = false;
+  await page.getByRole('button', { name: 'Retry assessment save', exact: true }).first().click();
+  await persisted(page);
+  expect(native.assessments.entries.length).toBeGreaterThan(0);
 });
 test('saved team searches survive relaunch and collect through configured sources', async ({ page, native }) => {
   const query = 'is:pr is:open team-review-requested:sample/provider-maintainers';

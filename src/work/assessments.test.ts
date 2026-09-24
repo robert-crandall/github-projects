@@ -4,12 +4,13 @@ import { join, resolve } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { assessmentBatch } from '../../tests/assessment-fixture.ts';
+import { AssessmentStoreFixture } from '../../tests/assessment-store-fixture.ts';
 import { assessmentScope, WorkAssessmentCache, WorkRanker, type RankingModels } from '../../service/src/work-ranking.ts';
 import { identityDigest } from '../../service/src/work-assessment.ts';
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { stateSchema } from '../types.ts';
-import { assessmentFreshness, attachAssessments, mergeAssessments } from './assessments.ts';
+import { assessmentFreshness, mergeAssessments } from './assessments.ts';
 import { completeWorkTask, consolidateWorkTasks, rankInput, rankTask, reconcileWork, restoreWorkTask } from './engine.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
 import { AssessmentHistory } from './AssessmentHistory.tsx';
@@ -19,7 +20,8 @@ async function manual() {
   const state = emptyWorkspace(at, 'UTC');
   state.tasks = [{ id: 'manual', title: 'Write the proposal', notes: 'Owner notes', createdAt: at, status: 'open' }];
   const { assessments } = await assessmentBatch(rankInput(state), at);
-  return attachAssessments(state, 'default', assessments);
+  state.tasks[0]!.assessments = assessments.map((value, index) => ({ ...value, sequence: index + 1 }));
+  return state;
 }
 
 test('task history survives Done, restore, profile switches and snapshot round trips without source metadata', async () => {
@@ -89,25 +91,29 @@ test('service backwards-clock reassessment persists as latest and remains latest
     };
     const signal = new AbortController().signal;
     const first = await ranker.assess(input, scope, models, signal);
-    let saved = attachAssessments(state, 'default', first.assessments);
+    const history = new AssessmentStoreFixture();
+    history.append('default', first.assessments, state);
     clock -= 3600000;
     const second = await ranker.assess(input, scope, models, signal);
     expect(modelCalls).toBe(2);
     expect(Date.parse(second.assessments[0]!.evaluatedAt)).toBeLessThan(Date.parse(first.assessments[0]!.evaluatedAt));
-    saved = attachAssessments(saved, 'default', second.assessments);
-    saved = attachAssessments(saved, 'default', (await ranker.assess(input, scope, models, signal)).assessments);
+    history.append('default', second.assessments, state);
+    history.append('default', (await ranker.assess(input, scope, models, signal)).assessments, state);
     expect(modelCalls).toBe(2);
     const path = join(directory, 'workspace.json');
-    await writeFile(path, JSON.stringify(saved));
-    const restored = restoreDesktop(JSON.parse(await readFile(path, 'utf8')), new Date(clock).toISOString());
-    const versions = restored.tasks[0]!.assessments!;
+    await writeFile(path, JSON.stringify({ state, assessments: history.entries }));
+    const exported = JSON.parse(await readFile(path, 'utf8'));
+    const restored = restoreDesktop(exported.state, new Date(clock).toISOString());
+    const reloadedHistory = new AssessmentStoreFixture();
+    reloadedHistory.entries = exported.assessments;
+    const versions = reloadedHistory.read('default', 'original', null, restored).assessments.reverse();
     expect(versions.map(value => value.sequence)).toEqual([1, 2]);
     expect(versions.at(-1)!.resultId).toBe(second.assessments[0]!.resultId);
     const render = (task: typeof restored.tasks[number]) => renderToStaticMarkup(createElement(AssessmentHistory, {
       task, profileId: 'default', settings: restored.work.settings,
     }));
-    expect(render(restored.tasks[0]!)).toContain('Judgment 2');
-    expect(render(restored.tasks[0]!)).not.toContain('Judgment 1');
+    expect(render({ ...restored.tasks[0]!, assessments: versions })).toContain('Judgment 2');
+    expect(render({ ...restored.tasks[0]!, assessments: versions })).not.toContain('Judgment 1');
     const merged = mergeAssessments([versions[1]!], [versions[0]!, versions[1]!]);
     expect(merged).toEqual(versions);
     expect(render({ ...restored.tasks[0]!, assessments: merged })).toContain('Judgment 2');
@@ -127,7 +133,9 @@ test('source reconciliation and duplicate consolidation retain both histories an
   };
   let current = reconcileWork(state, batch, at);
   current.tasks.push({ ...structuredClone(current.tasks[0]!), id: 'duplicate', title: 'Second request' });
-  current = attachAssessments(current, 'default', (await assessmentBatch(rankInput(current))).assessments);
+  const history = new AssessmentStoreFixture();
+  const values = history.append('default', (await assessmentBatch(rankInput(current))).assessments, current);
+  current.tasks = current.tasks.map(task => ({ ...task, assessments: values.filter(value => value.id === task.id) }));
   const versions = current.tasks.flatMap(task => task.assessments!);
   current.tasks.reverse();
   const consolidated = consolidateWorkTasks(current);

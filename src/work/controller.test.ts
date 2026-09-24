@@ -12,6 +12,8 @@ import { rankedTasks, reconcileWork } from './engine.ts';
 import { assessmentBatch } from '../../tests/assessment-fixture.ts';
 import { rankInput } from './engine.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
+import { AssessmentStoreFixture } from '../../tests/assessment-store-fixture.ts';
+import { workAssessOutputSchema } from '../../service/src/work-assessment.ts';
 
 const before = '2026-09-15T10:00:00.000Z';
 const previousCompleted = '2026-09-15T11:00:00.000Z';
@@ -47,11 +49,24 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
   let saveHook: ((state: AppState) => Promise<void>) | undefined;
   const log: string[] = [];
   const requests: Request[] = [];
+  const history = new AssessmentStoreFixture();
   const platform = createNativePlatform(async (command, args) => {
     log.push(command);
     if (command === 'workspace_read') return structuredClone(saved);
     if (command === 'clock_now') return { now: before, timeZone: 'UTC', error: null };
     if (command === 'workspace_create_backup') return { id: crypto.randomUUID(), createdAt: before };
+    if (command === 'assessment_append') return structuredClone(history.append(String(args?.profileId),
+      workAssessOutputSchema.parse({ assessments: args?.assessments }).assessments, saved.snapshot!.workspace.state as unknown as AppState));
+    if (command === 'assessment_read') return structuredClone(history.read(String(args?.profileId), String(args?.taskId),
+      args?.before as number | null, saved.snapshot!.workspace.state as unknown as AppState));
+    if (command === 'workspace_export_json') return JSON.stringify({ ...saved, assessments: history.entries });
+    if (command === 'workspace_import_json') {
+      const document = JSON.parse(String(args?.json));
+      expect(args?.expectedRevision).toBe(saved.revision);
+      saved = { revision: crypto.randomUUID(), savedAt: before, snapshot: snapshotSchema.parse(document.snapshot) };
+      history.entries = document.assessments ?? [];
+      return structuredClone(saved);
+    }
     if (command === 'workspace_save') {
       const snapshot = snapshotSchema.parse(args?.snapshot);
       const next = snapshot.workspace.state as unknown as AppState;
@@ -86,7 +101,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
   });
   const queue = new WorkQueue(workspace, service);
   return {
-    queue, workspace, platform, service, requests, log,
+    queue, workspace, platform, service, requests, log, history,
     fail: (predicate: (state: AppState) => boolean) => { failSave = predicate; },
     onSave: (hook?: (state: AppState) => Promise<void>) => { saveHook = hook; },
     saved: () => saved.snapshot!.workspace.state as unknown as AppState,
@@ -101,23 +116,24 @@ describe('durable local work', () => {
     let fail = true;
     const mock = await fixture(state, request => {
       if (request.op === 'work.rank') {
-        expect(mock.saved().tasks[0]!.assessments).toHaveLength(1);
-        expect(request.input.assessmentIds).toEqual([mock.saved().tasks[0]!.assessments![0]!.resultId]);
+        expect(mock.history.values('manual')).toHaveLength(1);
+        expect(request.input.assessmentIds).toEqual([mock.history.values('manual')[0]!.resultId]);
         if (fail) throw new Error('Ordering unavailable');
       }
     });
     await mock.queue.run();
-    const version = mock.saved().tasks[0]!.assessments![0]!;
+    const version = mock.history.values('manual')[0]!;
     expect(version).toMatchObject({ id: 'manual', profileId: 'default', model: '', assessmentVersion: 'work-assessment-v2' });
     expect(mock.saved().work.ranking).toEqual(state.work.ranking);
     expect(mock.queue.getSnapshot().error).toContain('Ordering unavailable');
     const reloaded = new DesktopWorkspace(mock.platform);
     await reloaded.load();
-    expect(reloaded.state.tasks[0]!.assessments).toEqual([version]);
+    expect((await reloaded.platform.assessmentRead('default', 'manual')).assessments).toEqual([version]);
     fail = false;
     await new WorkQueue(reloaded, mock.service).run();
-    expect(mock.saved().tasks[0]!.assessments).toEqual([version]);
-    expect(JSON.parse(reloaded.pendingJson()).workspace.state.tasks[0].assessments).toEqual([version]);
+    expect(mock.history.values('manual')).toEqual([version]);
+    expect(JSON.parse(await reloaded.fullPendingJson()).assessments).toEqual([version]);
+    expect(mock.saved().tasks[0]!.assessments).toBeUndefined();
   });
 
   test('each subset persists before the next assessment and survives a later batch failure', async () => {
@@ -128,41 +144,49 @@ describe('durable local work', () => {
     let calls = 0;
     const mock = await fixture(state, request => {
       if (request.op === 'work.assess' && ++calls === 2) {
-        expect(mock.saved().tasks.filter(task => task.assessments?.length)).toHaveLength(20);
+        expect(mock.history.entries).toHaveLength(20);
         throw new Error('Second batch failed');
       }
     });
     await mock.queue.run();
     expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
-    const firstVersions = mock.saved().tasks.flatMap(task => task.assessments ?? []);
+    const firstVersions = [...mock.history.entries];
     expect(firstVersions).toHaveLength(20);
     const reloaded = new DesktopWorkspace(mock.platform);
     await reloaded.load();
     await new WorkQueue(reloaded, mock.service).run();
-    const versions = mock.saved().tasks.flatMap(task => task.assessments ?? []);
+    const versions = mock.history.entries;
     expect(versions).toHaveLength(21);
     for (const version of firstVersions) expect(versions).toContainEqual(version);
   });
 
-  test('failed assessment snapshot keeps visible pending history for export and explicit retry, without ordering', async () => {
+  test('failed history append preserves pending results without blocking ordinary task saves', async () => {
     const mock = await fixture();
     mock.queue.capture('Assessment pending on disk');
     await mock.workspace.flush();
-    mock.fail(state => !!state.tasks[0]?.assessments?.length);
+    mock.history.fail = true;
     await mock.queue.run();
-    expect(mock.workspace.getSnapshot().persistence).toMatchObject({ pending: true, error: 'Disk unavailable' });
+    expect(mock.workspace.getSnapshot().persistence).toMatchObject({ pending: false, error: '' });
+    expect(mock.workspace.getSnapshot().assessmentError).toContain('History storage unavailable');
     expect(mock.saved().tasks[0]!.assessments).toBeUndefined();
-    expect(mock.workspace.state.tasks[0]!.assessments).toHaveLength(1);
-    expect(JSON.parse(mock.workspace.pendingJson()).workspace.state.tasks[0].assessments).toHaveLength(1);
+    expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(1);
+    expect(JSON.parse(await mock.workspace.fullPendingJson()).assessments).toHaveLength(1);
     expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
-    mock.fail(() => false);
-    await mock.workspace.retryStorage();
+    const id = mock.workspace.state.tasks[0]!.id;
+    mock.queue.edit(id, 'Edited despite failed history', 'New notes');
+    mock.queue.complete(id);
+    mock.queue.capture('New capture');
+    await mock.workspace.flush();
+    expect(mock.saved().tasks[0]).toMatchObject({ notes: 'New notes', status: 'done' });
+    expect(mock.saved().tasks).toHaveLength(2);
+    mock.history.fail = false;
+    await mock.workspace.retryAssessments();
     const reloaded = new DesktopWorkspace(mock.platform);
     await reloaded.load();
-    expect(reloaded.state.tasks[0]!.assessments).toHaveLength(1);
+    expect((await reloaded.platform.assessmentRead('default', id)).assessments).toHaveLength(1);
   });
 
-  test('history exceeding the actual 8 MiB snapshot limit remains pending and exportable without pruning', async () => {
+  test('history above 8 MiB is paged and leaves snapshots and ordinary saves small', async () => {
     const state = initial();
     state.tasks = [{ id: 'full', title: 'Long-lived task', notes: '', status: 'open', createdAt: before }];
     const first = (await assessmentBatch(rankInput(state))).assessments[0]!;
@@ -174,14 +198,47 @@ describe('durable local work', () => {
     const count = Math.ceil(8 * 1024 * 1024 / new TextEncoder().encode(JSON.stringify(large)).length) + 2;
     const history = Array.from({ length: count }, () => ({ ...large, resultId: crypto.randomUUID() }));
     const mock = await fixture(state);
-    mock.workspace.update(current => ({ ...current, tasks: [{ ...current.tasks[0]!, assessments: history }] }));
-    await expect(mock.workspace.flush()).rejects.toThrow('8 MiB');
-    expect(mock.workspace.state.tasks[0]!.assessments).toHaveLength(count);
+    for (let offset = 0; offset < history.length; offset += 20) await mock.workspace.saveAssessments('default', history.slice(offset, offset + 20));
+    mock.queue.edit('full', 'Still editable', 'Normal notes');
+    mock.queue.complete('full');
+    mock.queue.capture('Normal capture');
+    await mock.workspace.flush();
+    expect(mock.history.entries).toHaveLength(count);
     expect(mock.saved().tasks[0]!.assessments).toBeUndefined();
-    const pending = mock.workspace.pendingJson();
+    expect(new TextEncoder().encode(mock.workspace.pendingJson()).length).toBeLessThan(10000);
+    expect((await mock.platform.assessmentRead('default', 'full')).assessments).toHaveLength(20);
+    const pending = await mock.workspace.fullPendingJson();
     expect(new TextEncoder().encode(pending).length).toBeGreaterThan(8 * 1024 * 1024);
-    expect(JSON.parse(pending).workspace.state.tasks[0].assessments).toHaveLength(count);
+    expect(JSON.parse(pending).assessments).toHaveLength(count);
     expect(mock.requests).toEqual([]);
+  });
+
+  test('results arriving after workspace import stay exportable but cannot attach to replacement tasks with the same IDs', async () => {
+    const state = initial();
+    state.tasks = [{ id: 'same-id', title: 'Original task', notes: '', status: 'open', createdAt: before }];
+    const entered = deferred<Extract<Request, { op: 'work.assess' }>>();
+    const released = deferred<unknown>();
+    const mock = await fixture(state, request => {
+      if (request.op === 'work.assess') { entered.resolve(request); return released.promise; }
+    });
+    const running = mock.queue.run();
+    const request = await entered.promise;
+    const replacement = structuredClone(state);
+    replacement.tasks[0]!.title = 'Different restored task';
+    replacement.tasks[0]!.notes = 'Different notes';
+    await mock.workspace.importJson(JSON.stringify({
+      snapshot: { formatVersion: 1, workspace: { version: 1, state: replacement, scroll: {} }, reminders: [] },
+      assessments: [],
+    }));
+    released.resolve(await assessmentBatch(request.input));
+    await running;
+    expect(mock.history.entries).toEqual([]);
+    expect(mock.saved().tasks[0]).toMatchObject({ title: 'Different restored task', notes: 'Different notes' });
+    expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(1);
+    expect(mock.workspace.getSnapshot().assessmentError).toContain('before recovery');
+    expect(JSON.parse(mock.workspace.pendingAssessmentsJson()).assessments).toHaveLength(1);
+    await expect(mock.workspace.fullPendingJson()).rejects.toThrow('avoid mixing workspaces');
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
   });
 
   test('in-flight assessments preserve edits and Done as history, ordering only unchanged active tasks', async () => {
@@ -201,7 +258,7 @@ describe('durable local work', () => {
     await running;
     expect(mock.saved().tasks.find(task => task.id === 'edited')).toMatchObject({ title: 'New owner title', notes: 'New owner notes' });
     expect(mock.saved().tasks.find(task => task.id === 'done')!.status).toBe('done');
-    expect(mock.saved().tasks.flatMap(task => task.assessments ?? [])).toHaveLength(3);
+    expect(mock.history.entries).toHaveLength(3);
     const rank = mock.requests.find(request => request.op === 'work.rank');
     if (rank?.op !== 'work.rank') throw new Error('No order request');
     expect(rank.input.tasks.map(task => task.id)).toEqual(['unchanged']);
@@ -228,7 +285,7 @@ describe('durable local work', () => {
     await running;
     expect(mock.saved().tasks).toEqual([]);
     expect(mock.saved().work).toEqual(otherWork);
-    expect(mock.saved().inactiveWorkProfiles[0]!.tasks[0]!.assessments).toHaveLength(1);
+    expect(mock.history.values('original')).toHaveLength(1);
     expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
     expect(mock.queue.getSnapshot().error).toContain('profile changed');
   });

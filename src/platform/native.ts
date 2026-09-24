@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { assessmentAppendSchema, assessmentPageSchema, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { z } from 'zod';
 import { conversationCacheSchema, conversationPageSchema, referenceSchema, type ConversationPage, type Reference } from '../../service/src/schema.ts';
 
@@ -74,6 +75,7 @@ export type NativeCommand =
   | 'workspace_read' | 'workspace_save' | 'workspace_storage_status'
   | 'workspace_create_backup' | 'workspace_list_backups' | 'workspace_read_backup'
   | 'workspace_export_json' | 'workspace_export_raw' | 'workspace_recover'
+  | 'workspace_import_json' | 'assessment_append' | 'assessment_read'
   | 'launch_github' | 'launch_copilot' | 'launch_web_url' | 'clock_now'
   | 'conversation_read' | 'conversation_merge' | 'conversation_reset';
 export type NativeTransport = (command: NativeCommand, args?: Record<string, unknown>) => Promise<unknown>;
@@ -129,6 +131,19 @@ export function createNativePlatform(transport: NativeTransport = desktopTranspo
   }
   return {
     workspaceRead: () => call('workspace_read', workspaceReadSchema),
+    assessmentAppend: (profileId: string, assessments: SavedAssessment[]) =>
+      call('assessment_append', assessmentAppendSchema, {
+        profileId: parse(identifier, profileId), assessments: parse(workAssessOutputSchema, { assessments }).assessments,
+      }),
+    assessmentRead: (profileId: string, taskId: string, before: number | null = null) =>
+      call('assessment_read', assessmentPageSchema, {
+        profileId: parse(identifier, profileId), taskId: parse(z.string().min(1).max(500), taskId),
+        before: parse(z.number().int().positive().safe().nullable(), before),
+      }),
+    importJson: (expectedRevision: string, json: string) => {
+      if (new TextEncoder().encode(json).length > 64 * 1024 * 1024) throw new Error('JSON import exceeds 64 MiB. Restore a database backup instead.');
+      return call('workspace_import_json', workspaceReadSchema, { expectedRevision: parse(revision, expectedRevision), json });
+    },
     conversationRead: (reference: Reference) => call('conversation_read', conversationCacheSchema.nullable(), { reference: parse(referenceSchema, reference) }),
     conversationMerge: (page: ConversationPage) => {
       const valid = parse(conversationPageSchema, page);

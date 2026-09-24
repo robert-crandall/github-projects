@@ -96,6 +96,7 @@ export const taskSchema = z.object({
   createdAt: time, completedAt: time.optional(), history: historySchema.optional(), threadId: z.string().optional(),
   work: workMetadataSchema.optional(),
   assessments: assessmentHistorySchema.optional(),
+  assessmentTaskIds: z.array(z.string().min(1).max(500)).optional(),
 });
 export const noteSchema = z.object({
   id: z.string(), threadId: z.string(), text: z.string(),

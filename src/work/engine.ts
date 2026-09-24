@@ -111,6 +111,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
   const additionalNotes = second.title === first.title ? second.notes : [second.title, second.notes].filter(Boolean).join('\n');
   return {
     ...first, status, completedAt,
+    assessmentTaskIds: [...new Set([first.id, second.id, ...first.assessmentTaskIds ?? [], ...second.assessmentTaskIds ?? []])],
     ...((first.assessments || second.assessments)
       ? { assessments: mergeAssessments(first.assessments ?? [], second.assessments ?? []) } : {}),
     createdAt: Date.parse(first.createdAt) <= Date.parse(second.createdAt) ? first.createdAt : second.createdAt,
