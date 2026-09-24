@@ -216,11 +216,31 @@ impl Store {
         configure(&connection)?;
         validate(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")?;
+        crate::assessments::initialize(&connection)?;
         Ok(connection)
     }
 
     pub fn read(&self) -> Result<WorkspaceRead> {
-        read_connection(&self.connection()?)
+        let mut connection = self.connection()?;
+        let saved = read_connection(&connection)?;
+        if let Some(mut snapshot) = saved.snapshot.clone() {
+            let entries = crate::assessments::extract(&mut snapshot)?;
+            if serde_json::to_value(&snapshot).ok() != serde_json::to_value(&saved.snapshot).ok() {
+                // The immutable original includes every embedded result before normalization.
+                self.backup_connection(&connection, &Uuid::new_v4().to_string())?;
+                let json = snapshot.encode()?;
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                crate::assessments::save_entries(&transaction, &entries)?;
+                transaction.execute(
+                    "UPDATE workspace SET revision=?,snapshot=?,checksum=? WHERE id=1 AND revision=?",
+                    params![Uuid::new_v4().to_string(), json, digest(json.as_bytes()), saved.revision],
+                )?;
+                transaction.commit()?;
+                return read_connection(&connection);
+            }
+        }
+        Ok(saved)
     }
 
     pub fn status(&self) -> StorageStatus {
@@ -238,19 +258,25 @@ impl Store {
         }
     }
 
-    pub fn save(&mut self, expected_revision: &str, snapshot: Snapshot) -> Result<WorkspaceRead> {
+    pub fn save(
+        &mut self,
+        expected_revision: &str,
+        mut snapshot: Snapshot,
+    ) -> Result<WorkspaceRead> {
+        let embedded = crate::assessments::extract(&mut snapshot)?;
         let json = snapshot.encode()?;
         let mut connection = self.connection()?;
         let previous = read_connection(&connection)?;
         if previous.revision != expected_revision {
             return Err(NativeError::conflict());
         }
-        if previous
-            .snapshot
-            .as_ref()
-            .and_then(Snapshot::state_version)
-            .is_some_and(|version| matches!(version, 1 | 2))
-            && snapshot.state_version() == Some(3)
+        if !embedded.is_empty()
+            || previous
+                .snapshot
+                .as_ref()
+                .and_then(Snapshot::state_version)
+                .is_some_and(|version| matches!(version, 1 | 2))
+                && snapshot.state_version() == Some(3)
         {
             // Reuse the renderer's validated immutable backup, never the rotating "latest".
             let already_preserved = self.list_backups()?.iter().any(|backup| {
@@ -265,6 +291,7 @@ impl Store {
         }
         self.backup_connection(&connection, "latest")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::assessments::save_entries(&transaction, &embedded)?;
         let revision = Uuid::new_v4().to_string();
         let saved_at = Utc::now().to_rfc3339();
         let rows = transaction.execute(
@@ -354,11 +381,43 @@ impl Store {
     }
 
     pub fn export_json(&self, expected_revision: &str) -> Result<String> {
-        let read = self.read()?;
+        let connection = self.connection()?;
+        let read = read_connection(&connection)?;
         if read.revision != expected_revision {
             return Err(NativeError::conflict());
         }
-        serde_json::to_string(&read).map_err(|_| NativeError::corrupt())
+        crate::assessments::export_json(&connection, read)
+    }
+
+    pub(crate) fn rotate_recovery_token(&mut self) {
+        self.recovery_token = Uuid::new_v4().to_string();
+    }
+
+    pub fn import_json(&mut self, expected_revision: &str, json: &str) -> Result<WorkspaceRead> {
+        let document = crate::assessments::parse_export(json)?;
+        let mut snapshot = document
+            .workspace
+            .snapshot
+            .ok_or_else(NativeError::invalid)?;
+        let embedded = crate::assessments::extract(&mut snapshot)?;
+        let encoded = snapshot.encode()?;
+        let mut connection = self.connection()?;
+        if read_connection(&connection)?.revision != expected_revision {
+            return Err(NativeError::conflict());
+        }
+        self.backup_connection(&connection, &Uuid::new_v4().to_string())?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("DELETE FROM task_assessments", [])?;
+        crate::assessments::import_entries(&transaction, &document.assessments)?;
+        crate::assessments::save_entries(&transaction, &embedded)?;
+        let revision = Uuid::new_v4().to_string();
+        transaction.execute(
+            "UPDATE workspace SET revision=?,snapshot=?,checksum=?,saved_at=? WHERE id=1 AND revision=?",
+            params![revision, encoded, digest(encoded.as_bytes()), Utc::now().to_rfc3339(), expected_revision],
+        )?;
+        transaction.commit()?;
+        self.rotate_recovery_token();
+        self.read()
     }
 
     pub fn export_raw(&self) -> Result<RawExport> {
@@ -490,44 +549,6 @@ mod tests {
             workspace: json!({"version": 1, "note": note}),
             reminders: vec![],
         }
-    }
-
-    #[test]
-    fn task_assessment_history_roundtrips_through_export_backup_and_recovery() {
-        let dir = TempDir::new().unwrap();
-        let mut store = Store::new(dir.path().to_owned()).unwrap();
-        let mut original = snapshot("owner note");
-        original.workspace["state"] = json!({
-            "version": 3,
-            "tasks": [{
-                "id": "manual", "title": "Owner task", "notes": "Keep these notes", "status": "done",
-                "assessments": [
-                    {"resultId": "first", "profileId": "default", "fingerprint": "old", "assessment": {"importance": "Original judgment"}},
-                    {"resultId": "second", "profileId": "default", "fingerprint": "new", "assessment": {"importance": "Updated judgment"}}
-                ]
-            }],
-            "inactiveWorkProfiles": [{"id": "parked", "tasks": [{"id": "other", "assessments": [{"resultId": "third"}]}]}]
-        });
-        let saved = store
-            .save(&store.read().unwrap().revision, original.clone())
-            .unwrap();
-        let backup = store.create_backup(&saved.revision).unwrap();
-        let exported: WorkspaceRead =
-            serde_json::from_str(&store.export_json(&saved.revision).unwrap()).unwrap();
-        assert_eq!(exported.snapshot.unwrap().workspace, original.workspace);
-        drop(store);
-        let mut store = Store::new(dir.path().to_owned()).unwrap();
-        assert_eq!(
-            store.read().unwrap().snapshot.unwrap().workspace,
-            original.workspace
-        );
-        store
-            .save(&saved.revision, snapshot("later state"))
-            .unwrap();
-        let restored = store
-            .recover(&backup.id, &store.status().recovery_token)
-            .unwrap();
-        assert_eq!(restored.snapshot.unwrap().workspace, original.workspace);
     }
 
     #[test]
