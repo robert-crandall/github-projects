@@ -4,6 +4,8 @@ import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSet
 import type { WorkQueue } from './controller.ts';
 import { Appearance } from '../themes/Appearance.tsx';
 
+const slackReadTools = ['slack_search_public_and_private', 'slack_read_thread'] as const;
+
 const actions = [
   ['review', 'Review a PR'], ['fix', 'Fix a PR'], ['reply', 'Reply'],
   ['merge', 'Merge a PR'], ['implement', 'Work on an issue'],
@@ -73,7 +75,7 @@ export function Settings({ settings, profileName, queue, close, recover, referen
         <button type="button" className="secondary" disabled={draft.streams.length >= 30} onClick={() => change({
           ...draft, streams: [...draft.streams, {
             id: crypto.randomUUID(), name: 'New source', enabled: false, kind: 'slack',
-            query: '', action: 'follow-up', server: '', tools: [],
+            query: '', action: 'follow-up', server: '', tools: [...slackReadTools],
           }],
         })}><Plus size={15} />Add source</button></div>
         <p>Keep backlog searches for assigned work and projects. Notifications find requests those searches miss, including mentions.</p>
@@ -91,6 +93,8 @@ export function Settings({ settings, profileName, queue, close, recover, referen
             onChange={event => streamChange(stream.id, { name: event.target.value })} /></label>
             <label>Source type<select value={stream.kind} onChange={event => streamChange(stream.id, event.target.value === 'github-notifications'
               ? { kind: 'github-notifications', query: notificationWorkstream().query, action: 'follow-up', server: '', tools: [] }
+              : event.target.value === 'slack' && !stream.tools.some(tool => tool.trim())
+                ? { kind: 'slack', tools: [...slackReadTools] }
               : { kind: event.target.value as Workstream['kind'] })}>
               <option value="github">GitHub search</option><option value="github-notifications">GitHub notifications</option>
               <option value="slack">Slack through MCP</option><option value="mcp">MCP search</option>
@@ -113,7 +117,7 @@ export function Settings({ settings, profileName, queue, close, recover, referen
           {!isGitHubStream(stream) && <div className="task-field-pair"><label>MCP server name<input value={stream.server}
             placeholder="slack" onChange={event => streamChange(stream.id, { server: event.target.value })} /></label>
             <label>Allowed read tools, comma-separated<input value={stream.tools.join(',')}
-              placeholder="search_messages, get_thread"
+              placeholder={stream.kind === 'slack' ? slackReadTools.join(', ') : 'search_messages, get_thread'}
               onChange={event => streamChange(stream.id, { tools: event.target.value.split(',') })} /></label></div>}
         </fieldset>)}</div>
         <p className="field-help">A source result is evidence, not a new task ID. Matching the same PR in two searches will not duplicate its review.</p>
