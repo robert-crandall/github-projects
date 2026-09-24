@@ -4,13 +4,13 @@ A local-first macOS todo app. GitHub searches and notifications, Slack, manual c
 
 The desktop keeps the native Mac shell, CLI authentication and revisioned SQLite storage. Existing tasks, completion and thread notes are retained.
 
-**Sources and priorities → Appearance** offers all 57 themes from the Copilot App catalog, including GitHub and Fox, with Light, Dark and System modes. Changes apply immediately and persist across relaunch. GitHub dark remains the default. The reference workspace and browser prototype expose the same controls through **Appearance** in the sidebar.
+**Settings → Appearance** offers all 57 themes from the Copilot App catalog, including GitHub and Fox, with Light, Dark and System modes. Changes apply immediately and persist across relaunch. GitHub dark remains the default.
 
-Appearance stays separate from tasks and their backups. Desktop preferences use a local `appearance.json` file; the prototype uses browser storage. See [theme support](docs/theme.md) for palette sources and catalog updates.
+Appearance stays separate from tasks and their backups. Desktop preferences use a local `appearance.json` file. See [theme support](docs/theme.md) for palette sources and catalog updates.
 
 ## Work top to bottom
 
-1. Open **Sources and priorities**. Configure GitHub queries and explicitly allowed MCP read tools. Paste priority instructions and roadmap context.
+1. Open **Settings**. Configure GitHub queries and explicitly allowed MCP read tools. Paste priority instructions and roadmap context.
 2. Choose **Run now**. The app collects requests, reconciles task identity and completion, and asks Copilot to order all actionable tasks with reasons.
 3. Work down the list. **Done** is local; it does not submit a review, close an issue or acknowledge a notification.
 4. Optionally enable a cadence. Runs continue while the app is running, including hidden in the menu bar. An overdue schedule catches up once after sleep or relaunch; quitting stops it.
@@ -19,7 +19,7 @@ Manual tasks save offline immediately and join the ranking on the next run. A fa
 
 ### Work profiles
 
-Use **Work profile** above the task list to switch between named setups, such as regular work and on-call work. Your existing setup becomes **Default**, without changing its tasks or settings. **Add profile** creates and selects an empty task list, then opens its settings. Optionally copy the current profile's saved instructions, sources and model; automatic runs start off. Rename the selected profile in **Sources and priorities**.
+Use **Work profile** above the task list to switch between named setups, such as regular work and on-call work. Your existing setup becomes **Default**, without changing its tasks or settings. **Add profile** creates and selects an empty task list, then opens its settings. Optionally copy the current profile's saved instructions, sources and model; automatic runs start off. Rename the selected profile in **Settings**.
 
 Each profile keeps its own instructions, sources, model, schedule, tasks, notes, Done history, ranking and notification cursor. The same source can appear independently in different profiles; completing it in one does not complete it in another. Only the selected profile runs, including scheduled runs. Switching alone does not collect or rank; **Run now** or the next due scheduled tick does. Switching waits until a run or unsubscribe finishes.
 
@@ -45,7 +45,7 @@ Done records handled evidence and a completion boundary. A repeated search, an o
 
 ### GitHub notifications
 
-In **Sources and priorities**, choose **Add GitHub notifications**, then **Save settings**. The source joins the same manual or scheduled run as saved searches. Use it instead of broad mentions searches; keep assigned-work, review-request and project backlog searches separately. Adding notifications does not rewrite or remove saved queries.
+In **Settings**, choose **Add GitHub notifications**, then **Save settings**. The source joins the same manual or scheduled run as saved searches. Use it instead of broad mentions searches; keep assigned-work, review-request and project backlog searches separately. Adding notifications does not rewrite or remove saved queries.
 
 The first scan covers the last **30 days**. Later scans include both read and unread issue/PR notifications updated since the last successful run. Reading a notification elsewhere does not finish a task. Large backlogs advance oldest-first across runs, with the remaining history shown in the task list. The saved cursor advances only through successfully inspected history, never beyond the run's start, after collection, ranking and persistence succeed. Failures retain the previous boundary for retry.
 
@@ -63,11 +63,11 @@ Other apps can submit tasks through the packaged service's `--mcp` stdio entry. 
 
 See the [service contract](service/README.md) for source configuration, intake arguments, bounds and authentication. The app does not embed Slack credentials or silently reuse unrelated tools.
 
-### Saved reference material
+### One workspace
 
-**Sources and priorities → Open saved thread notes** opens the previous conversation workspace. Its notification controls and filtering rules remain available as reference tools, not the task discovery or ranking pipeline. The older browser prototype is also separate from the desktop task list.
+Ranked Tasks uses three panels: navigation, the ranked list and task details. Settings replaces Appearance in the sidebar and includes themes, sources, priorities and scheduling. On narrow windows, task details replace the list until closed.
 
-The legacy **Waiting on me** digest has been removed because its fixed queries duplicated configurable sources. Saved sources, including team-review searches, and previously captured tasks remain unchanged.
+The old Inbox, Filtered, Archive, Tasks and saved-reference views are retired. Waiting on me and filtering rules are removed, including their logic. Source queries control discovery. Saved thread notes remain private and editable beside matching tasks; backups retain all notes and conversations. Existing saved filtering rules and named inboxes are retired only after an original backup succeeds.
 
 ## Run the desktop
 
@@ -115,38 +115,6 @@ GitHub notifications require classic `notifications` or `repo` scope. Private so
 
 Use **Connections → Check connections** to check prerequisites. It does not fetch notifications. With scheduled runs disabled, startup, focus, navigation and reconnect do not call GitHub or the SDK. Enabled schedules explicitly opt into collection and ranking while the app is running.
 
-### Reference workspace controls
-
-1. Select a thread in **Inbox** to read its cached conversation and edit private notes. **Load conversation** explicitly fetches an uncached source. Selection never contacts GitHub or creates a task.
-2. **Capture** (Command/Ctrl+K) saves exact text directly into **Tasks**. Links and daily phrasing remain ordinary text.
-3. Edit task text or notes and check **Done**. GitHub activity never reopens completed tasks.
-4. **Refresh** loads a bounded batch while preserving current notes, selection, row order and task completion.
-5. **Archive thread** clears Inbox immediately and marks the notification done on GitHub after saving its intent. **Archive** keeps notes/history reachable. **Restore to Inbox** is local-only; **Unsubscribe on GitHub** remains a separate confirmed action.
-
-Archive works offline: the local move stays saved while an unconfirmed GitHub write remains visible for explicit retry. A failed local save prevents dispatch. No write replays on reconnect or relaunch. Source placeholders without a notification ID archive only here, with an explicit explanation. New source notification activity returns the same thread with its notes; stale responses, read/unread changes, sticky reasons and older history do not.
-
-Archive never closes a source or completes a Task. Unsubscribe does not archive locally; mentions and review requests can still notify. Restore cannot undo GitHub Done or unsubscribe. More than 200 pending evidence IDs require an explicit **Acknowledge remaining evidence** batch. Retries keep their original evidence and source timestamp; older intents without a timestamp require Refresh and confirmation of current evidence instead.
-
-GitHub marks a whole notification done, not individual messages. The app refuses a clearly stale acknowledgement before writing, but GitHub cannot atomically check and delete: activity arriving between those requests may also be marked done there. Newer evidence already received locally always survives.
-
-**Open on GitHub** and **Review in Copilot** / **Open in Copilot** remain visible on threads. Dispatch is not proof that a session exists or a review finished. Private notes never enter those links or external writes.
-
-The reader shows real issue/PR descriptions, comments, reviews and grouped inline replies, with author, source time and source links. Markdown renders without executing HTML or automatically fetching images/embeds. Long bodies are not clipped. **Pages, freshness and older history** exposes page timestamps, partial errors, **Load older** and explicit page reloads for older edits. Each missing range has an explicit action that loads one page, including gaps left when newest messages jump ahead. Comments, reviews and inline discussions track their pages independently; failed or partial pages retain a reload action.
-
-Refresh publishes notifications and the selected loaded conversation together. It updates the description and newest message pages, not every historical page. Cached older bodies may be stale; deleted messages can remain cached. Loading history never changes pending notification evidence or returns archived/terminal threads to Inbox.
-
-Normal refresh loads up to 50 recent threads and bounded recent timeline history. Reaching those built-in limits is not an error: the refresh timestamp advances, and a neutral note beside **Refresh** identifies the limited notification batch. Saved source history retains its timeline coverage details. Actual failures keep a compact summary above the workspace; **Refresh details** lists each distinct warning once. Saved notes and tasks remain available; use **Refresh** to retry failed reads.
-
-### Reference workspace: filtering threads
-
-Open **Filtering rules** to create named inboxes and saved rules. Match exact repository, PR/issue type, and/or literal title text; supplied criteria combine with AND, with case-insensitive repository/title matching. Preview matches before saving. The first enabled rule wins; use up/down to change order. Preview also explains when manual Archive or terminal state takes precedence.
-
-Route matches to a named inbox or choose **Keep out of Inbox**, which leaves them reachable in **Filtered** with notes/history. Disable/delete rules to remove their effect. Inbox renaming preserves its identity; deletion is blocked until all referencing rules are edited or deleted. Built-in/duplicate/blank names and invalid criteria produce errors. Limits are 50 named inboxes and 100 rules.
-
-Confirmed closed/merged sources and PRs currently in GitHub's merge queue stay in Filtered even when comments arrive. Queue membership uses GitHub's current GraphQL field, not an old queue event. Once open/out of queue, new activity resumes ordinary routing; old history does not. Missing/denied state checks fail open with a visible warning and retain their prior boundary for later reconciliation. The reader labels every saved observation with its check time; nothing polls.
-
-**Filtering is local only.** It never invokes manual Archive's GitHub Done operation, unsubscribes or completes Tasks. Manual Archive stays in Archive through rule edits. Restore clears Archive locally; current filters still apply. Rules, inboxes and terminal checkpoints survive relaunch through the existing SQLite save.
-
 ## Local storage and recovery
 
 The desktop starts empty after reading SQLite. It never opens browser storage, fixtures, or the previous app's database. Its identifier and data namespace are `io.robertcrandall.github-projects-workspace`:
@@ -157,9 +125,9 @@ The desktop starts empty after reading SQLite. It never opens browser storage, f
 
 SQLite saves the checksummed, revisioned workspace atomically. **Saved on this Mac** appears only after the newest queued changes persist. Conflicts and failed saves retain pending work rather than overwriting another revision. **Backups & recovery** provides pending-copy export, preservation of database files, and explicitly confirmed backup recovery. Recovery never silently resets corrupt data.
 
-Current version-2 data converts to version 3 after a durable immutable backup succeeds. Linked action notes become separate thread annotations with original titles/history. Explicit captured tasks stay Tasks even when linked; **Open thread notes** leads back to the moved annotation. Their new task notes start empty. Standalone actions/routines become Tasks with preserved notes and history. Completed/removed tasks stay Done. No unrelated older application storage is inspected.
+Current version-2 data converts to version 3 after a durable immutable backup succeeds. Linked action notes become separate thread annotations with original titles/history. Explicit captured tasks stay tasks even when linked; their thread annotations appear in task details. Their new task notes start empty. Standalone actions/routines become tasks with preserved notes and history. Completed/removed tasks stay Done. No unrelated older application storage is inspected.
 
-The migration retains capture text, progress, step timestamps, project/next-step text and routine history. The original backup also preserves the retired undo stack. Loading version 3 does not repeat the conversion. Existing retained threads move into Archive once; later local Restore remains effective across relaunch.
+The migration retains capture text, progress, step timestamps, project/next-step text and routine history in saved records. The original backup also preserves the retired undo stack. Loading version 3 does not repeat the conversion.
 
 Unconfirmed GitHub writes remain visible and explicitly retryable after relaunch. They never replay automatically. A timeout or interrupted process may follow a successful remote write; check GitHub or retry explicitly rather than treating it as success.
 
@@ -169,13 +137,9 @@ Conversation bodies live in a separate checksummed SQLite cache in the same priv
 
 Legacy routines and native reminder delivery are retired. The native reminder array remains empty; the new collection cadence lives separately in task settings. A legacy snapshot cannot notify while loading, after a failed migration, or after backup recovery. Closing hides the existing window; **Show GitHub Projects** returns it and **Quit GitHub Projects** stops the owned service process group.
 
-## Run the isolated browser prototype
+## Renderer development
 
-```bash
-bun run dev
-```
-
-Open `http://127.0.0.1:5173`. This entry uses the existing isolated browser storage key, synthetic source events, simulated GitHub/Copilot destinations, and a demo clock. It never calls the native backend. **Demo scenarios** includes comments, merge queue, re-requests, acknowledgement and simulated failures. Browser migration preserves a separate original before replacement.
+Both Vite entries render the same desktop workspace. They require native IPC for task storage; the separate synthetic browser prototype is retired. Browser tests provide mocked IPC without touching live data.
 
 ## Validation
 
@@ -192,7 +156,7 @@ codesign --verify --deep --strict \
   "src-tauri/target/release/bundle/macos/GitHub Projects.app"
 ```
 
-The browser suite covers both the prototype and the actual desktop entry with mocked Tauri IPC. If Chromium is missing, run `bunx playwright install chromium`. Tests never perform live GitHub writes or request reminder permission.
+The browser suite covers the unified workspace through both renderer entries with mocked Tauri IPC. If Chromium is missing, run `bunx playwright install chromium`. Tests never perform live GitHub writes or request reminder permission.
 
 The packaged executable provides non-prompting native smoke checks:
 
@@ -204,7 +168,7 @@ session=$(uuidgen)
 "$app" --native-ui-smoke-relaunch --integration-smoke-session "$session"
 ```
 
-These use generated TEST directories, not app data. They check the ranked task home, persistent Done, and scheduled ranking while the window is hidden. They also cover SQLite, reference notes and cached conversations through native IPC, Archive plus acknowledgement, identical refresh, old history, new activity, filtering rules, queue entry/exit, cache-only discard, and a separate process relaunch retaining tasks and rules. An explicit smoke-only service fixture supplies responses; unexpected service/model operations fail instead of reaching GitHub. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself. Smoke failures exit nonzero.
+These use generated TEST directories, not app data. They check the ranked task home, persistent Done, and scheduled ranking while the window is hidden. An explicit smoke-only service fixture supplies responses; unexpected service/model operations fail instead of reaching GitHub. The relaunch command removes that test session; a standalone UI smoke without a session flag cleans up after itself. Smoke failures exit nonzero.
 
 `--integration-service-smoke-check` explicitly performs a tiny synthetic SDK inference and a bounded read-only GitHub refresh through the packaged native host. It consumes Copilot service access and must not run as an automatic test. `--integration-read-smoke-check` performs only the read-only refresh. Both use private TEST directories and report counts/status, never source bodies or tokens.
 

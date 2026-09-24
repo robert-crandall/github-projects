@@ -83,7 +83,7 @@ export const ConversationReader = memo(function ConversationReader({ reference, 
   return <section className="conversation" aria-label="Conversation">
     <div className="section-heading"><h3>Conversation</h3><span>{cache ? `${cache.messages.length} saved messages` : 'Not cached'}</span></div>
     <p className="field-help">{latestAttempt ? <>Latest page attempt: <time dateTime={latestAttempt}>{date(latestAttempt)} {timeZone}</time>. </> : 'Read saved messages offline. '}
-      Refresh checks newest pages only. Reload a saved page to check older edits.</p>
+      Reload newest messages checks recent pages only. Reload a saved page to check older edits.</p>
     {(state.reading || !matches) && <p role="status">Reading cached conversation...</p>}
     {!cache && <p className="notice-inline">No conversation is cached yet. Load it explicitly to read here; selecting a thread never contacts GitHub.</p>}
     <div className="button-row conversation-actions">
@@ -123,7 +123,7 @@ export const ConversationReader = memo(function ConversationReader({ reference, 
         })}
       </details>
       {cache.pages.some(page => page.error) && <p className="notice-inline warning">Some pages are partial or unavailable. Check Pages, freshness and older history for details and retries.</p>}
-      {cache.pages.some(page => page.page > 1) && <p className="field-help">Older history may not be loaded. Loading it does not create new Inbox activity.</p>}
+      {cache.pages.some(page => page.page > 1) && <p className="field-help">Older history may not be loaded. Loading it does not create tasks or change Done.</p>}
       <div className="conversation-messages">
         {groupMessages(cache.messages).map(group => <section className={group.messages[0]?.kind === 'inline' ? 'review-discussion' : 'message-group'} key={group.id} aria-label={group.messages[0]?.kind === 'inline' ? 'Inline discussion' : undefined}>
           {group.messages[0]?.kind === 'inline' && <h4>{group.messages[0].path ?? 'Inline discussion'}{group.messages[0].line ? `:${group.messages[0].line}` : ''}</h4>}

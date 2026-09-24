@@ -1,5 +1,5 @@
 import { expect, setSystemTime, test } from 'bun:test';
-import { LIMITS, type Request, type Thread as SourceThread } from '../../service/src/schema.ts';
+import { LIMITS, requestSchema, type Request, type Thread as SourceThread } from '../../service/src/schema.ts';
 import { mergeRefresh } from '../domain/live.ts';
 import { migrateWorkspace } from '../domain/migration.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
@@ -65,6 +65,10 @@ const reply = (request: Request, result: unknown) => ({ v: 1, id: request.id, ok
 function loadSource(workspace: DesktopWorkspace, source = thread()) {
   workspace.update(state => mergeRefresh(state, { threads: [sourceThread(source, [])], startedAt: new Date().toISOString(), fetchedAt: new Date().toISOString(), status: 'complete', diagnostics: [] }));
 }
+
+test('the retired fixed digest is not a service operation', () => {
+  expect(requestSchema.safeParse({ v: 1, id: 'retired', op: 'github.waiting', input: {} }).success).toBe(false);
+});
 
 test('successful bounded refresh advances freshness and retains a neutral coverage note across relaunch', async () => {
   let bounded = true;
@@ -446,7 +450,7 @@ test('manual refresh uses latest notes and Done; capture, edits, load and clocks
   expect(JSON.stringify(mock.requests)).not.toContain('Typed during refresh');
 });
 
-test('rules edited during Refresh apply to its one batch; automatic terminal and rule suppression never dispatch writes', async () => {
+test('automatic terminal suppression preserves notes without dispatching writes', async () => {
   const held = deferred<ReturnType<typeof batch>>();
   let incoming = batch();
   let pause = false;
@@ -461,13 +465,9 @@ test('rules edited during Refresh apply to its one batch; automatic terminal and
   mock.workspace.saveScroll('reader:octo/project:pr:1', 417);
   pause = true;
   const refreshing = mock.remote.refresh();
-  mock.workspace.dispatch({ type: 'save-inbox', inbox: { id: 'work', name: 'Work' } });
-  mock.workspace.dispatch({ type: 'save-rule', rule: {
-    id: 'first', name: 'PRs', enabled: true, criteria: { kind: 'pr' }, action: { type: 'inbox', inboxId: 'work' },
-  } });
   held.resolve(incoming);
   await refreshing;
-  expect(getRows(mock.workspace.state, 'inbox:work')).toHaveLength(1);
+  expect(getRows(mock.workspace.state, 'inbox')).toHaveLength(1);
   const queued = thread([evidence(), evidence('historical-queue', 'merge-queue'), evidence('later-comment', 'comment')]);
   queued.sourceState = { state: 'queued', observedAt: new Date().toISOString(), updatedAt: queued.updatedAt, error: null };
   incoming = batch([queued]); pause = false;
@@ -482,7 +482,6 @@ test('rules edited during Refresh apply to its one batch; automatic terminal and
   expect(relaunched.state.selectedKey).toBe('t:123');
   expect(relaunched.state.notes[0]!.text).toBe('Saved reader context');
   expect(relaunched.getSnapshot().workspace!.scroll['reader:octo/project:pr:1']).toBe(417);
-  expect(relaunched.state.rules).toEqual(mock.workspace.state.rules);
 });
 
 test.each(['access', 'source_changed', 'catchup'] as const)(
@@ -502,10 +501,6 @@ test.each(['access', 'source_changed', 'catchup'] as const)(
       return reply(request, batch([source]));
     });
     await mock.remote.refresh();
-    mock.workspace.dispatch({ type: 'save-inbox', inbox: { id: 'work', name: 'Work' } });
-    mock.workspace.dispatch({ type: 'save-rule', rule: {
-      id: 'prs', name: 'PRs', enabled: true, criteria: { kind: 'pr' }, action: { type: 'inbox', inboxId: 'work' },
-    } });
     mock.workspace.dispatch({ type: 'note', threadId: '123', text: 'Keep my reader context' });
     mock.workspace.dispatch({ type: 'draft', text: 'Keep this standalone Task' });
     mock.workspace.dispatch({ type: 'capture' });
@@ -524,7 +519,7 @@ test.each(['access', 'source_changed', 'catchup'] as const)(
     await mock.remote.refresh();
     expect(mock.workspace.state.threads[0]!.terminal).toEqual(checkpoint);
     if (scenario !== 'catchup') expect(mock.workspace.state.threads[0]!.sourceState?.error?.code).toBe(scenario);
-    expect(getRows(mock.workspace.state, scenario === 'catchup' ? 'filtered' : 'inbox:work')).toHaveLength(1);
+    expect(getRows(mock.workspace.state, scenario === 'catchup' ? 'filtered' : 'inbox')).toHaveLength(1);
     await mock.workspace.flush();
     setSystemTime(new Date(at(14)));
     const relaunched = new DesktopWorkspace(mock.platform);
@@ -539,14 +534,14 @@ test.each(['access', 'source_changed', 'catchup'] as const)(
     await remote.refresh();
     expect(relaunched.state.threads[0]!.sourceState?.state).toBe('open');
     expect(relaunched.state.threads[0]!.terminal).toEqual(scenario === 'catchup' ? checkpoint : null);
-    expect(getRows(relaunched.state, scenario === 'catchup' ? 'filtered' : 'inbox:work')).toHaveLength(1);
+    expect(getRows(relaunched.state, scenario === 'catchup' ? 'filtered' : 'inbox')).toHaveLength(1);
     expect(mock.requests).toHaveLength(3);
     if (scenario === 'catchup') {
       source = current('open', 17, 10, [...source.evidence, event('post-exit-comment', 16)]);
       setSystemTime(new Date(at(17)));
       await remote.refresh();
       expect(relaunched.state.threads[0]!.terminal).toBeNull();
-      expect(getRows(relaunched.state, 'inbox:work')).toHaveLength(1);
+      expect(getRows(relaunched.state, 'inbox')).toHaveLength(1);
     }
     expect(relaunched.state.notes).toEqual(original.notes);
     expect(relaunched.state.tasks).toEqual(original.tasks);

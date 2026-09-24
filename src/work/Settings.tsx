@@ -10,8 +10,8 @@ const actions = [
   ['review-result', 'Read a completed Copilot review'], ['follow-up', 'Follow up'], ['manual', 'Task'],
 ] as const;
 
-export function Settings({ settings, profileName, queue, close, recover, reference }: {
-  settings: WorkSettings; queue: WorkQueue; close: () => void; recover: () => void; reference: () => void;
+export function Settings({ settings, profileName, queue, close, recover }: {
+  settings: WorkSettings; queue: WorkQueue; close: () => void; recover: () => void;
   profileName: string;
 }) {
   const [draft, setDraft] = useState(() => structuredClone(settings));
@@ -46,8 +46,8 @@ export function Settings({ settings, profileName, queue, close, recover, referen
     } catch (error) { setError(error instanceof Error ? error.message : 'Connections could not be read.'); }
     finally { setChecking(false); }
   }
-  return <main className="task-settings">
-    <header className="task-settings-heading"><button className="quiet" onClick={close}><ArrowLeft size={16} />Back to tasks</button><h1>How I find and rank your work</h1>
+  return <main id="task-settings" className="task-settings">
+    <header className="task-settings-heading"><button className="quiet" onClick={close}><ArrowLeft size={16} />Back to tasks</button><h1>Settings</h1>
       <p>Choose the sources. Tell Copilot what matters. Every run ranks the whole task list.</p>
     </header>
     <Appearance />
@@ -143,8 +143,8 @@ export function Settings({ settings, profileName, queue, close, recover, referen
     <section aria-labelledby="storage-heading"><h2 id="storage-heading">Your saved work</h2>
       <p>Done is local. It never closes a GitHub issue, submits a review or marks a notification read.
         Unsubscribe is a separate action in task details. Direct mentions, team mentions and review requests can still notify you again.</p>
-      <div className="button-row"><button className="secondary" onClick={recover}>Backups & recovery</button>
-        <button className="quiet" onClick={reference}>Open saved thread notes</button></div>
+      <p>Saved thread notes stay with matching tasks in task details. Backups retain all saved conversations and notes.</p>
+      <button className="secondary" onClick={recover}>Backups & recovery</button>
     </section>
   </main>;
 }

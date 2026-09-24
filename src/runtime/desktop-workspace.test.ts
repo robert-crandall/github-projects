@@ -33,6 +33,37 @@ function fixture(initial?: NativeWorkspace) {
   return { platform, commands, backups, saved: () => saved, fail: (value: boolean) => { fail = value; }, failBackup: () => { failBackup = true; } };
 }
 
+test.each([false, true])('retiring filters preserves data and requires a backup (backup failure: %s)', async failBackup => {
+  const state = emptyWorkspace(now, 'UTC');
+  state.tasks = [{ id: 'keep-task', title: 'Keep my task', notes: 'Keep my notes', status: 'done', createdAt: now }];
+  const original = { ...state, view: 'inbox:retired', inboxes: [{ id: 'retired', name: 'Old inbox' }],
+    rules: [{ id: 'broken-retired-rule', criteria: {} }] };
+  const mock = fixture({ revision: crypto.randomUUID(), savedAt: now, snapshot: snapshotSchema.parse({
+    formatVersion: 1, reminders: [], workspace: { version: 1, state: original, scroll: {} },
+  }) });
+  if (failBackup) mock.failBackup();
+  const workspace = new DesktopWorkspace(mock.platform);
+  await workspace.load();
+  if (failBackup) {
+    expect(workspace.getSnapshot().workspace).toBeNull();
+    expect(workspace.getSnapshot().loadError).toContain('Backup failed');
+    expect(mock.commands).not.toContain('workspace_save');
+    expect(mock.saved().snapshot!.workspace).toMatchObject({ state: original });
+  } else {
+    await workspace.flush();
+    expect(mock.backups).toHaveLength(1);
+    expect(mock.backups[0]!.snapshot!.workspace).toMatchObject({ state: original });
+    expect(workspace.state.tasks).toEqual(state.tasks);
+    expect(workspace.state.work).toEqual(state.work);
+    expect(workspace.state.view).toBe('inbox');
+    expect(workspace.state).not.toHaveProperty('rules');
+    expect(workspace.state).not.toHaveProperty('inboxes');
+    const reopened = new DesktopWorkspace(mock.platform);
+    await reopened.load();
+    expect(mock.backups).toHaveLength(1);
+  }
+});
+
 test('native captures, notes and Done survive a fresh controller without model calls or reminder schedules', async () => {
   const mock = fixture();
   const first = new DesktopWorkspace(mock.platform);

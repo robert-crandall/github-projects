@@ -32,7 +32,7 @@ export function gate() {
 class ExpectedFailure extends Error {}
 
 export class NativeMock {
-  constructor(private readonly referenceWorkspace = true) {}
+  constructor(private readonly referenceWorkspace = false) {}
   appearance: Preferences | null = null;
   failAppearanceRead = false;
   failAppearanceSave = false;
@@ -283,7 +283,7 @@ export class NativeMock {
 }
 
 export const test = browserTest.extend<{ native: NativeMock; referenceWorkspace: boolean }>({
-  referenceWorkspace: [true, { option: true }],
+  referenceWorkspace: [false, { option: true }],
   native: async ({ page, referenceWorkspace }, use) => {
     const native = new NativeMock(referenceWorkspace);
     await native.install(page);

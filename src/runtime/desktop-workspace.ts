@@ -58,7 +58,10 @@ export class DesktopWorkspace {
       if (!envelope && !clock.timeZone) throw new Error(clock.error?.message ?? 'The local timezone is unavailable. Retry after fixing macOS timezone settings.');
       const state = envelope ? restoreDesktop(envelope.state, clock.now) : emptyWorkspace(clock.now, clock.timeZone!);
       const original = envelope ? stateSchema.safeParse(envelope.state) : null;
-      if (original && (!original.success || original.data.tasks.length !== state.tasks.length)) {
+      const retiredFilters = envelope && typeof envelope.state === 'object' && envelope.state !== null
+        && (('rules' in envelope.state && Array.isArray(envelope.state.rules) && envelope.state.rules.length > 0)
+          || ('inboxes' in envelope.state && Array.isArray(envelope.state.inboxes) && envelope.state.inboxes.length > 0));
+      if (original && (!original.success || original.data.tasks.length !== state.tasks.length || retiredFilters)) {
         await this.platform.createBackup(saved.revision);
       }
       const workspace: DesktopEnvelope = { version: 1, state, scroll: envelope?.scroll ?? {} };

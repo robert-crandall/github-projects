@@ -1,6 +1,6 @@
 # Theme support
 
-**Sources and priorities → Appearance** offers all 57 named themes in the Copilot App catalog inspected on September 17, 2026. GitHub and Fox are included. The reference workspace and browser prototype have an **Appearance** sidebar control.
+**Settings → Appearance** offers all 57 named themes in the Copilot App catalog inspected on September 17, 2026. GitHub and Fox are included. Open **Settings** from the sidebar.
 
 Theme and color mode are independent. **Light** and **Dark** select that palette; **System** follows the operating system while the app is open. A theme with only one palette uses its available palette and labels that limitation. GitHub dark remains the default for existing behavior.
 
@@ -25,7 +25,7 @@ The importer validates its source and uses pinned development dependencies. Norm
 
 ## Persistence and recovery
 
-Desktop preferences live in `appearance.json` inside the app data directory. Native writes are atomic and serialized; the desktop never reads browser storage. The browser prototype stores preferences under `github-projects:appearance:v1` in its own local storage.
+Desktop preferences live in `appearance.json` inside the app data directory. Native writes are atomic and serialized; the desktop never reads browser storage.
 
 Preferences stay separate from workspace snapshots, task settings, credentials, source collection and backups. Theme changes never contact GitHub or Copilot.
 
