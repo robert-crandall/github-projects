@@ -1261,7 +1261,73 @@ test('task details labels batch-wide cancellation and waits past ACK on narrow w
   expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
 });
 
-test('code batch context change stops only queued tasks and failed saves stay retryable without replay', async ({ page, native }) => {
+for (const stop of [false, true]) test(`started batch survives tabs, filters and Settings until ${stop ? 'explicit Stop' : 'completion'}`, async ({ page, native }, testInfo) => {
+  bulkFixture(native); native.holdCode = gate(); native.cancelCode = stop;
+  const firstId = native.state.tasks.find(task => task.title === 'Shared review')!.id;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await expect(batch).toContainText('1 queued');
+  await page.getByRole('button', { name: /^No action now/ }).click();
+  await expect(batch).toContainText('1 queued');
+  await page.getByRole('button', { name: /^To do/ }).click();
+  await expect(page.getByRole('region', { name: 'Selected tasks', exact: true })).toContainText('0 selected');
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  await page.getByRole('checkbox', { name: 'Select all GitHub sources' }).uncheck();
+  await page.getByRole('checkbox', { name: 'Team requests', exact: true }).uncheck();
+  await expect(page.locator('.task-title').filter({ hasText: 'Shared review' })).toHaveCount(0);
+  await expect(batch).toContainText('Started with 5 selected tasks');
+  await expect(batch).toContainText('1 queued');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.locator('#task-settings').getByRole('region', { name: 'Code batch', exact: true })).toBeVisible();
+  await expect(batch.getByRole('button', { name: 'Stop batch', exact: true })).toBeInViewport();
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  if (!stop) await page.screenshot({ path: testInfo.outputPath('batch-settings-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await expect(batch.getByRole('button', { name: 'Stop batch', exact: true })).toBeInViewport();
+  if (!stop) await page.screenshot({ path: testInfo.outputPath('batch-settings-narrow.png') });
+  if (stop) {
+    await batch.getByRole('button', { name: 'Stop batch', exact: true }).click();
+    await expect(batch).toContainText('1 not started');
+    await expect(batch.getByRole('status')).toContainText('waiting for the current task outcome');
+    expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+  }
+  native.holdCode.release();
+  await expect(batch.getByRole('status')).toHaveText(stop ? 'Batch stopped.' : 'Batch finished.');
+  await expect(batch).toContainText(stop ? '1 cancelled' : '2 completed');
+  expect(native.requests.filter(request => request.op === 'work.reviewCode').map(request => request.input.taskId))
+    .toEqual(stop ? [firstId] : [firstId, 'second-pr']);
+  await batch.getByText('Batch outcomes', { exact: true }).click();
+  await batch.locator('li').filter({ hasText: 'Shared review' }).getByRole('button', { name: 'Inspect task', exact: true }).click();
+  await expect(page.getByRole('textbox', { name: 'Task', exact: true })).toHaveValue('Shared review');
+  await expect(page.getByRole('region', { name: 'Code sessions', exact: true }))
+    .toContainText(stop ? 'Run cancelled' : 'Partial inspection saved');
+});
+
+test('saved semantic code-agent changes still stop the batch while Settings navigation alone does not', async ({ page, native }) => {
+  bulkFixture(native); native.holdCode = gate(); native.cancelCode = true;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('group', { name: 'PR reviewer', exact: true }).getByLabel('Agent model').fill('changed-model');
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await expect(batch).toContainText('Code agent settings changed. The batch stopped.');
+  await expect(batch).toContainText('1 not started');
+  await expect.poll(() => native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+  native.holdCode.release();
+  await expect(batch.getByRole('status')).toHaveText('Batch stopped.');
+  expect(native.requests.filter(request => request.op === 'work.reviewCode')).toHaveLength(1);
+});
+
+test('code batch navigation keeps queued tasks until a failed result save stops them without replay', async ({ page, native }) => {
   bulkFixture(native); native.holdCode = gate(); native.codeRuns.failUpdate = true;
   await page.goto('/');
   await page.getByRole('button', { name: 'Select visible tasks' }).click();
@@ -1269,12 +1335,13 @@ test('code batch context change stops only queued tasks and failed saves stay re
   const batch = page.getByRole('region', { name: 'Code batch', exact: true });
   await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
   await page.getByRole('button', { name: /^Done/ }).click();
-  await expect(batch).toContainText('1 not started');
+  await expect(batch).toContainText('1 queued');
   expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
   await page.getByRole('button', { name: /^To do/ }).click();
   await expect(page.getByRole('region', { name: 'Selected tasks', exact: true })).toContainText('0 selected');
   native.holdCode.release();
   await expect(batch.getByRole('status')).toHaveText('Batch stopped.');
+  await expect(batch).toContainText('1 not started');
   await expect(batch).toContainText('1 result not saved');
   await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
   const panel = page.getByRole('region', { name: 'Code sessions', exact: true });

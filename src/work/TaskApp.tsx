@@ -190,7 +190,6 @@ export function TaskApp({ controller, queue, remote }: {
   const invoke = (operation: () => Promise<unknown>) => { void operation().catch(error => controller.report(error)); };
   const changeContext = (change: () => void) => {
     setChecked({ context: '', ids: [] });
-    invoke(() => queue.code.stopBatch('Task list context changed. Remaining tasks were not started.', false));
     change();
   };
   useEffect(() => {
@@ -261,7 +260,7 @@ export function TaskApp({ controller, queue, remote }: {
   const issueCount = checkedTasks.filter(task => codeJob(task, state) === 'implementation-assessment').length;
   const prCount = checkedTasks.filter(task => codeJob(task, state) === 'pr-review').length;
   const batchProgress = code.batch && <CodeBatchProgress batch={code.batch} sessions={queue.code} controller={controller}
-    inspect={id => setSelection(id)} />;
+    inspect={id => { setSettings(false); setFilters(false); setView('tasks'); setSelection(id); }} />;
   return <div className={`task-app ${filters && !settings ? 'task-filter-view' : ''}`}>
     <a className="skip-link" href={settings ? '#task-settings' : '#ranked-tasks'}>Skip to {settings ? 'settings' : 'tasks'}</a>
     <aside className="task-sidebar" aria-label="Workspace navigation">
@@ -332,7 +331,8 @@ export function TaskApp({ controller, queue, remote }: {
       <button className="secondary" onClick={() => setRecovery(true)}>Export previous workspace results</button>
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
-      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)} /> : <>
+      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
+      batchProgress={batchProgress} /> : <>
       {!run.progress && <div className="task-context"><p>{state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
         <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>}
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt

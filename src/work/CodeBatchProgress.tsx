@@ -19,6 +19,7 @@ export function CodeBatchProgress({ batch, sessions, controller, inspect }: {
     </div>
     <p role="status">{batch.running ? batch.stopping ? 'Stopping; waiting for the current task outcome.' : `Current task: ${current?.title ?? 'Preparing...'}`
       : batch.reason ? 'Batch stopped.' : 'Batch finished.'}</p>
+    <p className="field-help">Started with {batch.items.length} selected tasks. Navigation does not change this batch.</p>
     <p className="field-help">{counts('completed') > 0 && `${counts('completed')} completed · `}
       {counts('not-inspected') > 0 && `${counts('not-inspected')} not inspected · `}
       {counts('failed')} failed · {counts('cancelled')} cancelled · {counts('skipped')} skipped · {counts('not-started')} not started

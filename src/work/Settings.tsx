@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
 import type { WorkQueue } from './controller.ts';
@@ -22,9 +22,10 @@ const actions = [
   ['review-result', 'Read a completed Copilot review'], ['follow-up', 'Follow up'], ['manual', 'Task'],
 ] as const;
 
-export function Settings({ settings, profileName, queue, close, recover }: {
+export function Settings({ settings, profileName, queue, close, recover, batchProgress }: {
   settings: WorkSettings; queue: WorkQueue; close: () => void; recover: () => void;
   profileName: string;
+  batchProgress?: ReactNode;
 }) {
   const [draft, setDraft] = useState(() => structuredClone(settings));
   const [name, setName] = useState(profileName);
@@ -68,6 +69,7 @@ export function Settings({ settings, profileName, queue, close, recover }: {
     <header className="task-settings-heading"><button className="quiet" onClick={close}><ArrowLeft size={16} />Back to tasks</button><h1>Settings</h1>
       <p>Choose sources and configure each agent's judgment. Run now collects, assesses and prioritizes; agents can also run separately.</p>
     </header>
+    {batchProgress}
     <Appearance />
     <form onSubmit={save}>
       <section aria-labelledby="profile-heading"><h2 id="profile-heading">Work profile</h2>
@@ -78,7 +80,7 @@ export function Settings({ settings, profileName, queue, close, recover }: {
         <p>Agents, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
       </section>
       <section aria-labelledby="agents-heading"><h2 id="agents-heading">Task agents</h2>
-        <p>The assessor and prioritizer run on your task list. Code agents run only from a single task's details. Instructions guide judgment, not permissions.</p>
+        <p>The assessor and prioritizer run on your task list. Code agents run from explicit task-detail or selected-task actions. Instructions guide judgment, not permissions.</p>
         {[...taskAgents(draft), ...codeAgents(draft)].map(agent => <fieldset className="task-agent" key={agent.jobType}>
           <legend>{agentJobs[agent.jobType].name}</legend>
           <p className="field-help">{agentJobs[agent.jobType].capability} Result: {agentJobs[agent.jobType].resultFormat}.</p>

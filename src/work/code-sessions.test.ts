@@ -165,17 +165,19 @@ test('a reentrant stop just before RPC dispatch sends no code request', async ()
   } finally { unsubscribe(); }
 });
 
-test('context change stops unstarted tasks without cancelling the valid current job; explicit stop still cancels it', async () => {
+test('filter changes preserve the frozen batch without cancellation or widening its scope', async () => {
   const f = await setup(), held = f.hold(), second = addCodeTask(f, 'second');
+  addCodeTask(f, 'unselected');
   const running = f.queue.code.startBatch([f.id, second], 'implementation-assessment');
   await f.started.promise;
   f.queue.saveSourceFilter({ selectedSources: [], collapsedProviders: [] });
-  expect(f.queue.code.getSnapshot().batch?.items[1]?.status).toBe('not-started');
+  expect(f.queue.code.getSnapshot().batch?.items[1]?.status).toBe('queued');
   expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode']);
   expect(f.queue.code.busy).toBe(true);
-  await f.queue.code.stopBatch();
-  expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
   held.resolve(); await running;
+  expect(f.requests.map(request => request.op === 'work.reviewCode' && request.input.taskId)).toEqual([f.id, second]);
+  expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['completed', 'completed']);
+  expect(f.queue.code.busy).toBe(false);
 });
 
 test('batch loses scope on profile, semantic settings and recovery but waits for the original target', async () => {

@@ -704,7 +704,7 @@ describe('explicit task agents', () => {
     expect(mock.queue.getSnapshot().warnings).toEqual(['3 selected tasks were not assessed because they changed or are no longer eligible.']);
   });
 
-  test('selected assessment stops continuation on semantic agent changes', async () => {
+  test.each([true, false])('semantic agent changes stop only remaining selected assessments: selected=%s', async selected => {
     const entered = deferred<void>(), release = deferred<void>();
     const mock = await fixture(initial(), async request => {
       if (request.op === 'work.assess') {
@@ -713,15 +713,49 @@ describe('explicit task agents', () => {
       }
     });
     mock.queue.capture('First'); mock.queue.capture('Second');
-    const running = mock.queue.runAssessor(mock.workspace.state.tasks.map(task => task.id));
+    const ids = mock.workspace.state.tasks.map(task => task.id);
+    const originalModel = taskAgents(mock.workspace.state.work.settings)[0]!.model;
+    const running = mock.queue.runAssessor(selected ? ids : undefined);
     await entered.promise;
     mock.queue.saveSettings({ ...mock.workspace.state.work.settings, agents: taskAgents(mock.workspace.state.work.settings)
-      .map(agent => ({ ...agent, instructions: 'Changed during request' })) });
+      .map(agent => ({ ...agent, instructions: 'Changed during request', model: 'changed-model' })) });
+    release.resolve();
+    await running;
+    expect(mock.requests).toHaveLength(selected ? 1 : 2);
+    expect(mock.history.entries).toHaveLength(selected ? 1 : 2);
+    expect(mock.history.entries[0]).toMatchObject({ id: ids[0], model: originalModel });
+    expect(mock.history.entries.every(value => value.model === originalModel)).toBe(true);
+    if (selected) {
+      expect(mock.queue.getSnapshot().error).toBe('Remaining selected assessments stopped after the assessor instructions or model changed. Saved results are retained.');
+    } else {
+      expect(mock.queue.getSnapshot().error).toBe('');
+      expect(mock.queue.getSnapshot().warnings).toEqual(['Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.']);
+    }
+  });
+
+  test('fully in-flight selected assessments retain results and warn after a semantic change', async () => {
+    const entered = deferred<void>(), release = deferred<void>();
+    const mock = await fixture(initial(), async request => {
+      if (request.op === 'work.assess') {
+        entered.resolve(); await release.promise;
+        return assessmentBatch(request.input);
+      }
+    });
+    mock.queue.capture('Already in flight');
+    const ids = mock.workspace.state.tasks.map(task => task.id);
+    const originalModel = taskAgents(mock.workspace.state.work.settings)[0]!.model;
+    const running = mock.queue.runAssessor(ids);
+    await entered.promise;
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, agents: taskAgents(mock.workspace.state.work.settings)
+      .map(agent => ({ ...agent, model: 'changed-model' })) });
     release.resolve();
     await running;
     expect(mock.requests).toHaveLength(1);
-    expect(mock.history.entries).toHaveLength(1);
-    expect(mock.queue.getSnapshot().error).toContain('Assessor settings changed');
+    expect(mock.history.entries[0]).toMatchObject({ id: ids[0], model: originalModel });
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.queue.getSnapshot().warnings).toEqual([
+      'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.',
+    ]);
   });
 
   function configure(mock: Awaited<ReturnType<typeof fixture>>, job: TaskAgentJob, patch: { name?: string; instructions?: string; model?: string }) {

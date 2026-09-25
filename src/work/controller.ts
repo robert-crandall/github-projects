@@ -256,7 +256,7 @@ export class WorkQueue {
       if (selected) {
         if (JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))
           !== JSON.stringify(agentIdentity(agent))) {
-          throw new Error('Assessor settings changed. Remaining selected tasks were not assessed; saved results are retained.');
+          throw new Error('Remaining selected assessments stopped after the assessor instructions or model changed. Saved results are retained.');
         }
         const current = new Map(rankInput(this.controller.state).tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
         pending = pending.filter(task => current.get(task.id) === JSON.stringify(semanticRankTask(task)));
@@ -402,7 +402,9 @@ export class WorkQueue {
           }
           if (JSON.stringify(agentIdentity(taskAgent(input, 'task-assessment')))
             !== JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))) {
-            warnings.push('Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.');
+            warnings.push(selectedIds
+              ? 'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.'
+              : 'Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.');
           }
         } else warnings.push(...await this.prioritize(input, generation, undefined, true));
         this.assertWorkspace(generation);

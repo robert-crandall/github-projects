@@ -135,6 +135,7 @@
 .task-settings-heading > button { margin: 0 0 24px -10px; }
 .task-settings-heading > p { margin-top: 12px; color: var(--secondary); }
 .task-settings section { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--border); }
+.task-settings .code-batch { margin: 24px 0; padding-top: 16px; }
 .task-settings h2 { margin-bottom: 12px; }
 .task-settings p { color: var(--secondary); margin: 12px 0; }
 .task-settings label { margin-top: 18px; }

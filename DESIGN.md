@@ -27,7 +27,7 @@ Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings
 
 Implementation assessor and PR reviewer use the same Settings fieldset language. Their actions live in task details and the selected-task toolbar beside compact progress/cancel/result/history controls. Show the service-owned PR conclusion and partial coverage even with no findings. Keep revision/configuration detail in a disclosure and code evidence behind explicit links. Results never displace editing, Done or navigation.
 
-To do checkboxes are separate from row focus, rank and Done. Keep select/clear visible tasks and the selected count above the list; reveal eligible agent actions only with a selection. Whole-list prioritization stays outside this toolbar. Eligibility and per-task batch outcomes use compact disclosures, not another dashboard. Batch progress lives in the scrolling list pane, and in task details on narrow windows, so it cannot consume the available editing area.
+To do checkboxes are separate from row focus, rank and Done. Keep select/clear visible tasks and the selected count above the list; reveal eligible agent actions only with a selection. Whole-list prioritization stays outside this toolbar. Eligibility and per-task batch outcomes use compact disclosures, not another dashboard. Batch progress lives in the scrolling list pane, in task details on narrow windows, and near the top of scrolling Settings. Its frozen scope and Stop stay discoverable during navigation without consuming the available editing area.
 
 Do not retain a second workspace or disabled placeholders for the retired Inbox, Filtered, Archive or Tasks destinations. Saved conversations and private thread notes appear alongside matching tasks.
 

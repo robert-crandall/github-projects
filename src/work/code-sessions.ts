@@ -31,7 +31,7 @@ export type CodeBatchItem = {
   detail: string; runId?: string; outcome?: CodeRunOutcome;
 };
 export type CodeBatch = {
-  profileId: string; profileName: string; workspaceGeneration: number; job: CodeAgentJob; policy: string; filter: string;
+  profileId: string; profileName: string; workspaceGeneration: number; job: CodeAgentJob; policy: string;
   running: boolean; stopping: boolean; reason: string; items: CodeBatchItem[];
 };
 export type CodeSessionsStatus = { active: Active | null; batch: CodeBatch | null; busy: boolean; error: string; revision: number };
@@ -40,7 +40,6 @@ const policy = (state: AppState, job: CodeAgentJob) => {
   const agent = codeAgents(state.work.settings).find(agent => agent.jobType === job)!;
   return JSON.stringify([agent.id, agent.instructions, agent.model, agent.jobType]);
 };
-const filter = (state: AppState) => JSON.stringify(state.work.sourceFilter?.selectedSources ?? null);
 export function codeJob(task: Task, state: AppState): CodeAgentJob | null {
   if (task.status !== 'open' || task.work?.availability === 'waiting') return null;
   const source = codeSource(task, state);
@@ -67,7 +66,7 @@ export class CodeSessions {
       const batch = this.batch;
       if (batch) {
         const reason = this.scopeError(batch);
-        if (reason) void this.stopBatch(reason, reason !== 'Source filters changed. The batch stopped.').catch(error => controller.report(error));
+        if (reason) void this.stopBatch(reason).catch(error => controller.report(error));
       }
       const summary = batch ?? this.status.batch;
       const saved = controller.getSnapshot();
@@ -131,7 +130,6 @@ export class CodeSessions {
     const state = this.controller.state;
     if (state.activeWorkProfile.id !== batch.profileId) return 'Work profile changed. The batch stopped.';
     if (policy(state, batch.job) !== batch.policy) return 'Code agent settings changed. The batch stopped.';
-    if (filter(state) !== batch.filter) return 'Source filters changed. The batch stopped.';
     return '';
   }
   private eligible(item: CodeBatchItem, batch: CodeBatch): boolean {
@@ -161,13 +159,13 @@ export class CodeSessions {
     if (!items.some(item => item.status === 'queued')) return Promise.reject(new Error('No selected tasks are eligible for this code action.'));
     const batch: CodeBatch = {
       profileId: state.activeWorkProfile.id, profileName: state.activeWorkProfile.name, workspaceGeneration: this.controller.assessmentGeneration,
-      job, policy: policy(state, job), filter: filter(state), running: true, stopping: false, reason: '', items,
+      job, policy: policy(state, job), running: true, stopping: false, reason: '', items,
     };
     this.batch = batch;
     this.publishBatch(batch);
     return this.executeBatch(batch);
   }
-  async stopBatch(reason = 'Stopped by you. Remaining tasks were not started.', cancelCurrent = true): Promise<void> {
+  async stopBatch(reason = 'Stopped by you. Remaining tasks were not started.'): Promise<void> {
     const batch = this.batch;
     if (!batch) return;
     if (!batch.stopping) {
@@ -176,7 +174,7 @@ export class CodeSessions {
       for (const item of batch.items) if (item.status === 'queued') { item.status = 'not-started'; item.detail = reason; }
       this.publishBatch(batch);
     }
-    if (cancelCurrent) await this.cancelActive();
+    await this.cancelActive();
   }
   private async executeBatch(batch: CodeBatch): Promise<void> {
     try {
