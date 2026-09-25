@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { taskAgents, taskAgentsSchema } from './work-agents.ts';
+import { codeAgents, codeAgentsSchema } from './code-agents.ts';
+import { referenceSchema } from './references.ts';
 
 const time = z.iso.datetime();
 const id = z.string().min(1).max(500);
@@ -34,6 +36,7 @@ export const workSourceContextSchema = z.strictObject({
 });
 export const workMetadataSchema = z.strictObject({
   identity: z.string().min(1).max(2014), action: workActionSchema, url,
+  reference: referenceSchema.optional(),
   evidence: z.array(workEvidenceSchema).max(2000),
   handledEvidenceIds: z.array(id).max(10000),
   availability: z.enum(['actionable', 'waiting', 'unknown']),
@@ -59,11 +62,12 @@ const savedWorkSettingsSchema = z.strictObject({
   instructions: z.string().max(16000),
   model: z.string().max(100),
   agents: taskAgentsSchema.optional(),
+  codeAgents: codeAgentsSchema.optional(),
   streams: z.array(workstreamSchema).max(30),
   schedule: z.strictObject({ enabled: z.boolean(), everyMinutes: z.number().int().min(5).max(1440) }),
 });
 export const workSettingsSchema = savedWorkSettingsSchema.transform((settings): z.infer<typeof savedWorkSettingsSchema> =>
-  ({ ...settings, agents: taskAgents(settings) }));
+  ({ ...settings, agents: taskAgents(settings), codeAgents: codeAgents(settings) }));
 export const workRankingSchema = z.strictObject({
   orderedIds: z.array(id).max(2000),
   reasons: z.array(z.strictObject({ id, reason: z.string().trim().min(1).max(1000) })).max(2000),
@@ -90,6 +94,7 @@ export const workCandidateSchema = z.strictObject({
 });
 export const workObservationSchema = z.strictObject({
   url, state: z.enum(['open', 'queued', 'closed', 'merged', 'unknown']),
+  reference: referenceSchema.optional(),
   observedAt: time, reason: z.string().max(1000),
   context: workSourceContextSchema.optional(),
 });
@@ -166,6 +171,7 @@ export function defaultWorkState(): WorkState {
   return {
     settings: {
       instructions: '', model: '',
+      agents: taskAgents({ instructions: '', model: '' }), codeAgents: codeAgents({}),
       streams: [{
         id: 'github-reviews', name: 'PRs awaiting my review', enabled: true,
         kind: 'github', query: 'is:pr is:open archived:false user-review-requested:@me',

@@ -3,6 +3,18 @@ import {
   type WorkAction, type WorkCollection, type WorkEvidence, type WorkMetadata, type WorkObservation, type WorkRankInput,
 } from '../../service/src/work-schema.ts';
 import type { AppState, Task } from '../types.ts';
+import { githubReference } from '../../service/src/references.ts';
+
+function sourceReference(work: { url: string; reference?: WorkMetadata['reference']; evidence?: WorkEvidence[] }, additional: string[] = []) {
+  const selected = githubReference(work.url);
+  if (!selected) return undefined;
+  const same = (ref: NonNullable<WorkMetadata['reference']>) => ref.repo.toLowerCase() === selected.repo && ref.number === selected.number;
+  if (work.reference && !same(work.reference)) throw new Error('The GitHub reference does not match its task source.');
+  if (work.reference) return work.reference;
+  const references = [work.url, ...additional, ...(work.evidence ?? []).map(item => item.url)].map(githubReference)
+    .filter((ref): ref is NonNullable<WorkMetadata['reference']> => !!ref && same(ref));
+  return references.find(ref => ref.kind === 'pr');
+}
 
 /** Issues and pull requests share GitHub's repository-local number space. */
 export function canonicalSource(value: string): string {
@@ -66,11 +78,14 @@ function latestObservations(observations: WorkObservation[]): Map<string, WorkOb
 }
 
 function observe(work: WorkMetadata, observation?: WorkObservation, contextObservation = observation): WorkMetadata {
-  let next = work;
+  const reference = sourceReference({
+    ...work, reference: observation?.reference ?? work.reference,
+  }, observation ? [observation.url] : []);
+  let next = reference ? { ...work, reference } : work;
   if (observation && (!work.availabilityObservedAt
     || Date.parse(observation.observedAt) >= Date.parse(work.availabilityObservedAt))) {
     next = {
-      ...work,
+      ...next,
       availability: observation.state === 'open' ? 'actionable' : observation.state === 'unknown' ? 'unknown' : 'waiting',
       availabilityReason: observation.reason || (observation.state === 'open' ? 'The source is open.'
         : observation.state === 'unknown' ? 'The source state could not be confirmed.' : `The source is ${observation.state}.`),
@@ -108,6 +123,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
     : [first.completedAt, second.completedAt].filter((at): at is string => !!at)
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
   const additionalNotes = second.title === first.title ? second.notes : [second.title, second.notes].filter(Boolean).join('\n');
+  const reference = sourceReference({ ...first.work, reference: observation.reference ?? first.work.reference ?? second.work.reference }, [second.work.url]);
   return {
     ...first, status, completedAt,
     assessmentTaskIds: [...new Set([first.id, second.id, ...first.assessmentTaskIds ?? [], ...second.assessmentTaskIds ?? []])],
@@ -115,6 +131,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
     notes: [...new Set([first.notes, additionalNotes].filter(Boolean))].join('\n\n'),
     work: workMetadataSchema.parse({
       ...first.work,
+      ...(reference ? { reference } : {}),
       evidence: mergeEvidence(first.work.evidence, second.work.evidence),
       handledEvidenceIds: [...new Set([...first.work.handledEvidenceIds, ...second.work.handledEvidenceIds])],
       availability: observation.availability, availabilityReason: observation.availabilityReason,
@@ -139,8 +156,9 @@ export function consolidateWorkTasks(state: AppState): AppState {
     }
     const identity = taskIdentity(source, task.work.action);
     const index = positions.get(identity);
-    const normalized = { ...task, work: { ...task.work, identity, url: source } };
-    changed ||= task.work.identity !== identity || task.work.url !== source;
+    const reference = sourceReference(task.work);
+    const normalized = { ...task, work: { ...task.work, identity, url: source, ...(reference ? { reference } : {}) } };
+    changed ||= task.work.identity !== identity || task.work.url !== source || JSON.stringify(reference) !== JSON.stringify(task.work.reference);
     if (index === undefined) {
       positions.set(identity, tasks.length);
       tasks.push(normalized);
@@ -217,8 +235,10 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
       ...(linked?.contextObservedAt ? { contextObservedAt: linked.contextObservedAt } : {}),
       ...(linked?.unsubscribe ? { unsubscribe: linked.unsubscribe } : {}),
     };
+    const reference = sourceReference(base, [candidate.url]);
     const work = workMetadataSchema.parse(observe({
       ...base, identity, url, evidence: mergeEvidence(base.evidence, candidate.evidence),
+      ...(reference ? { reference } : {}),
       ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
     }, observation, contexts.get(url)));
     const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);

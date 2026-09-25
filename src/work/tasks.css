@@ -62,6 +62,18 @@
 .task-assessment summary { cursor: pointer; padding: 8px 0; }
 .task-assessment summary:focus-visible { outline: 2px solid var(--accent); }
 .task-assessment select { margin-top: 8px; }
+.code-sessions { font-size: 13px; overflow-wrap: anywhere; }
+.code-sessions h4 { font-size: 13px; margin: 18px 0 8px; }
+.code-sessions p { margin: 10px 0; }
+.code-sessions summary { cursor: pointer; padding: 8px 0; }
+.code-sessions summary:focus-visible { outline: 2px solid var(--accent); }
+.code-sessions dt { font-weight: 600; margin-top: 12px; }
+.code-sessions dd { margin: 4px 0 0; white-space: pre-wrap; }
+.code-sessions select { margin: 8px 0; }
+.code-evidence { padding-left: 18px; }
+.code-evidence li { margin: 12px 0; }
+.code-evidence pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; font-size: 12px; }
+.code-evidence .text-button { text-align: left; color: var(--accent); }
 .task-evidence { list-style: none; margin: 0; padding: 0; }
 .task-evidence li { padding: 14px 0; border-bottom: 1px solid var(--border); }
 .task-evidence li > p { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }

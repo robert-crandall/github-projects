@@ -10,6 +10,143 @@ import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
 
 test.use({ referenceWorkspace: false });
 
+function codeTask(native: NativeMock, kind: 'pr' | 'issue' = 'pr') {
+  const url = `https://github.com/octo/project/${kind === 'pr' ? 'pull' : 'issues'}/47`;
+  const state = reconcileWork(emptyWorkspace(native.now, 'UTC'), {
+    collectedAt: native.now, warnings: [], candidates: [{
+      title: 'Inspect source safely', action: kind === 'pr' ? 'review' : 'implement', url,
+      evidence: [{ id: 'code-request', streamId: 'github-assigned', source: 'github', at: native.now, url, summary: 'Inspect source' }],
+    }], observations: [{ url, reference: { repo: 'octo/project', number: 47, kind }, state: 'open', observedAt: native.now, reason: '' }],
+  }, native.now);
+  native.saved = { revision: crypto.randomUUID(), savedAt: native.now, snapshot: snapshotSchema.parse(JSON.parse(JSON.stringify({
+    formatVersion: 1, reminders: [], workspace: { version: 1, state, scroll: {} },
+  }))) };
+}
+
+test('code sessions run only explicitly, retain partial outcomes, and keep edits/navigation usable', async ({ page, native }, testInfo) => {
+  codeTask(native);
+  await page.goto('/');
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await expect(panel.getByRole('button', { name: 'Review PR', exact: true })).toBeEnabled();
+  expect(native.requests).toHaveLength(0);
+  native.holdCode = gate();
+  await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+  await expect(panel.getByRole('status')).toContainText('Reading pinned code');
+  expect(native.codeRuns.entries[0]!.outcome.status).toBe('running');
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeDisabled();
+  await page.getByLabel('Task notes', { exact: true }).fill('Private notes during review');
+  await persisted(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(page.getByRole('group', { name: 'Implementation assessor', exact: true })).toBeVisible();
+  await expect(page.getByRole('group', { name: 'PR reviewer', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+  native.holdCode.release();
+  await expect(panel).toContainText('Partial inspection saved');
+  await expect(panel).toContainText('Partial code inspection only. This is not an approval to merge.');
+  await expect(panel).toContainText('No grounded findings returned. This is not approval');
+  await expect(panel).toContainText('Partial coverage: bounded, selective inspection');
+  expect(native.state.tasks[0]!.notes).toBe('Private notes during review');
+  expect(native.state.tasks[0]!.status).toBe('open');
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  expect(JSON.stringify(native.requests)).not.toContain('Private notes');
+  await page.screenshot({ path: testInfo.outputPath('code-session-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await panel.getByLabel('Code session version').focus();
+  await expect(panel.getByLabel('Code session version')).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('code-session-narrow.png') });
+  await page.reload();
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  await expect(panel).toContainText('Partial code inspection only.');
+  expect(native.requests).toHaveLength(1);
+});
+
+test('not-inspected and source-changed are honest, reruns retain history, cancellation waits for target', async ({ page, native }) => {
+  codeTask(native); native.codeInspected = false;
+  await page.goto('/');
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+  await expect(panel).toContainText('No source-code lines were inspected. No code review or approval was completed.');
+  await expect(panel).toContainText('No code coverage obtained.');
+  await expect(panel).not.toContainText('Partial coverage: bounded, selective inspection');
+  native.codeError = 'source_changed';
+  await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+  await expect(panel).toContainText('The source or branch moved. Start a new run');
+  await expect(panel.getByLabel('Code session version').locator('option')).toHaveCount(2);
+  native.holdCode = gate(); native.codeError = ''; native.cancelCode = true;
+  await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+  await expect(panel.getByRole('status')).toContainText('Reading pinned code');
+  await panel.getByRole('button', { name: 'Cancel code job' }).click();
+  await expect(panel.getByRole('status')).toContainText('Waiting for the actual outcome');
+  expect(native.codeRuns.entries.at(-1)!.outcome.status).toBe('cancelling');
+  native.holdCode.release();
+  await expect(panel).toContainText('Run cancelled');
+  expect(native.state.tasks[0]!.status).toBe('open');
+  expect(native.launches).toHaveLength(0);
+});
+
+test('restoring a workspace keeps every Copilot action disabled until the old code target settles', async ({ page, native }) => {
+  codeTask(native);
+  await page.goto('/');
+  await persisted(page);
+  const backupId = crypto.randomUUID();
+  native.backups.set(backupId, structuredClone(native.saved));
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  const held = native.holdCode = gate();
+  try {
+    await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+    await expect(panel.getByRole('status')).toContainText('Reading pinned code');
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Backups & recovery', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Saved backup', exact: true }).selectOption(backupId);
+    await page.getByLabel('I exported pending edits and results.', { exact: false }).check();
+    await page.getByRole('button', { name: 'Restore selected backup', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect.poll(() => native.requests.some(request => request.op === 'cancel')).toBe(true);
+    await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+    await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+    for (const name of ['Run now', 'Run assessor', 'Run prioritizer', 'Review PR']) {
+      await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+    }
+    await expect(panel.getByRole('status')).toContainText('Waiting for the previous code job');
+    await page.getByLabel('Task notes', { exact: true }).fill('Editable during old request cleanup');
+    await persisted(page);
+    expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+    expect(native.codeRuns.entries).toHaveLength(0);
+  } finally {
+    held.release();
+    native.holdCode = undefined;
+  }
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  await expect.poll(() => native.codeRuns.entries.some(run => run.quarantined)).toBe(true);
+  await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+  await expect(panel).toContainText('Partial inspection saved');
+  expect(native.requests.filter(request => request.op === 'work.reviewCode')).toHaveLength(2);
+  expect(native.state.tasks[0]!.notes).toBe('Editable during old request cleanup');
+});
+
+test('implementation result save failure retries without model replay and prior-workspace results remain separate', async ({ page, native }) => {
+  codeTask(native, 'issue');
+  await page.goto('/');
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  native.codeRuns.failUpdate = true;
+  await panel.getByRole('button', { name: 'Assess implementation' }).click();
+  await expect(panel).toContainText('Result not saved');
+  await expect(panel).toContainText('No code was implemented or task marked Done');
+  await expect(panel).toContainText('Recommended next step');
+  await page.getByLabel('Task notes', { exact: true }).fill('Notes still save');
+  await expect(page.getByRole('contentinfo').getByRole('status')).toHaveText('Task edits saved; code results pending');
+  native.codeRuns.failUpdate = false;
+  await panel.getByRole('button', { name: 'Retry saving result' }).click();
+  await expect(panel).toContainText('Partial inspection saved');
+  expect(native.requests).toHaveLength(1);
+  expect(native.state.tasks[0]!.notes).toBe('Notes still save');
+});
+
 async function add(page: Page, title: string) {
   await page.getByRole('button', { name: 'Add task', exact: false }).first().click();
   const dialog = page.getByRole('dialog', { name: 'Add a task' });
@@ -241,7 +378,7 @@ test('late pre-recovery results are export-only and do not block the next run', 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Backups & recovery', exact: true }).click();
   await page.getByRole('combobox', { name: 'Saved backup', exact: true }).selectOption(backupId);
-  await page.getByLabel('I exported pending edits and assessments.', { exact: false }).check();
+  await page.getByLabel('I exported pending edits and results.', { exact: false }).check();
   await page.getByRole('button', { name: 'Restore selected backup', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
   native.holdAssessment.release();

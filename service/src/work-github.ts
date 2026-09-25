@@ -245,6 +245,7 @@ export class WorkGitHub {
             }
             observations.push({
               url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '',
+              reference: ref,
               context: sourceContext(source, ref, graph),
             });
           } catch (error) {
@@ -582,6 +583,7 @@ export class WorkGitHub {
             : graph?.mergeQueueEntry ? 'queued' : 'open';
           observations.push({
             url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '',
+            reference: sourceRef,
             context: sourceContext(source, sourceRef, graph),
           });
           observed = true;

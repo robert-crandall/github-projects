@@ -800,6 +800,8 @@ describe('explicit task agents', () => {
 
   test('agent definitions materialize for both legacy profiles and edits never leak across profiles or reload', async () => {
     let state = initial();
+    delete state.work.settings.agents;
+    delete state.work.settings.codeAgents;
     state.work.settings.instructions = 'Original owner rules';
     state.work.settings.model = 'original-model';
     state = createWorkProfile(state, 'Other', true);

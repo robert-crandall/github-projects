@@ -10,6 +10,8 @@ Each work profile owns its priority instructions, sources, model, schedule, task
 
 Each profile has one named Task assessor and one named Task prioritizer with editable instructions and model. Code fixes their capabilities and result formats; prompts cannot grant tools or new actions. Existing settings initialize both roles from the saved owner instructions and model without discarding sources or schedules. The collection model remains separate. Display names do not change semantic identity.
 
+Each profile also has one Implementation assessor and one PR reviewer. Run these only from explicit single-task actions inside task details. Save start intent before network access and retain immutable versions with source/configuration provenance, partial code evidence, results and errors outside task snapshots. Implementation results recommend a grounded next step, not completed implementation. PR results always show the service-owned no-approval conclusion; no successful code reads means not inspected. Never execute source, edit code, submit a review, mark Done, or automatically replay interrupted jobs. Cancellation waits for the actual outcome, and persistence retries never rerun a model. Database restore separates late results into a durable, exportable quarantine.
+
 Keep the native Tauri shell, CLI authentication and current SQLite namespace. Preserve existing tasks, completion, annotations, backups and recovery while retiring the separate notification workspace.
 
 ## Ranked tasks

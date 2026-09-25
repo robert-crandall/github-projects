@@ -10,6 +10,7 @@ import { preferencesSchema, type Preferences } from '../src/themes/controller.ts
 import { assessmentBatch } from './assessment-fixture.ts';
 import { AssessmentStoreFixture } from './assessment-store-fixture.ts';
 import { workAssessOutputSchema } from '../service/src/work-assessment.ts';
+import { codeResult, CodeRunStoreFixture } from './code-run-fixture.ts';
 
 export function evidence(id = 'request-1', kind: Evidence['kind'] = 'review-request'): Evidence {
   return {
@@ -55,6 +56,12 @@ export class NativeMock {
   workCollections = new Map<string, { hold?: ReturnType<typeof gate>; result?: WorkCollection; error?: string }>();
   failRank = false;
   assessments = new AssessmentStoreFixture();
+  codeRuns = new CodeRunStoreFixture();
+  codeBackups = new Map<string, typeof this.codeRuns.entries>();
+  holdCode?: ReturnType<typeof gate>;
+  codeInspected = true;
+  codeError = '';
+  cancelCode = false;
   assessmentBackups = new Map<string, typeof this.assessments.entries>();
   holdRank?: ReturnType<typeof gate>;
   holdAssessment?: ReturnType<typeof gate>;
@@ -94,6 +101,11 @@ export class NativeMock {
 
   private async invoke(command: string, args: Record<string, unknown>) {
     this.calls.push(command);
+    if (command.startsWith('code_run_')) {
+      if (command === 'code_run_start' && this.codeRuns.failStart) throw new ExpectedFailure('Start not saved.');
+      if (command === 'code_run_update' && this.codeRuns.failUpdate) throw new ExpectedFailure('Result disk unavailable.');
+      return this.codeRuns.handle(command, args);
+    }
     if (command === 'appearance_read') {
       if (this.failAppearanceRead) throw new ExpectedFailure('Appearance settings are unreadable.');
       return structuredClone(this.appearance);
@@ -158,6 +170,7 @@ export class NativeMock {
       const id = crypto.randomUUID();
       this.backups.set(id, structuredClone(this.saved));
       this.assessmentBackups.set(id, structuredClone(this.assessments.entries));
+      this.codeBackups.set(id, structuredClone(this.codeRuns.entries));
       return { id, createdAt: this.now };
     }
     if (command === 'workspace_list_backups') return [...this.backups.keys()].map(id => ({ id, createdAt: this.now }));
@@ -176,6 +189,7 @@ export class NativeMock {
       expect(backup).toBeDefined();
       this.saved = { ...structuredClone(backup!), revision: crypto.randomUUID() };
       this.assessments.entries = structuredClone(this.assessmentBackups.get(String(args.backupId)) ?? []);
+      this.codeRuns.replace(this.codeBackups.get(String(args.backupId)) ?? []);
       this.corrupt = false;
       return structuredClone(this.saved);
     }
@@ -185,7 +199,7 @@ export class NativeMock {
     }
     if (command === 'workspace_export_json') {
       expect(args.expectedRevision).toBe(this.saved.revision);
-      return JSON.stringify({ ...this.saved, assessments: this.assessments.entries });
+      return JSON.stringify({ ...this.saved, assessments: this.assessments.entries, codeRuns: this.codeRuns.entries });
     }
     if (command === 'launch_github' || command === 'launch_copilot' || command === 'launch_web_url') {
       this.launches.push({ command, args: structuredClone(args) });
@@ -197,6 +211,17 @@ export class NativeMock {
     this.requests.push(request);
     let result: unknown;
     switch (request.op) {
+      case 'work.reviewCode':
+        expect(this.codeRuns.entries.some(run => run.intent.runId === request.id && run.outcome.status === 'running')).toBe(true);
+        if (this.holdCode) await this.holdCode.promise;
+        if (this.codeError || this.cancelCode) return {
+          v: 1, id: request.id, ok: false, error: { code: this.cancelCode ? 'cancelled' : this.codeError, message: this.cancelCode ? 'Read-only job cancelled.' : `Code job: ${this.codeError}`, retryable: true },
+        };
+        result = codeResult(request.input, this.codeInspected);
+        break;
+      case 'cancel':
+        result = { requestId: request.input.requestId, cancelled: true };
+        break;
       case 'work.connections':
         result = { servers: [], instructions: 'No shared Slack connection. Configure a selected read-only MCP server.' };
         break;

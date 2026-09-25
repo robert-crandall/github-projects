@@ -5,6 +5,8 @@ import { requestSchema } from '../src/schema.ts';
 
 test('legacy owner rules and model materialize in both roles without replacing source or schedule settings', () => {
   const settings = { ...defaultWorkState().settings, instructions: 'My exact owner rules', model: 'my-model' };
+  delete settings.agents;
+  delete settings.codeAgents;
   settings.schedule.enabled = true;
   const parsed = workSettingsSchema.parse(settings);
   expect(parsed).toMatchObject(settings);
