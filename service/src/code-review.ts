@@ -39,6 +39,21 @@ export const codeAnswerSchema = z.discriminatedUnion('job', [
   }),
 ]);
 export type CodeAnswer = z.infer<typeof codeAnswerSchema>;
+const prScopeNotices = {
+  'not-inspected': 'No source-code lines were inspected. No code review or approval was completed.',
+  'partial-no-approval': 'Partial code inspection only. This is not an approval to merge.',
+} as const;
+const prConclusionSchema = z.strictObject({
+  status: z.enum(['not-inspected', 'partial-no-approval']),
+  summary: z.enum([prScopeNotices['not-inspected'], prScopeNotices['partial-no-approval']]),
+}).refine(conclusion => conclusion.summary === prScopeNotices[conclusion.status]);
+const resultAnswerSchema = z.discriminatedUnion('job', [
+  codeAnswerSchema.options[0],
+  z.strictObject({
+    job: z.literal('pr-review'), conclusion: prConclusionSchema,
+    findings: codeAnswerSchema.options[1].shape.findings,
+  }),
+]);
 const revisionSchema = z.strictObject({ repo: repoSchema, sha: shaSchema, tree: shaSchema });
 const evidenceSchema = z.strictObject({
   id: z.string(), side: z.enum(['head', 'base']), repo: repoSchema, revision: shaSchema, blob: shaSchema,
@@ -46,7 +61,7 @@ const evidenceSchema = z.strictObject({
   totalLines: z.number().int().nonnegative(), text: z.string(),
 });
 export const codeReviewResultSchema = z.strictObject({
-  format: z.literal('code-review-v1'), taskId: idSchema, answer: codeAnswerSchema,
+  format: z.literal('code-review-v1'), taskId: idSchema, answer: resultAnswerSchema,
   source: z.strictObject({
     reference: referenceSchema, url: z.string(), title: z.string(), body: z.string(),
     updatedAt: z.iso.datetime(), state: z.string(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
@@ -76,7 +91,9 @@ export const codeReviewResultSchema = z.strictObject({
     additions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(),
     patch: z.string().optional(), patchComplete: z.boolean(),
   })).max(CODE_LIMITS.changedFiles),
-}).refine(result => result.answer.job === (result.source.reference.kind === 'pr' ? 'pr-review' : 'implementation-assessment'));
+}).refine(result => result.answer.job === (result.source.reference.kind === 'pr' ? 'pr-review' : 'implementation-assessment'))
+  .refine(result => result.answer.job !== 'pr-review'
+    || result.answer.conclusion.status === (result.evidence.length ? 'partial-no-approval' : 'not-inspected'));
 export type CodeReviewResult = z.infer<typeof codeReviewResultSchema>;
 
 export function codeTools(context: CodeContext): Tool[] {
@@ -121,14 +138,20 @@ export function validateCodeAnswer(answer: CodeAnswer, input: CodeReviewInput, c
   }
   if (answer.job === 'implementation-assessment') {
     answer.nextStep.evidence.forEach(validate);
-    if (context.reads.length && !answer.nextStep.evidence.some(item => item.kind === 'code')) reject();
+    if (!context.reads.length || !answer.nextStep.evidence.some(item => item.kind === 'code')) reject();
   }
 }
 
 export function codeReviewResult(input: CodeReviewInput, answer: CodeAnswer, context: CodeContext): CodeReviewResult {
   validateCodeAnswer(answer, input, context);
+  const status = context.reads.length ? 'partial-no-approval' : 'not-inspected';
   return codeReviewResultSchema.parse({
-    format: 'code-review-v1', taskId: input.taskId, answer, source: context.source,
+    format: 'code-review-v1', taskId: input.taskId,
+    answer: answer.job === 'pr-review' ? {
+      job: answer.job, findings: answer.findings,
+      conclusion: { status, summary: prScopeNotices[status] },
+    } : answer,
+    source: context.source,
     verifiedAt: new Date().toISOString(),
     config: {
       agentId: input.agent.id, instructions: input.agent.instructions, modelRequested: input.agent.model,
@@ -151,5 +174,6 @@ PR finding locations must start on an actually changed head addition or base del
 For renames, base paths use previous_filename. Base refers to the merge-base revision for the PR diff.
 Use empty findings when appropriate, but never claim a clean, complete review or completed implementation.
 Always explain selective coverage and missing context in uncertainty. No findings is not approval.
-For implementation assessments, recommend a concrete next step with code evidence when code was read.
+Implementation assessments require a successful read_code call and exact code evidence in the recommended next step.
+PR summaries and uncertainty are not published; the service supplies the inspection scope and no-approval conclusion.
 Missing context is a limitation, never proof that code is absent or correct.`;
