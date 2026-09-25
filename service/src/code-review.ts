@@ -1,100 +1,11 @@
 import { defineTool, type Tool } from '@github/copilot-sdk';
 import { z } from 'zod';
-import {
-  CODE_LIMITS, CodeContext, codeHash, codePathSchema, listCodeSchema, readCodeSchema, shaSchema,
-} from './code-context.ts';
+import { CodeContext, codeHash, listCodeSchema, readCodeSchema } from './code-context.ts';
 import { ServiceError } from './errors.ts';
-import { idSchema, referenceSchema, repoSchema } from './schema.ts';
-
-export const codeReviewInputSchema = z.strictObject({
-  taskId: idSchema, source: referenceSchema,
-  job: z.enum(['implementation-assessment', 'pr-review']),
-  agent: z.strictObject({
-    id: z.string().min(1).max(100), instructions: z.string().max(16000), model: z.string().max(100),
-  }),
-}).refine(input => input.source.kind === (input.job === 'pr-review' ? 'pr' : 'issue'));
-export type CodeReviewInput = z.infer<typeof codeReviewInputSchema>;
-const prose = z.string().trim().min(1).max(2000);
-const codeCitationSchema = z.strictObject({
-  kind: z.literal('code'), readId: z.string().regex(/^read-[1-9]\d?$/),
-  side: z.enum(['head', 'base']), path: codePathSchema,
-  startLine: z.number().int().positive(), endLine: z.number().int().positive(),
-  quote: z.string().min(1).max(4000),
-});
-const sourceCitationSchema = z.strictObject({ kind: z.literal('source'), quote: z.string().min(1).max(4000) });
-const citationSchema = z.discriminatedUnion('kind', [sourceCitationSchema, codeCitationSchema]);
-const citations = z.array(citationSchema).min(1).max(8);
-const finding = {
-  title: z.string().trim().min(1).max(240), severity: z.enum(['low', 'medium', 'high', 'critical']), rationale: prose,
-};
-export const codeAnswerSchema = z.discriminatedUnion('job', [
-  z.strictObject({
-    job: z.literal('implementation-assessment'), summary: prose, uncertainty: prose,
-    findings: z.array(z.strictObject({ ...finding, evidence: citations })).max(20),
-    nextStep: z.strictObject({ text: prose, evidence: citations }),
-  }),
-  z.strictObject({
-    job: z.literal('pr-review'), summary: prose, uncertainty: prose,
-    findings: z.array(z.strictObject({ ...finding, location: codeCitationSchema, evidence: citations })).max(20),
-  }),
-]);
-export type CodeAnswer = z.infer<typeof codeAnswerSchema>;
-const prScopeNotices = {
-  'not-inspected': 'No source-code lines were inspected. No code review or approval was completed.',
-  'partial-no-approval': 'Partial code inspection only. This is not an approval to merge.',
-} as const;
-const prConclusionSchema = z.strictObject({
-  status: z.enum(['not-inspected', 'partial-no-approval']),
-  summary: z.enum([prScopeNotices['not-inspected'], prScopeNotices['partial-no-approval']]),
-}).refine(conclusion => conclusion.summary === prScopeNotices[conclusion.status]);
-const resultAnswerSchema = z.discriminatedUnion('job', [
-  codeAnswerSchema.options[0],
-  z.strictObject({
-    job: z.literal('pr-review'), conclusion: prConclusionSchema,
-    findings: codeAnswerSchema.options[1].shape.findings,
-  }),
-]);
-const revisionSchema = z.strictObject({ repo: repoSchema, sha: shaSchema, tree: shaSchema });
-const evidenceSchema = z.strictObject({
-  id: z.string(), side: z.enum(['head', 'base']), repo: repoSchema, revision: shaSchema, blob: shaSchema,
-  path: codePathSchema, startLine: z.number().int().positive(), endLine: z.number().int().nonnegative(),
-  totalLines: z.number().int().nonnegative(), text: z.string(),
-});
-export const codeReviewResultSchema = z.strictObject({
-  format: z.literal('code-review-v1'), taskId: idSchema, answer: resultAnswerSchema,
-  source: z.strictObject({
-    reference: referenceSchema, url: z.string(), title: z.string(), body: z.string(),
-    updatedAt: z.iso.datetime(), state: z.string(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-    observedAt: z.iso.datetime(), head: revisionSchema, base: revisionSchema.nullable(), baseTip: shaSchema.nullable(),
-    defaultBranch: z.string().nullable(), draft: z.boolean().nullable(), merged: z.boolean().nullable(),
-  }),
-  verifiedAt: z.iso.datetime(),
-  config: z.strictObject({
-    agentId: z.string(), instructions: z.string(), modelRequested: z.string(),
-    modelSelection: z.enum(['explicit', 'sdk-default']), fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  }),
-  coverage: z.strictObject({
-    status: z.literal('partial'), changes: z.enum(['complete', 'partial', 'not-applicable']),
-    knownChangedLines: z.number().int().nonnegative(), reviewedChangedLines: z.number().int().nonnegative(),
-    files: z.strictObject({
-      expected: z.number().int().nonnegative().nullable(), compared: z.number().int().min(0).max(300),
-      retained: z.number().int().min(0).max(CODE_LIMITS.changedFiles),
-      omitted: z.number().int().nonnegative(), incompletePatches: z.number().int().nonnegative(),
-    }),
-    warnings: z.array(z.string()), requests: z.number().int().max(CODE_LIMITS.requests),
-    readBytes: z.number().int().max(CODE_LIMITS.readBytes), contextBytes: z.number().int().max(CODE_LIMITS.contextBytes),
-    toolCalls: z.number().int().max(CODE_LIMITS.toolCalls),
-  }),
-  evidence: z.array(evidenceSchema).max(CODE_LIMITS.toolCalls),
-  changes: z.array(z.strictObject({
-    filename: z.string(), previous_filename: z.string().optional(), status: z.string(),
-    additions: z.number().int().nonnegative(), deletions: z.number().int().nonnegative(),
-    patch: z.string().optional(), patchComplete: z.boolean(),
-  })).max(CODE_LIMITS.changedFiles),
-}).refine(result => result.answer.job === (result.source.reference.kind === 'pr' ? 'pr-review' : 'implementation-assessment'))
-  .refine(result => result.answer.job !== 'pr-review'
-    || result.answer.conclusion.status === (result.evidence.length ? 'partial-no-approval' : 'not-inspected'));
-export type CodeReviewResult = z.infer<typeof codeReviewResultSchema>;
+import {
+  codeReviewResultSchema, prScopeNotices, type CodeAnswer, type CodeCitation, type CodeReviewInput, type CodeReviewResult,
+} from './code-review-schema.ts';
+export * from './code-review-schema.ts';
 
 export function codeTools(context: CodeContext): Tool[] {
   // SDK 1.0.13 does not validate custom-tool arguments. Each handler validates again.
@@ -112,33 +23,35 @@ export function codeTools(context: CodeContext): Tool[] {
   ];
 }
 
-export function validateCodeAnswer(answer: CodeAnswer, input: CodeReviewInput, context: CodeContext) {
-  const reject = () => { throw new ServiceError('copilot_output'); };
+export function validateCodeAnswer(answer: CodeAnswer, input: CodeReviewInput, context: CodeContext, diagnostic?: (code: string) => void) {
+  const reject = (reason: string) => { diagnostic?.(`code-grounding-${reason}`); throw new ServiceError('copilot_output'); };
   context.coverage(); // Surface a fatal tool budget/error even if the model swallowed it.
-  if (answer.job !== input.job) reject();
-  const validate = (citation: z.infer<typeof citationSchema>) => {
+  if (answer.job !== input.job) reject('job');
+  const validate = (citation: CodeCitation) => {
     if (citation.kind === 'source') {
-      if (!context.source.title.includes(citation.quote) && !context.source.body.includes(citation.quote)) reject();
+      if (!context.source.title.includes(citation.quote) && !context.source.body.includes(citation.quote)) reject('source-quote');
       return;
     }
     const read = context.reads.find(read => read.id === citation.readId);
-    if (!read || read.side !== citation.side || read.path !== citation.path
-      || citation.startLine < read.startLine || citation.endLine > read.endLine
-      || citation.endLine < citation.startLine || citation.endLine - citation.startLine > 4) return reject();
+    if (!read) return reject('unread-reference');
+    if (read.side !== citation.side || read.path !== citation.path) return reject('read-identity');
+    if (citation.startLine < read.startLine || citation.endLine > read.endLine
+      || citation.endLine < citation.startLine || citation.endLine - citation.startLine > 4) return reject('line-range');
     const quote = read.text.split('\n').slice(citation.startLine - read.startLine, citation.endLine - read.startLine + 1).join('\n');
-    if (quote !== citation.quote) reject();
+    if (quote !== citation.quote) reject('code-quote');
   };
   for (const finding of answer.findings) {
     finding.evidence.forEach(validate);
     if ('location' in finding) {
       validate(finding.location);
       const location = finding.location;
-      if (!context.isChanged(location.side, location.path, location.startLine, location.quote.split('\n')[0])) reject();
+      if (!context.isChanged(location.side, location.path, location.startLine, location.quote.split('\n')[0])) reject('unchanged-line');
     }
   }
   if (answer.job === 'implementation-assessment') {
     answer.nextStep.evidence.forEach(validate);
-    if (!context.reads.length || !answer.nextStep.evidence.some(item => item.kind === 'code')) reject();
+    if (!context.reads.length) reject('no-code-read');
+    if (!answer.nextStep.evidence.some(item => item.kind === 'code')) reject('uncited-next-step');
   }
 }
 

@@ -22,11 +22,11 @@ The executable embeds Bun and the SDK JavaScript. It runs outside the repository
 
 The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was released against CLI 1.0.83. The packaged arm64 executable was exercised with the installed 1.0.84-1 CLI; packaged ranking also succeeded with Homebrew 1.0.84-6 under a GUI-like PATH. Newer/older CLIs must pass the SDK handshake; failures remain explicit. An experimental MCP-start scratch probe is not a compatibility verdict for normal SDK inference, and successful ranking does not establish Slack authentication. Live Slack verification was skipped after OAuth timed out; no authentication success is assumed. The x64 build command is provided, but this implementation's real authentication/inference smoke ran on arm64.
 
-## Code review backend (not exposed to the desktop)
+## Code review backend and RPC (no renderer callers)
 
-**No production callers; #47 wires this backend into saved task sessions.** No RPC operation, native schema, configured agent role or UI control invokes this capability yet. Existing assessors and prioritizers still have no tools.
+**No renderer callers; #47 wires this backend into saved task sessions.** `work.reviewCode` exposes the bounded backend through strict service/native schemas, but no configured agent role or UI control invokes it yet. Existing assessors and prioritizers still have no tools.
 
-Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another SDK client for each task. [`src/code-review.ts`](src/code-review.ts) exports `codeReviewInputSchema`, `CodeReviewInput`, `codeReviewResultSchema` and `CodeReviewResult`. The strict input contains only:
+Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another service instance for each task. [`src/code-review-schema.ts`](src/code-review-schema.ts) contains the browser-safe schemas/types, re-exported by [`src/code-review.ts`](src/code-review.ts). The strict input contains only:
 
 ```ts
 {
@@ -66,7 +66,9 @@ Results always have `coverage.status: 'partial'`: bounded, selective inspection 
 
 Missing/truncated patches, capped trees/files/source bodies, binary or non-UTF-8 files, symlinks, submodules, oversized files and inaccessible paths are explicit coverage warnings. Comments/reviews/checks and private task notes are not collected. Tools support listing and reading, not repository-wide text search or execution. Budget exhaustion, malformed output, cancellation and deadlines return `ServiceError`; fatal tool budgets abort inference even if the SDK swallows the tool error. Cancellation reaches HTTP and SDK abort/disconnect/delete/force-stop cleanup. No local repository checkout or repository code is executed.
 
-`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers, to cover these contracts. No live source/model execution or desktop integration is implied by those tests. A separately authorized, bounded and isolated live SDK/transport smoke is required before #47 enables this capability for users; this backend-only layer does not perform it.
+`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers. `test/protocol.test.ts` covers the public RPC. The preserved #47 source passed separately authorized, isolated live SDK 1.0.13 smokes for an implementation assessment of #46 and review of merged PR #48: actual read tools, grounded result persistence, partial notices and natural host exit succeeded. The implementation smoke required one format correction; these checks do not imply general model reliability. This extraction does not repeat paid calls or enable desktop integration.
+
+An earlier authorized attempt rejected grounding and timed out; its model payload was not retained, so its grounding cause is unknown. It exposed an SDK 1.0.13 `sendAndWait` idle timer that survives disconnect/forceStop. `src/sdk-client.ts` now waits using public `send`/`on`, with a shared abort signal, final-assistant semantics, and deterministic timer/subscription cleanup. Installed-SDK tests use a synthetic stdio runtime (no model) for send rejection, error/idle-before-ack races, deadline and cancellation. Source/model text never enters diagnostics; grounding diagnostics identify fixed reason categories only.
 
 ## Native host contract
 
@@ -96,7 +98,7 @@ Malformed input has `id: null`. The host should treat protocol failures as servi
 | In-flight requests | 4; additional operations receive `busy` |
 | Output backlog | 64 frames / 4 MiB; a stalled write fails after 2 seconds |
 | Request IDs | Unique per process; 1-180 ASCII identity characters; 4,096 requests per process |
-| Overall deadline | 120 seconds; `work.collect`, `work.assess` and `work.rank` get 300 seconds; cancellation propagates into gh/SDK cleanup |
+| Overall deadline | 120 seconds; `work.collect`, `work.assess` and `work.rank` get 300 seconds; `work.reviewCode` gets 210 seconds; cancellation propagates into gh/SDK cleanup |
 | GitHub collection | 90-second budget; three concurrent enrichment workers, one refresh at a time |
 | gh process | 20 seconds, 4 MiB combined stdout/stderr |
 | Copilot concurrency/deadline | One SDK operation, 90 seconds including setup/inference; each assessment/order pass and GitHub reply batch gets 180 seconds, with assessment plus ordering bounded to 300 seconds total |
@@ -125,12 +127,15 @@ The host must expose only these operation names through its native command, not 
 | `work.collect` | `workCollectInputSchema` | Candidates with immutable evidence, current source observations, and bounded-coverage warnings |
 | `work.assess` | `workRankInputSchema` without `assessmentIds`, requiring `profileId` | A nonempty subset of at most 20 immutable assessments |
 | `work.rank` | `workRankInputSchema`, requiring `profileId` and saved `assessmentIds` | Exact permutation of the active queue, one reason per task, and optional `evaluatedAt`/`expiresAt` |
+| `work.reviewCode` | `codeReviewInputSchema` | `code-review-v1` with grounded answer, pinned source/config, partial coverage and read evidence |
 | `work.connections` | `{}` | Configured MCP server/read-tool names and explicit setup instructions; no secrets |
 | `work.intake` | `{}` | Up to 200 unconsumed durable push items and `hasMore`; reading never deletes |
 | `work.ackIntake` | `{ids}` | The same acknowledgement, after the desktop has saved those items |
 | `cancel` | `{requestId}` | `{requestId, cancelled}` |
 
 All objects are strict: unknown keys fail validation. Thread IDs are positive decimal strings. Repository references are `{repo: "owner/repo", number: positiveInteger, kind: "pr" | "issue"}`. Evidence/context IDs allow up to 500 characters. The service constructs all network endpoints itself.
+
+Code operations retain their 180-second overall deadline, including the single correction attempt, plus bounded cleanup. The JSONL watchdog allows 210 seconds and the native host 240 seconds. For code cancellation, an ACK is not a terminal outcome: native waits for the target's own response after SDK cleanup rather than killing the service on the ACK. Native timeout/quit still stops the owned process group.
 
 ### Workstreams
 

@@ -480,6 +480,7 @@ describe('read-only SDK code operation', () => {
     expect(existsSync(sdk.options!.env!.HOME!)).toBe(false);
     expect(sdk.prompts.join(' ')).not.toContain('synthetic-token');
     expect(Object.keys(taskAgentJobs)).toEqual(['task-assessment', 'task-prioritization']);
+    expect(requestSchema.safeParse({ v: 1, id: '1', op: 'work.reviewCode', input }).success).toBe(true);
     expect(requestSchema.safeParse({ v: 1, id: '1', op: 'copilot.reviewCode', input }).success).toBe(false);
     expect(codeReviewInputSchema.safeParse({ ...input, notes: 'private' }).success).toBe(false);
     expect(codeReviewInputSchema.safeParse({ ...input, job: 'pr-review' }).success).toBe(false);

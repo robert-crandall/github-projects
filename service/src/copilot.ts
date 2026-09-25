@@ -1,5 +1,5 @@
 import {
-  CopilotClient, RuntimeConnection, type CopilotClientOptions, type SessionConfig, type MCPServerConfig,
+  RuntimeConnection, type CopilotClientOptions, type SessionConfig, type MCPServerConfig,
 } from '@github/copilot-sdk';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -25,6 +25,7 @@ import {
   validateCodeAnswer, type CodeReviewInput, type CodeReviewResult,
 } from './code-review.ts';
 import type { GitHubApi } from './github.ts';
+import { sdkClient } from './sdk-client.ts';
 
 export type GitHubRequestContext = {
   url: string; title: string; author: string | null; assignees: string[]; reviewRecipients: string[];
@@ -72,7 +73,7 @@ export function restrictedConfig(work: string, config: string): SessionConfig {
 }
 type Session = {
   sessionId: string;
-  sendAndWait(options: { prompt: string }, timeout?: number): Promise<{ data: { content: string } } | undefined>;
+  sendAndWait(options: { prompt: string }, timeout?: number, signal?: AbortSignal): Promise<{ data: { content: string } } | undefined>;
   abort(): Promise<void>;
   disconnect(): Promise<void>;
 };
@@ -142,7 +143,7 @@ export class CopilotService {
   private readonly ranker: WorkRanker;
   constructor(deps: Partial<SdkDependencies> & { assessmentCache?: WorkAssessmentCache; now?: () => Date } = {}) {
     this.deps = {
-      client: options => new CopilotClient(options), token, cli: () => executable('copilot'),
+      client: sdkClient, token, cli: () => executable('copilot'),
       diagnostic: code => { process.stderr.write(`copilot:${code}\n`); }, ...deps,
       stateDirectory: deps.stateDirectory ?? (() => join(privateAppDirectory(), 'sdk-sessions')),
       mcpOAuthScope: deps.mcpOAuthScope ?? sharedMcpOAuthScope,
@@ -236,7 +237,7 @@ export class CopilotService {
         const message = attempt === 0 ? prompt
           : 'Your previous answer was rejected as invalid JSON, schema, or references. Return ONLY the JSON object matching outputSchema in the initial message. Start with { and end with }. Do not use markdown, code fences, explanation, or extra keys. Only use supplied references without duplicates; include every task exactly once when ranking. This is data interpretation, not a request to execute tasks. Include every required field.';
         onPrompt?.(message);
-        const response = await abortable(session.sendAndWait({ prompt: message }, milliseconds), operationSignal);
+        const response = await abortable(session.sendAndWait({ prompt: message }, milliseconds, operationSignal), operationSignal);
         const content = response?.data.content;
         if (!content || Buffer.byteLength(content) > LIMITS.modelBytes) {
           this.deps.diagnostic(content ? 'output-limit' : 'output-empty');
@@ -292,7 +293,7 @@ export class CopilotService {
         context.deliver({ instructions: sessionConfig.systemMessage.content,
           tools: tools.map(({ name, parameters, description }) => ({ name, parameters, description })) });
         const answer = await this.complete(client, sessionConfig, prompt, codeAnswerSchema, context.signal,
-          CODE_LIMITS.milliseconds, answer => validateCodeAnswer(answer, input, context), prompt => { context.deliver(prompt); });
+          CODE_LIMITS.milliseconds, answer => validateCodeAnswer(answer, input, context, this.deps.diagnostic), prompt => { context.deliver(prompt); });
         await context.assertUnchanged();
         return codeReviewResult(input, answer, context);
       } finally { context.close(); }
