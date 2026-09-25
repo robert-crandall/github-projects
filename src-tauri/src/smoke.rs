@@ -22,6 +22,15 @@ struct SmokeTask<'a> {
     evidence: Vec<()>,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmokeAgentIdentity<'a> {
+    id: &'a serde_json::Value,
+    job_type: &'a serde_json::Value,
+    instructions: &'a serde_json::Value,
+    model: &'a serde_json::Value,
+}
+
 #[derive(Default)]
 pub(crate) struct ServiceFixture {
     rankings: std::sync::atomic::AtomicUsize,
@@ -38,8 +47,16 @@ impl ServiceFixture {
             Some("work.assess") => {
                 let input = &request["input"];
                 let tasks = input["tasks"].as_array().ok_or_else(failed)?;
+                let agent = input["agents"].as_array().ok_or_else(failed)?.iter()
+                    .find(|agent| agent["jobType"] == "task-assessment").ok_or_else(failed)?;
                 let instructions =
-                    serde_json::to_string(&input["instructions"]).map_err(|_| failed())?;
+                    serde_json::to_string(&agent["instructions"]).map_err(|_| failed())?;
+                let identity = SmokeAgentIdentity {
+                    id: &agent["id"], job_type: &agent["jobType"],
+                    instructions: &agent["instructions"], model: &agent["model"],
+                };
+                let configuration = format!("{:x}", Sha256::digest(
+                    serde_json::to_vec(&identity).map_err(|_| failed())?));
                 let mut assessments = Vec::new();
                 for task in tasks.iter().take(20) {
                     if task["action"] != "manual"
@@ -71,8 +88,15 @@ impl ServiceFixture {
                         "resultId": uuid::Uuid::new_v4().to_string(), "id": task["id"],
                         "profileId": input["profileId"], "fingerprint": fingerprint,
                         "instructionsFingerprint": format!("{:x}", Sha256::digest(instructions.as_bytes())),
-                        "assessmentVersion": "work-assessment-v2", "model": input["model"], "evaluatedAt": now,
+                        "assessmentVersion": "work-assessment-v3", "model": agent["model"], "evaluatedAt": now,
+                        "agent": {
+                            "id": agent["id"], "name": agent["name"], "jobType": "task-assessment",
+                            "configurationFingerprint": configuration
+                        },
                         "assessment": {
+                            "impact": {"rating": "unknown", "rationale": "Synthetic assessment"},
+                            "visibility": {"rating": "unknown", "rationale": "Synthetic assessment"},
+                            "effort": {"rating": "unknown", "rationale": "Synthetic assessment"},
                             "importance": "Native smoke assessment", "urgency": "No deadline established",
                             "blockers": "None established", "uncertainty": "Synthetic assessment",
                             "supportingEvidence": [{"reference": "$title", "summary": "Native smoke capture"}],

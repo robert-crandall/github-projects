@@ -22,6 +22,7 @@ export function RunProgress({ run, details }: { run: WorkQueueSnapshot; details:
   }, [run.running, progress?.startedAt]);
 
   const sources = progress?.sources ?? [];
+  const pipeline = !progress?.kind || progress.kind === 'pipeline';
   const done = sources.filter(source => source.state === 'done').length;
   const failed = sources.filter(source => source.state === 'failed').length;
   const processed = done + failed;
@@ -35,14 +36,15 @@ export function RunProgress({ run, details }: { run: WorkQueueSnapshot; details:
   const remainingLabel = !run.running && remaining > 0 ? 'not run' : 'remaining';
   const counts = `${done} done, ${failed} failed, ${remaining} ${remainingLabel}`;
   const phase = run.running
-    ? `${active ? `Now: ${active.name}` : phases[run.phase]}${['preparing', 'intake', 'collecting'].includes(run.phase) ? ' · Ranking follows' : ''}`
+    ? `${active ? `Now: ${active.name}` : phases[run.phase]}${pipeline && ['preparing', 'intake', 'collecting'].includes(run.phase) ? ' · Ranking follows' : ''}`
     : `${phases[run.phase]}${failed ? ' · Partial coverage' : detailCount && !run.error ? ' · Coverage notes' : ''}`;
 
   if (!progress && !details.length) return null;
   return <section className="task-run" aria-label="Run progress">
     {progress && <>
       <div className="task-run-line" role="status" aria-atomic="true">
-        <strong>{sources.length ? `Collections · ${processed} of ${sources.length} processed` : 'No enabled collections'}</strong>
+        <strong>{!pipeline ? progress.kind === 'assess' ? 'Assessor only · Order unchanged' : 'Prioritizer only · Whole eligible list'
+          : sources.length ? `Collections · ${processed} of ${sources.length} processed` : 'No enabled collections'}</strong>
         {!!sources.length && <span>{done} done · <span className={failed ? 'task-run-warning' : undefined}>{failed} failed</span> · {remaining} {remainingLabel}</span>}
       </div>
       {!!sources.length && <div className="task-run-track" role="progressbar" aria-label="Collections processed"

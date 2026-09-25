@@ -10,6 +10,8 @@ import type { WorkRankInput, Workstream } from '../src/work-schema.ts';
 import { LIMITS } from '../src/schema.ts';
 import { ServiceError } from '../src/errors.ts';
 import { semanticRankTask } from '../src/work-rank-input.ts';
+import { rankWithAssessments } from './work-fixture.ts';
+import { unknownRatings } from '../../tests/assessment-fixture.ts';
 
 const at = '2026-09-10T12:00:00Z';
 const stream: Workstream = {
@@ -59,6 +61,7 @@ async function sdkHarness<T>(operation: (context: {
           const system = config.systemMessage as { content: string };
           const result = system.content.startsWith('Assess each task') ? {
             assessments: input.tasks.map(task => ({
+              ...unknownRatings,
               id: task.id, importance: 'Explicit task', urgency: 'No deadline', blockers: 'None known',
               supportingEvidence: [{ reference: '$title', summary: 'Explicit task' }],
               uncertainty: 'No further evidence', reevaluateAt: '2026-09-11T12:00:00.000Z',
@@ -95,7 +98,7 @@ describe('isolated Copilot work operations', () => {
   test('rank gets selected model and owner instructions, no tools, exact permutation and reasons', async () => {
     await sdkHarness(async ({ sdk, configs, prompts, setResponse }) => {
       setResponse({ ranking: [{ id: 'T2', reason: 'First' }, { id: 'T1', reason: 'Second' }] });
-      expect(await sdk.rankWork(tasks, signal())).toMatchObject({
+      expect(await rankWithAssessments(sdk, tasks, signal())).toMatchObject({
         orderedIds: ['b', 'a'], reasons: [{ id: 'b', reason: 'First' }, { id: 'a', reason: 'Second' }],
       });
       expect(configs[0]).toMatchObject({ model: 'selected-model', availableTools: [], mcpServers: {}, tools: [], mcpOAuthTokenStorage: 'in-memory' });
@@ -114,10 +117,10 @@ describe('isolated Copilot work operations', () => {
       { ranking: [{ id: 'T1', reason: ' ' }, { id: 'T2', reason: 'y' }] },
     ]) await sdkHarness(async ({ sdk, setResponse }) => {
       setResponse(result);
-      await expect(sdk.rankWork(tasks, signal())).rejects.toMatchObject({ dto: { code: 'copilot_output' } });
+      await expect(rankWithAssessments(sdk, tasks, signal())).rejects.toMatchObject({ dto: { code: 'copilot_output' } });
     });
     await sdkHarness(async ({ sdk }) => {
-      await expect(sdk.rankWork({ ...tasks, tasks: [tasks.tasks[0]!, tasks.tasks[0]!] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+      await expect(rankWithAssessments(sdk, { ...tasks, tasks: [tasks.tasks[0]!, tasks.tasks[0]!] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
     });
   });
   test('200 tasks above the old payload limit are ranked together with a bounded work deadline', async () => {
@@ -128,7 +131,7 @@ describe('isolated Copilot work operations', () => {
       expect(Buffer.byteLength(JSON.stringify({ tasks: large.tasks }))).toBeGreaterThan(LIMITS.modelBytes);
       expect(Buffer.byteLength(JSON.stringify({ tasks: large.tasks }))).toBeLessThan(LIMITS.workModelBytes);
       setResponse({ ranking: large.tasks.map((_, index) => ({ id: `T${index + 1}`, reason: `Priority ${index + 1}` })).reverse() });
-      const result = await sdk.rankWork(large, signal());
+      const result = await rankWithAssessments(sdk, large, signal());
       expect(result.orderedIds).toEqual(large.tasks.map(task => task.id).sort().reverse());
       expect(result.reasons.map(reason => reason.id)).toEqual(result.orderedIds);
       const batches = prompts.slice(0, -1).map(prompt => JSON.parse(prompt).input.tasks);
@@ -148,7 +151,7 @@ describe('isolated Copilot work operations', () => {
           url: 'https://example.com/task', summary: 'x'.repeat(2000),
         })),
       }] };
-      await expect(sdk.rankWork(large, signal())).rejects.toMatchObject({ dto: { code: 'limit' } });
+      await expect(rankWithAssessments(sdk, large, signal())).rejects.toMatchObject({ dto: { code: 'limit' } });
       expect(configs).toEqual([]);
     });
   });
@@ -159,7 +162,7 @@ describe('isolated Copilot work operations', () => {
           { id: 'T1', reason: 'First' }, { id: prompts.length === 2 ? 'T1' : 'T2', reason: 'Second' },
         ] });
       });
-      expect((await sdk.rankWork(tasks, signal())).orderedIds).toEqual(['a', 'b']);
+      expect((await rankWithAssessments(sdk, tasks, signal())).orderedIds).toEqual(['a', 'b']);
       expect(prompts).toHaveLength(3);
     });
   });
@@ -261,7 +264,7 @@ describe('isolated Copilot work operations', () => {
   test('ranking deadlines describe a read-only failure, not a possibly completed GitHub write', async () => {
     await sdkHarness(async ({ sdk, setHook }) => {
       setHook(async () => { throw new ServiceError('deadline', true); });
-      await expect(sdk.rankWork(tasks, signal())).rejects.toMatchObject({
+      await expect(rankWithAssessments(sdk, tasks, signal())).rejects.toMatchObject({
         dto: { code: 'deadline', message: expect.stringContaining('read-only') },
       });
     });
@@ -328,7 +331,7 @@ describe('isolated Copilot work operations', () => {
       expect(configs[0]!.workingDirectory).not.toBe(configs[1]!.workingDirectory);
       setHook(async () => {});
       setResponse({ ranking: [{ id: 'T1', reason: 'First' }, { id: 'T2', reason: 'Second' }] });
-      await sdk.rankWork(tasks, signal());
+      await rankWithAssessments(sdk, tasks, signal());
       expect(clients[2]!.env!.HOME).not.toBe(clients[0]!.env!.HOME);
       expect(clients[2]!.baseDirectory).not.toBe(clients[0]!.baseDirectory);
       expect(clients[2]!.mode).toBe('empty');
@@ -354,7 +357,7 @@ describe('isolated Copilot work operations', () => {
   test('auth failures and unobserved output cannot become empty success', async () => {
     await sdkHarness(async ({ sdk, setAuth }) => {
       setAuth(false);
-      await expect(sdk.rankWork(tasks, signal())).rejects.toMatchObject({ dto: { code: 'authentication' } });
+      await expect(rankWithAssessments(sdk, tasks, signal())).rejects.toMatchObject({ dto: { code: 'authentication' } });
     });
     await sdkHarness(async ({ sdk, setHook, setResponse }) => {
       setResponse({ requests: [], warnings: [] });

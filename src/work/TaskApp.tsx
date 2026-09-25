@@ -68,7 +68,7 @@ function NewProfile({ queue, currentName, close, created }: {
       <p className="field-help">Start with an empty task list. Your other profiles keep their tasks and Done history.</p>
       <label className="checkbox-label"><input type="checkbox" checked={copySettings}
         onChange={event => setCopySettings(event.target.checked)} />Copy saved instructions and sources from {currentName}</label>
-      <p className="field-help">Without a copy, instructions and sources start empty. Automatic runs start off.</p>
+      <p className="field-help">Without a copy, agents use default instructions and sources start empty. Automatic runs start off.</p>
       {error && <p className="task-error" role="alert">{error}</p>}
       <footer className="modal-footer"><button type="button" className="secondary" onClick={close}>Cancel</button>
         <button type="submit" className="primary" disabled={!name.trim()}>Create profile</button></footer>
@@ -255,6 +255,13 @@ export function TaskApp({ controller, queue, remote }: {
     {!settings && <header className="task-top"><h1>{filters ? 'Filters' : 'Ranked Tasks'}</h1>
       <button className="primary" disabled={run.running} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
     </header>}
+    {!settings && <div className="task-agent-actions">
+      <div className="button-row">
+        <button className="secondary" disabled={run.running} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
+        <button className="secondary" disabled={run.running} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
+      </div>
+      <p className="field-help">Assessor saves new judgments without changing order. Prioritizer orders all eligible tasks from current saved assessments. Neither collects sources.</p>
+    </div>}
     {!settings && <div className="task-profile-bar">
       <label htmlFor="work-profile">Work profile</label>
       <select id="work-profile" value={state.activeWorkProfile.id} disabled={profileBusy}
@@ -334,7 +341,7 @@ export function TaskApp({ controller, queue, remote }: {
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved'
       : saved.assessmentPending.length ? 'Task edits saved; assessments pending' : 'Saved on this Mac'}</span>
       {run.progress && <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span>}
-      <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last successful run: ${date(state.work.lastCompletedAt)}`}</span></footer>
+      <span>{run.running ? 'Agent run in progress; local edits remain available' : `Last successful collection run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     </div>
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}
     {newProfile && <NewProfile queue={queue} currentName={state.activeWorkProfile.name} close={() => setNewProfile(false)}

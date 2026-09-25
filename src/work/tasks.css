@@ -11,6 +11,8 @@
 .task-sidebar-bottom > p { color: var(--secondary); font-size: 12px; padding: 20px 10px 0; }
 .task-workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .task-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 24px 28px 16px; }
+.task-agent-actions { padding: 0 28px 16px; }
+.task-agent-actions .field-help { margin-top: 8px; }
 .task-brand { display: flex; align-items: center; gap: 12px; }
 .task-brand h1 { font-size: 25px; }
 .task-profile-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 28px 16px; }
@@ -115,8 +117,8 @@
 .task-model { max-width: 380px; }
 .task-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .task-section-heading h2 { margin-bottom: 0; }
-.task-stream { min-width: 0; margin: 24px 0; padding: 0 0 24px; border: 0; border-bottom: 1px solid var(--border); }
-.task-stream legend { font-size: 14px; font-weight: 600; padding: 0; }
+.task-stream, .task-agent { min-width: 0; margin: 24px 0; padding: 0 0 24px; border: 0; border-bottom: 1px solid var(--border); }
+.task-stream legend, .task-agent legend { font-size: 14px; font-weight: 600; padding: 0; }
 .task-stream-top { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
 .task-stream-top .checkbox-label { margin: 0; }
 .task-field-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
@@ -143,6 +145,7 @@
   .task-shortcut { display: none; }
   .task-context { padding: 0 20px 22px; }
   .task-profile-bar { padding: 0 20px 20px; }
+  .task-agent-actions { padding: 0 20px 16px; }
   .task-main { padding: 0 20px 40px; }
   .task-body { grid-template-columns: minmax(0, 1fr); }
   .task-with-detail .task-main { display: none; }

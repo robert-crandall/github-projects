@@ -276,6 +276,7 @@ export function rankInput(state: AppState): WorkRankInput {
   return workRankInputSchema.parse({
     profileId: state.activeWorkProfile.id,
     instructions: work.settings.instructions, model: work.settings.model,
+    ...(work.settings.agents ? { agents: work.settings.agents } : {}),
     tasks: rankedTasks(state).map(rankTask),
   });
 }

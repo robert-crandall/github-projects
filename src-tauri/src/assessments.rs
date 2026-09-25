@@ -25,6 +25,34 @@ pub struct Assessment {
     supporting_evidence: Vec<Evidence>,
     uncertainty: String,
     reevaluate_at: String,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    impact: Option<Rating>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    visibility: Option<Rating>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    effort: Option<Rating>,
+}
+
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Rating {
+    rating: String,
+    rationale: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssessmentAgent {
+    id: String,
+    name: String,
+    job_type: String,
+    configuration_fingerprint: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -39,6 +67,8 @@ pub struct SavedAssessment {
     model: String,
     evaluated_at: String,
     assessment: Assessment,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    agent: Option<AssessmentAgent>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -69,7 +99,21 @@ impl SavedAssessment {
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         };
         let result = &self.assessment;
+        let ratings = [&result.impact, &result.visibility, &result.effort];
+        let format_valid = match self.assessment_version.as_str() {
+            "work-assessment-v2" => self.agent.is_none() && ratings.iter().all(|r| r.is_none()),
+            "work-assessment-v3" => self.agent.as_ref().is_some_and(|agent| {
+                bounded(&agent.id, 1, 100) && bounded(&agent.name, 1, 100)
+                    && !agent.name.trim().is_empty() && agent.job_type == "task-assessment"
+                    && hash(&agent.configuration_fingerprint)
+            }) && ratings.iter().all(|r| r.as_ref().is_some_and(|r| {
+                ["high", "medium", "low", "unknown"].contains(&r.rating.as_str())
+                    && !r.rationale.trim().is_empty() && bounded(&r.rationale, 1, 400)
+            })),
+            _ => false,
+        };
         if Uuid::parse_str(&self.result_id).is_err()
+            || !format_valid
             || !bounded(&self.id, 1, 500)
             || !bounded(&self.profile_id, 1, 100)
             || !hash(&self.fingerprint)
@@ -357,6 +401,52 @@ mod tests {
             .save(&store.read().unwrap().revision, snapshot())
             .unwrap();
         (dir, store)
+    }
+
+    #[test]
+    fn v2_and_v3_history_remain_readable_exportable_and_validated_together() {
+        let (dir, mut store) = setup();
+        let legacy = result("manual");
+        let mut raw = serde_json::to_value(result("manual")).unwrap();
+        raw["assessmentVersion"] = json!("work-assessment-v3");
+        raw["agent"] = json!({
+            "id": "task-assessment", "jobType": "task-assessment", "name": "Original name",
+            "configurationFingerprint": "c".repeat(64)
+        });
+        for field in ["impact", "visibility", "effort"] {
+            raw["assessment"][field] = json!({"rating":"unknown","rationale":"No supplied evidence"});
+        }
+        let current: SavedAssessment = serde_json::from_value(raw.clone()).unwrap();
+        store.assessment_append("default", vec![legacy.clone(), current.clone()]).unwrap();
+        drop(store);
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        let page = store.assessment_read("default", "manual", None).unwrap();
+        assert_eq!(page.assessments[0].result, current);
+        assert_eq!(page.assessments[1].result, legacy);
+        let export: Value = serde_json::from_str(&store.export_json(&store.read().unwrap().revision).unwrap()).unwrap();
+        assert_eq!(export["assessments"][0]["assessmentVersion"], "work-assessment-v2");
+        assert!(export["assessments"][0].get("agent").is_none());
+        assert!(export["assessments"][0]["assessment"].get("effort").is_none());
+        assert_eq!(export["assessments"][1]["assessment"]["effort"]["rating"], "unknown");
+        let mut null_rating = raw.clone();
+        null_rating["assessment"]["effort"] = Value::Null;
+        assert!(serde_json::from_value::<SavedAssessment>(null_rating).is_err());
+        let mut null_agent = serde_json::to_value(&legacy).unwrap();
+        null_agent["agent"] = Value::Null;
+        assert!(serde_json::from_value::<SavedAssessment>(null_agent).is_err());
+        for field in ["missing-rating", "invalid-rating", "missing-agent", "wrong-role", "wrong-version"] {
+            let mut invalid = raw.clone();
+            invalid["resultId"] = json!(Uuid::new_v4().to_string());
+            match field {
+                "missing-rating" => { invalid["assessment"].as_object_mut().unwrap().remove("effort"); },
+                "invalid-rating" => invalid["assessment"]["effort"]["rating"] = json!("three hours"),
+                "missing-agent" => { invalid.as_object_mut().unwrap().remove("agent"); },
+                "wrong-role" => invalid["agent"]["jobType"] = json!("task-prioritization"),
+                _ => invalid["assessmentVersion"] = json!("work-assessment-v2"),
+            }
+            assert!(store.assessment_append("default", vec![serde_json::from_value(invalid).unwrap()]).is_err());
+        }
+        assert_eq!(store.assessment_read("default", "manual", None).unwrap().assessments.len(), 2);
     }
 
     #[test]

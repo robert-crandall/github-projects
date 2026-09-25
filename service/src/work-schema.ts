@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { taskAgents, taskAgentsSchema } from './work-agents.ts';
 
 const time = z.iso.datetime();
 const id = z.string().min(1).max(500);
@@ -54,12 +55,15 @@ export const workstreamSchema = z.strictObject({
   path: ['action'],
   message: 'Choose a supported GitHub action. Review-result is supported only by Slack/MCP sources and push intake.',
 });
-export const workSettingsSchema = z.strictObject({
+const savedWorkSettingsSchema = z.strictObject({
   instructions: z.string().max(16000),
   model: z.string().max(100),
+  agents: taskAgentsSchema.optional(),
   streams: z.array(workstreamSchema).max(30),
   schedule: z.strictObject({ enabled: z.boolean(), everyMinutes: z.number().int().min(5).max(1440) }),
 });
+export const workSettingsSchema = savedWorkSettingsSchema.transform((settings): z.infer<typeof savedWorkSettingsSchema> =>
+  ({ ...settings, agents: taskAgents(settings) }));
 export const workRankingSchema = z.strictObject({
   orderedIds: z.array(id).max(2000),
   reasons: z.array(z.strictObject({ id, reason: z.string().trim().min(1).max(1000) })).max(2000),
@@ -107,6 +111,8 @@ export const workRankInputSchema = z.strictObject({
   profileId: z.string().min(1).max(100).optional(),
   assessmentIds: z.array(z.uuid()).max(2000).optional(),
   instructions: z.string().max(16000), model: z.string().max(100),
+  agents: taskAgentsSchema.optional(),
+  force: z.boolean().optional(),
   tasks: z.array(z.strictObject({
     id, title: z.string().max(2000), notes: z.string().max(16000),
     action: workActionSchema, url: url.nullable(),
