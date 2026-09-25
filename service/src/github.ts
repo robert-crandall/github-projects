@@ -9,7 +9,7 @@ import {
   type ConversationInput, type Diagnostic, type Evidence, type Reference, type Thread,
 } from './schema.ts';
 
-export type ApiResponse = { status: number; headers: Record<string, string>; body: unknown };
+export type ApiResponse = { status: number; headers: Record<string, string>; body: unknown; bytes?: number };
 export interface GitHubApi {
   request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: { ignored: true } | { query: string }): Promise<ApiResponse>;
 }

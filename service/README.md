@@ -22,6 +22,50 @@ The executable embeds Bun and the SDK JavaScript. It runs outside the repository
 
 The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was released against CLI 1.0.83. The packaged arm64 executable was exercised with the installed 1.0.84-1 CLI; packaged ranking also succeeded with Homebrew 1.0.84-6 under a GUI-like PATH. Newer/older CLIs must pass the SDK handshake; failures remain explicit. An experimental MCP-start scratch probe is not a compatibility verdict for normal SDK inference, and successful ranking does not establish Slack authentication. Live Slack verification was skipped after OAuth timed out; no authentication success is assumed. The x64 build command is provided, but this implementation's real authentication/inference smoke ran on arm64.
 
+## Code review backend (not exposed to the desktop)
+
+**No production callers; #47 wires this backend into saved task sessions.** No RPC operation, native schema, configured agent role or UI control invokes this capability yet. Existing assessors and prioritizers still have no tools.
+
+Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another SDK client for each task. [`src/code-review.ts`](src/code-review.ts) exports `codeReviewInputSchema`, `CodeReviewInput`, `codeReviewResultSchema` and `CodeReviewResult`. The strict input contains only:
+
+```ts
+{
+  taskId: 'saved-task-id',
+  source: { repo: 'owner/repo', kind: 'issue', number: 123 },
+  job: 'implementation-assessment',
+  agent: { id: 'stable-agent-id', instructions: 'Owner judgment rules', model: '' },
+}
+```
+
+`implementation-assessment` requires an issue; `pr-review` requires `kind: 'pr'`. An issue URL that actually identifies a PR returns `unsupported`; callers must select its canonical PR identity. Never include workspace notes, credentials or arbitrary URLs. Blank model means SDK default, not a claimed resolved model.
+
+The validated `code-review-v1` result includes a discriminated `answer`, the task ID, service-observed source text/fingerprint, source update/observation times, a final `verifiedAt`, requested model/instructions and a semantic configuration fingerprint. Implementation answers contain findings and a recommended `nextStep`; PR answers contain findings with severity, rationale and quoted file/line locations. No answer marks a task done or submits a GitHub review. SDK sessions remain ephemeral. The future caller owns durable run IDs, status, history and saving results, including partial results and their warnings.
+
+Issue code is pinned to the recorded default-branch commit. PR results record `source.head` (head repository/commit/tree), `source.baseTip` (observed base branch SHA) and `source.base` (the selected repository's **merge-base** commit/tree). The `base` tool alias and deleted-line citations refer to that merge base, not the base branch tip. Renames use the previous path on the base side. Source metadata is rechecked after collection and after inference; issues also recheck the default branch at the end. A changed source/head/base rejects with a read-only `source_changed`, not a supposedly current result. Later callers must still detect changes after `verifiedAt`.
+
+Changes come from immutable `compare/{baseSHA}...{headSHA}?per_page=1`, never mutable PR file pages. The [GitHub compare contract](https://docs.github.com/en/rest/commits/commits#compare-two-commits) supports commit SHAs across repositories in the same fork network. It returns at most 300 files on the first page independently of commit pagination; this backend retains at most 100. Unavailable comparisons or deleted/inaccessible forks fail explicitly, without falling back to another repository or mutable refs.
+
+Only `list_code` and `read_code` are available. Their host handlers validate arguments again (SDK 1.0.13 `defineTool` does not perform validation). They close over recorded repositories/tree/blob SHAs and accept only a revision alias, literal path/prefix and bounded offsets/line ranges. They cannot choose a repository, ref, host, URL, credential, shell command or write method. Blob bytes must match the tree's blob SHA. Repository content and owner instructions cannot change capabilities.
+
+The dedicated `CodeGitHubApi` implements the existing request interface with fixed-host HTTPS GET routes, the operation's ephemeral credential and `redirect: 'error'` **before any redirect is followed**. It ignores API-supplied download, pagination and other URLs. The existing `GhApi` and collectors are unchanged. Other SDK restrictions, isolated HOME/config, unconditional permission denial and the service's single-client busy guard remain active; only these two validated read tools skip permission prompts.
+
+| Code-job bound | Maximum |
+| --- | --- |
+| Entire operation, including authentication/source reads/inference | 180 seconds, plus bounded cleanup |
+| GitHub requests / SDK tool calls | 40 / 24, including failed calls |
+| HTTP response body / total HTTP body bytes | 2 MiB / 8 MiB, counted while streaming, including JSON whitespace |
+| Emitted prompts, instructions, tool declarations/results | 180,000 serialized UTF-8 bytes in total, including the one correction prompt |
+| Source body / retained patches | 32,000 / 60,000 UTF-8 bytes |
+| Repository tree / file list page | 4,000 entries per revision / 100 entries per tool call |
+| Regular UTF-8 file / read range | 128 KiB / 200 lines per call |
+| Model output | 60,000 bytes per answer, at most one format/grounding correction |
+
+Results always have `coverage.status: 'partial'`: bounded, selective inspection is not whole-repository verification. `coverage.changes` is complete only when every reported changed file has a complete patch and every changed line was returned by a read tool with matching patch text. `files` reports expected, compared, retained, omitted and incomplete-patch counts. `knownChangedLines` excludes unavailable patches; it is not a total when files/patches are missing. Evidence records preserve exact read ranges, text, blob and revision provenance. Findings must cite returned lines verbatim; PR locations must start on a matching changed line. Structural grounding is not proof that the model's reasoning is correct.
+
+Missing/truncated patches, capped trees/files/source bodies, binary or non-UTF-8 files, symlinks, submodules, oversized files and inaccessible paths are explicit coverage warnings. Comments/reviews/checks and private task notes are not collected. Tools support listing and reading, not repository-wide text search or execution. Budget exhaustion, malformed output, cancellation and deadlines return `ServiceError`; fatal tool budgets abort inference even if the SDK swallows the tool error. Cancellation reaches HTTP and SDK abort/disconnect/delete/force-stop cleanup. No local repository checkout or repository code is executed.
+
+`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers, to cover these contracts. No live source/model execution or desktop integration is implied by those tests.
+
 ## Native host contract
 
 Start one service process **on demand**, with private piped stdin/stdout. There is no socket or HTTP server. Starting the process does not check connections, initialize the SDK, or fetch GitHub.

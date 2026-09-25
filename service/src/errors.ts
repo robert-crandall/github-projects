@@ -28,7 +28,9 @@ const messages: Record<ServiceErrorDTO['code'], string> = {
 export class ServiceError extends Error {
   readonly dto: ServiceErrorDTO;
   constructor(code: ServiceErrorDTO['code'], retryable = false, context: 'general' | 'read' = 'general') {
-    const message = context === 'read' && (code === 'deadline' || code === 'cancelled')
+    const message = context === 'read' && code === 'source_changed'
+      ? 'The source or repository revision changed during the read-only operation. No current review was returned; retry explicitly.'
+      : context === 'read' && (code === 'deadline' || code === 'cancelled')
       ? `The read-only operation ${code === 'deadline' ? 'timed out' : 'was cancelled'}. Saved local work is unchanged; retry explicitly.`
       : messages[code];
     super(message);
