@@ -1558,6 +1558,32 @@ describe('concurrency and exact ranking', () => {
 
 
 describe('collection progress', () => {
+  test.each(['collected', 'manual', 'empty'] as const)('publishes monotonic assessment/order phases for a %s queue', async kind => {
+    const saved = initial();
+    if (kind === 'collected') saved.work.settings.streams = [defaultWorkState().settings.streams[0]!];
+    if (kind === 'manual') saved.tasks = [{ id: 'manual', title: 'Local task', notes: '', status: 'open', createdAt: before }];
+    const mock = await fixture(saved, request => request.op === 'work.collect'
+      ? { ...collection(), coverageInfo: ['Older history remains'] } : undefined);
+    const phases: string[] = [];
+    const unsubscribe = mock.queue.subscribe(() => {
+      const phase = mock.queue.getSnapshot().phase;
+      if (phases.at(-1) !== phase) phases.push(phase);
+    });
+    await mock.queue.run();
+    unsubscribe();
+    expect(phases).toEqual([
+      'preparing', 'intake',
+      ...(kind === 'collected' ? ['collecting'] : []),
+      ...(kind !== 'empty' ? ['assessing'] : []),
+      'ranking', 'saving', 'idle',
+    ]);
+    expect(mock.requests.filter(request => request.op === 'work.assess' || request.op === 'work.rank')
+      .map(request => request.op)).toEqual(kind === 'empty' ? [] : ['work.assess', 'work.rank']);
+    if (kind === 'collected') expect(mock.queue.getSnapshot().warnings).toEqual([
+      `${saved.work.settings.streams[0]!.name}: Older history remains`,
+    ]);
+  });
+
   test('tracks a frozen enabled-source checklist through intake, failures, ranking and saving', async () => {
     const saved = initial();
     const template = defaultWorkState().settings.streams[0]!;

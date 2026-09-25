@@ -376,7 +376,7 @@ export class WorkQueue {
         }
         this.sourceProgress(stream.id, { state: failed ? 'failed' : 'done' });
       }
-      this.publish({ phase: 'ranking', warnings: [...warnings] });
+      this.publish({ warnings: [...warnings] });
       try { warnings.push(...await this.rank(profileId, generation)); }
       catch (error) { errors.push(`Ranking: ${message(error)}`); }
       this.publish({ phase: 'saving', error: errors.join('\n'), warnings: [...warnings] });
