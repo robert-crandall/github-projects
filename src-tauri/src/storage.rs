@@ -106,6 +106,8 @@ pub(crate) fn read_connection(connection: &Connection) -> Result<WorkspaceRead> 
             let snapshot: Snapshot =
                 serde_json::from_str(&json).map_err(|_| NativeError::corrupt())?;
             snapshot.encode().map_err(|_| NativeError::corrupt())?;
+            crate::assessments::validate_ownership(&snapshot)
+                .map_err(|_| NativeError::corrupt())?;
             if saved_at
                 .as_deref()
                 .map(crate::model::timestamp)
@@ -205,6 +207,7 @@ impl Store {
             "INSERT INTO workspace (id, revision) VALUES (1, ?)",
             [Uuid::new_v4().to_string()],
         )?;
+        crate::assessments::initialize(&transaction)?;
         transaction.commit()?;
         File::open(&self.directory)?.sync_all()?;
         Ok(())
@@ -239,6 +242,7 @@ impl Store {
     }
 
     pub fn save(&mut self, expected_revision: &str, snapshot: Snapshot) -> Result<WorkspaceRead> {
+        crate::assessments::validate_ownership(&snapshot)?;
         let json = snapshot.encode()?;
         let mut connection = self.connection()?;
         let previous = read_connection(&connection)?;
@@ -354,11 +358,16 @@ impl Store {
     }
 
     pub fn export_json(&self, expected_revision: &str) -> Result<String> {
-        let read = self.read()?;
+        let connection = self.connection()?;
+        let read = read_connection(&connection)?;
         if read.revision != expected_revision {
             return Err(NativeError::conflict());
         }
-        serde_json::to_string(&read).map_err(|_| NativeError::corrupt())
+        crate::assessments::export_json(&connection, read)
+    }
+
+    pub(crate) fn rotate_recovery_token(&mut self) {
+        self.recovery_token = Uuid::new_v4().to_string();
     }
 
     pub fn export_raw(&self) -> Result<RawExport> {
@@ -385,6 +394,18 @@ impl Store {
             id,
             directory: directory.to_string_lossy().into_owned(),
         })
+    }
+
+    pub fn recover_at_revision(
+        &mut self,
+        backup_id: &str,
+        expected_token: &str,
+        expected_revision: Option<&str>,
+    ) -> Result<WorkspaceRead> {
+        if self.status().revision.as_deref() != expected_revision {
+            return Err(NativeError::conflict());
+        }
+        self.recover(backup_id, expected_token)
     }
 
     pub fn recover(&mut self, backup_id: &str, expected_token: &str) -> Result<WorkspaceRead> {

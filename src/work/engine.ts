@@ -110,6 +110,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
   const additionalNotes = second.title === first.title ? second.notes : [second.title, second.notes].filter(Boolean).join('\n');
   return {
     ...first, status, completedAt,
+    assessmentTaskIds: [...new Set([first.id, second.id, ...first.assessmentTaskIds ?? [], ...second.assessmentTaskIds ?? []])],
     createdAt: Date.parse(first.createdAt) <= Date.parse(second.createdAt) ? first.createdAt : second.createdAt,
     notes: [...new Set([first.notes, additionalNotes].filter(Boolean))].join('\n\n'),
     work: workMetadataSchema.parse({
@@ -273,13 +274,18 @@ export function rankedTasks(state: AppState): Task[] {
 export function rankInput(state: AppState): WorkRankInput {
   const work = state.work ?? defaultWorkState();
   return workRankInputSchema.parse({
+    profileId: state.activeWorkProfile.id,
     instructions: work.settings.instructions, model: work.settings.model,
-    tasks: rankedTasks(state).map(task => ({
-      id: task.id, title: task.title.slice(0, 2000), notes: task.notes.slice(0, 16000), action: task.work?.action ?? 'manual',
-      url: task.work?.url ?? null, evidence: task.work?.evidence ?? [], createdAt: task.createdAt,
-      availability: task.work?.availability === 'unknown' ? 'unknown' : 'actionable',
-      availabilityReason: task.work?.availabilityReason ?? '',
-      ...(task.work?.context ? { context: task.work.context } : {}),
-    })),
+    tasks: rankedTasks(state).map(rankTask),
   });
+}
+
+export function rankTask(task: Task): WorkRankInput['tasks'][number] {
+  return {
+    id: task.id, title: task.title.slice(0, 2000), notes: task.notes.slice(0, 16000), action: task.work?.action ?? 'manual',
+    url: task.work?.url ?? null, evidence: task.work?.evidence ?? [], createdAt: task.createdAt,
+    availability: task.work?.availability === 'unknown' ? 'unknown' : 'actionable',
+    availabilityReason: task.work?.availabilityReason ?? '',
+    ...(task.work?.context ? { context: task.work.context } : {}),
+  };
 }

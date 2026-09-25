@@ -50,6 +50,16 @@
 .task-detail section h3 { font-size: 14px; margin-bottom: 8px; }
 .task-detail section > p, .task-detail-notice { font-size: 13px; color: var(--secondary); }
 .task-detail-notice { margin-top: 16px; }
+.task-assessment { font-size: 13px; overflow-wrap: anywhere; }
+.task-assessment dl { margin: 16px 0; }
+.task-assessment dt { font-weight: 600; margin-top: 12px; }
+.task-assessment dd { margin: 4px 0 0; white-space: pre-wrap; }
+.task-assessment h4 { font-size: 13px; margin: 18px 0 8px; }
+.task-assessment ul { padding-left: 20px; }
+.task-assessment li { margin: 8px 0; }
+.task-assessment summary { cursor: pointer; padding: 8px 0; }
+.task-assessment summary:focus-visible { outline: 2px solid var(--accent); }
+.task-assessment select { margin-top: 8px; }
 .task-evidence { list-style: none; margin: 0; padding: 0; }
 .task-evidence li { padding: 14px 0; border-bottom: 1px solid var(--border); }
 .task-evidence li > p { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }

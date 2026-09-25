@@ -25,6 +25,7 @@ export function createHandler(github = new GitHubService(), copilot = new Copilo
       case 'copilot.interpretCapture': return copilot.interpretCapture(request.input, signal);
       case 'copilot.reconsider': return copilot.reconsider(request.input, signal);
       case 'work.collect': return work.collect(request.input, signal);
+      case 'work.assess': return work.assess(request.input, signal);
       case 'work.rank': return work.rank(request.input, signal);
       case 'work.connections': return work.listConnections();
       case 'work.intake': return work.pendingIntake();

@@ -18,6 +18,17 @@ export function validateWorkProfiles(state: AppState): void {
     || tasks.some(task => task.threadId && !threads.has(task.threadId))) {
     throw new Error('Saved work profiles have inconsistent task references. Export them before explicit recovery.');
   }
+  for (const profile of [{ ...state.activeWorkProfile, tasks: state.tasks }, ...state.inactiveWorkProfiles]) {
+    const owners = new Map(profile.tasks.map(task => [task.id, task.id]));
+    for (const task of profile.tasks) {
+      for (const id of task.assessmentTaskIds ?? []) {
+        if (owners.has(id) && owners.get(id) !== task.id) {
+          throw new Error('Assessment history aliases must belong to exactly one task in each profile.');
+        }
+        owners.set(id, task.id);
+      }
+    }
+  }
 }
 
 export function renameWorkProfile(state: AppState, name: string): AppState {

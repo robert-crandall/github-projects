@@ -2,8 +2,25 @@ use crate::{
     error::{NativeError, Result},
     NativeState,
 };
+use sha2::{Digest, Sha256};
 use std::{sync::mpsc, time::Duration};
 use tauri::Manager;
+
+// Match the frontend's semantic field order; this fixture only assesses manual smoke captures.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SmokeTask<'a> {
+    id: &'a serde_json::Value,
+    title: &'a serde_json::Value,
+    notes: &'a serde_json::Value,
+    action: &'a serde_json::Value,
+    url: &'a serde_json::Value,
+    created_at: &'a serde_json::Value,
+    availability: &'a serde_json::Value,
+    availability_reason: &'a serde_json::Value,
+    context: Option<()>,
+    evidence: Vec<()>,
+}
 
 #[derive(Default)]
 pub(crate) struct ServiceFixture {
@@ -18,6 +35,54 @@ impl ServiceFixture {
             Some("work.collect") => serde_json::json!({
                 "candidates":[],"observations":[],"warnings":[],"collectedAt":now
             }),
+            Some("work.assess") => {
+                let input = &request["input"];
+                let tasks = input["tasks"].as_array().ok_or_else(failed)?;
+                let instructions =
+                    serde_json::to_string(&input["instructions"]).map_err(|_| failed())?;
+                let mut assessments = Vec::new();
+                for task in tasks.iter().take(20) {
+                    if task["action"] != "manual"
+                        || !task["url"].is_null()
+                        || task["evidence"]
+                            .as_array()
+                            .is_none_or(|items| !items.is_empty())
+                        || !task["context"].is_null()
+                    {
+                        return Err(failed());
+                    }
+                    let semantic = SmokeTask {
+                        id: &task["id"],
+                        title: &task["title"],
+                        notes: &task["notes"],
+                        action: &task["action"],
+                        url: &task["url"],
+                        created_at: &task["createdAt"],
+                        availability: &task["availability"],
+                        availability_reason: &task["availabilityReason"],
+                        context: None,
+                        evidence: Vec::new(),
+                    };
+                    let fingerprint = format!(
+                        "{:x}",
+                        Sha256::digest(serde_json::to_vec(&semantic).map_err(|_| failed())?)
+                    );
+                    assessments.push(serde_json::json!({
+                        "resultId": uuid::Uuid::new_v4().to_string(), "id": task["id"],
+                        "profileId": input["profileId"], "fingerprint": fingerprint,
+                        "instructionsFingerprint": format!("{:x}", Sha256::digest(instructions.as_bytes())),
+                        "assessmentVersion": "work-assessment-v2", "model": input["model"], "evaluatedAt": now,
+                        "assessment": {
+                            "importance": "Native smoke assessment", "urgency": "No deadline established",
+                            "blockers": "None established", "uncertainty": "Synthetic assessment",
+                            "supportingEvidence": [{"reference": "$title", "summary": "Native smoke capture"}],
+                            "reevaluateAt": (chrono::Utc::now() + chrono::Duration::hours(24))
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                        }
+                    }));
+                }
+                serde_json::json!({"assessments": assessments})
+            }
             Some("work.rank") => {
                 self.rankings
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

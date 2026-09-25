@@ -82,7 +82,7 @@ export async function serve(
     }
     if (active.size >= LIMITS.concurrent) { fail(request.id, new ServiceError('busy', true)); return; }
     const controller = new AbortController();
-    const workRead = request.op === 'work.collect' || request.op === 'work.rank';
+    const workRead = request.op === 'work.collect' || request.op === 'work.assess' || request.op === 'work.rank';
     const timer = setTimeout(() => controller.abort(new ServiceError('deadline', true, workRead ? 'read' : 'general')),
       options.deadlineMs ?? (workRead ? LIMITS.workDeadlineMs : LIMITS.deadlineMs));
     const finished = (async () => {

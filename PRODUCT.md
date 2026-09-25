@@ -30,6 +30,10 @@ GitHub task identity is the canonical issue/PR URL, regardless of action. Reposi
 
 Each run applies results to the latest state so concurrent captures, notes and Done survive. Invalid rankings, source failures and save failures remain explicit. Preserve discoveries and the prior order when ranking fails. Missing query results do not prove completion.
 
+Successful assessments are permanent versions on each task, including manual tasks, in its work profile. Save each assessed subset before ordering or assessing more tasks. Task details show the latest result, evidence, evaluation time and provenance, with earlier versions available in a compact selector. Distinguish changed task content or assessment settings from time expiry; neither removes history. Done, restore, reconciliation, duplicate consolidation, profile switching and backups retain versions. Retries reuse immutable result IDs without duplicating history. Concurrent edits retain their text and leave the submitted assessment historical, not current. Old replaceable cache entries do not become invented history.
+
+Keep permanent assessment rows separately paged in the existing local SQLite database, outside the bounded task snapshot. Read versions by logical append order, not wall-clock timestamps. History growth or a failed history append must not exhaust snapshot capacity or block ordinary notes, Done and capture saves. Keep failed append results visible for explicit retry/export. Database backups and bounded JSON export include complete history and profile/task associations; restoring a database backup replaces state and history together, never mixes unrelated rows. Prior-workspace results remain separately exportable without blocking new runs. Each historical task ID belongs to exactly one task per profile, including after consolidation.
+
 Scheduling is disabled until explicitly enabled. While the Mac app runs, including hidden, a native clock triggers due checks. Catch up once after sleep or relaunch; do not overlap or replay every missed interval. Quitting stops runs. Legacy reminder schedules never resume.
 
 ## Unified workspace

@@ -11,6 +11,8 @@ fn main() {
             "workspace_list_backups",
             "workspace_read_backup",
             "workspace_export_json",
+            "assessment_append",
+            "assessment_read",
             "workspace_export_raw",
             "workspace_recover",
             "conversation_read",

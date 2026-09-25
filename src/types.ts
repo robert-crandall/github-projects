@@ -94,6 +94,7 @@ export const taskSchema = z.object({
   id: z.string(), title: z.string(), notes: z.string(), status: z.enum(['open', 'done']),
   createdAt: time, completedAt: time.optional(), history: historySchema.optional(), threadId: z.string().optional(),
   work: workMetadataSchema.optional(),
+  assessmentTaskIds: z.array(z.string().min(1).max(500)).optional(),
 });
 export const noteSchema = z.object({
   id: z.string(), threadId: z.string(), text: z.string(),

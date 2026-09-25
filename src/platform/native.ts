@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { assessmentAppendSchema, assessmentPageSchema, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { z } from 'zod';
 import { conversationCacheSchema, conversationPageSchema, referenceSchema, type ConversationPage, type Reference } from '../../service/src/schema.ts';
 
@@ -74,6 +75,7 @@ export type NativeCommand =
   | 'workspace_read' | 'workspace_save' | 'workspace_storage_status'
   | 'workspace_create_backup' | 'workspace_list_backups' | 'workspace_read_backup'
   | 'workspace_export_json' | 'workspace_export_raw' | 'workspace_recover'
+  | 'assessment_append' | 'assessment_read'
   | 'launch_github' | 'launch_copilot' | 'launch_web_url' | 'clock_now'
   | 'conversation_read' | 'conversation_merge' | 'conversation_reset';
 export type NativeTransport = (command: NativeCommand, args?: Record<string, unknown>) => Promise<unknown>;
@@ -129,6 +131,15 @@ export function createNativePlatform(transport: NativeTransport = desktopTranspo
   }
   return {
     workspaceRead: () => call('workspace_read', workspaceReadSchema),
+    assessmentAppend: (profileId: string, assessments: SavedAssessment[]) =>
+      call('assessment_append', assessmentAppendSchema, {
+        profileId: parse(identifier, profileId), assessments: parse(workAssessOutputSchema, { assessments }).assessments,
+      }),
+    assessmentRead: (profileId: string, taskId: string, before: number | null = null) =>
+      call('assessment_read', assessmentPageSchema, {
+        profileId: parse(identifier, profileId), taskId: parse(z.string().min(1).max(500), taskId),
+        before: parse(z.number().int().positive().safe().nullable(), before),
+      }),
     conversationRead: (reference: Reference) => call('conversation_read', conversationCacheSchema.nullable(), { reference: parse(referenceSchema, reference) }),
     conversationMerge: (page: ConversationPage) => {
       const valid = parse(conversationPageSchema, page);
@@ -153,8 +164,9 @@ export function createNativePlatform(transport: NativeTransport = desktopTranspo
     readBackup: (id: string) => call('workspace_read_backup', workspaceReadSchema, { backupId: parse(backupId, id) }),
     exportJson: (expectedRevision: string) => call('workspace_export_json', z.string(), { expectedRevision: parse(revision, expectedRevision) }),
     exportRaw: () => call('workspace_export_raw', z.object({ id: revision, directory: z.string() }).strict()),
-    recoverBackup: (id: string, expectedRecoveryToken: string) => call('workspace_recover', workspaceReadSchema, {
+    recoverBackup: (id: string, expectedRecoveryToken: string, expectedRevision: string | null) => call('workspace_recover', workspaceReadSchema, {
       backupId: parse(backupId, id), expectedRecoveryToken: parse(revision, expectedRecoveryToken),
+      expectedRevision: parse(revision.nullable(), expectedRevision),
     }),
     launchGitHub: (identity: GitHubIdentity) => call('launch_github', launchResultSchema, { identity: parse(githubIdentitySchema, identity) }),
     launchCopilot: (identity: GitHubIdentity) => call('launch_copilot', launchResultSchema, { identity: parse(githubIdentitySchema, identity) }),

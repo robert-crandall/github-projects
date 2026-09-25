@@ -7,6 +7,9 @@ import { desktopEnvelopeSchema } from '../src/runtime/desktop-workspace.ts';
 import { at, test as browserTest } from './workspace-fixtures.ts';
 import type { WorkCollection } from '../service/src/work-schema.ts';
 import { preferencesSchema, type Preferences } from '../src/themes/controller.ts';
+import { assessmentBatch } from './assessment-fixture.ts';
+import { AssessmentStoreFixture } from './assessment-store-fixture.ts';
+import { workAssessOutputSchema } from '../service/src/work-assessment.ts';
 
 export function evidence(id = 'request-1', kind: Evidence['kind'] = 'review-request'): Evidence {
   return {
@@ -51,7 +54,10 @@ export class NativeMock {
   };
   workCollections = new Map<string, { hold?: ReturnType<typeof gate>; result?: WorkCollection; error?: string }>();
   failRank = false;
+  assessments = new AssessmentStoreFixture();
+  assessmentBackups = new Map<string, typeof this.assessments.entries>();
   holdRank?: ReturnType<typeof gate>;
+  holdAssessment?: ReturnType<typeof gate>;
   conversationApi = new ConversationApi();
   conversations = new Map<string, ConversationCache>();
   corruptCache = false;
@@ -125,6 +131,13 @@ export class NativeMock {
       if (this.corrupt) throw new ExpectedFailure('Saved workspace is damaged. Recover explicitly.');
       return structuredClone(this.saved);
     }
+    if (command === 'assessment_append') {
+      if (this.assessments.fail) throw new ExpectedFailure('History storage unavailable');
+      return structuredClone(this.assessments.append(String(args.profileId),
+        workAssessOutputSchema.parse({ assessments: args.assessments }).assessments, this.state));
+    }
+    if (command === 'assessment_read') return structuredClone(this.assessments.read(String(args.profileId), String(args.taskId),
+      args.before as number | null, this.state));
     if (command === 'clock_now') return { now: this.now, timeZone: 'UTC', error: null };
     if (command === 'workspace_save') {
       const snapshot = snapshotSchema.parse(args.snapshot);
@@ -144,6 +157,7 @@ export class NativeMock {
       if (this.failBackup) throw new ExpectedFailure('Original backup could not be preserved.');
       const id = crypto.randomUUID();
       this.backups.set(id, structuredClone(this.saved));
+      this.assessmentBackups.set(id, structuredClone(this.assessments.entries));
       return { id, createdAt: this.now };
     }
     if (command === 'workspace_list_backups') return [...this.backups.keys()].map(id => ({ id, createdAt: this.now }));
@@ -157,9 +171,11 @@ export class NativeMock {
     };
     if (command === 'workspace_recover') {
       expect(args.expectedRecoveryToken).toBe(this.recoveryToken);
+      expect(args.expectedRevision).toBe(this.corrupt ? null : this.saved.revision);
       const backup = this.backups.get(String(args.backupId));
       expect(backup).toBeDefined();
       this.saved = { ...structuredClone(backup!), revision: crypto.randomUUID() };
+      this.assessments.entries = structuredClone(this.assessmentBackups.get(String(args.backupId)) ?? []);
       this.corrupt = false;
       return structuredClone(this.saved);
     }
@@ -169,7 +185,7 @@ export class NativeMock {
     }
     if (command === 'workspace_export_json') {
       expect(args.expectedRevision).toBe(this.saved.revision);
-      return JSON.stringify(this.saved.snapshot);
+      return JSON.stringify({ ...this.saved, assessments: this.assessments.entries });
     }
     if (command === 'launch_github' || command === 'launch_copilot' || command === 'launch_web_url') {
       this.launches.push({ command, args: structuredClone(args) });
@@ -191,6 +207,10 @@ export class NativeMock {
         result = structuredClone(source?.result ?? this.workCollection);
         break;
       }
+      case 'work.assess':
+        if (this.holdAssessment) await this.holdAssessment.promise;
+        result = await assessmentBatch(request.input, this.now);
+        break;
       case 'work.rank':
         if (this.holdRank) await this.holdRank.promise;
         if (this.failRank) throw new ExpectedFailure('Copilot ranking failed. Your tasks and previous order are retained.');

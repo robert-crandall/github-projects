@@ -21,10 +21,12 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
   return <Modal title="Recover saved work" close={close}>
     <p>Recovery is explicit. Export pending edits first; restoring a backup replaces the loaded workspace, not GitHub state.</p>
     <div className="button-row">
-      <button className="secondary" disabled={!controller.getSnapshot().workspace} onClick={() => {
-        try { downloadBackup(controller.pendingJson(), 'github-projects-pending.json'); }
-        catch (error) { setError(error instanceof Error ? error.message : 'Pending export failed.'); }
-      }}><Download size={15} />Export pending copy</button>
+      <button className="secondary" disabled={pending || !controller.getSnapshot().workspace} onClick={() => void run(async () => {
+        downloadBackup(await controller.fullPendingJson(), 'github-projects-pending.json');
+      })}><Download size={15} />Export pending copy</button>
+      {(controller.getSnapshot().assessmentPending.length > 0 || controller.getSnapshot().assessmentQuarantined.length > 0) && <button className="secondary" onClick={() => {
+        downloadBackup(controller.pendingAssessmentsJson(), 'github-projects-pending-assessments.json');
+      }}>Export pending assessments</button>}
       <button className="secondary" disabled={pending} onClick={() => void run(async () => {
         const result = await controller.platform.exportRaw();
         setNotice(`Original database files preserved locally: ${result.directory}`);
@@ -34,7 +36,7 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
       <option value="">Choose a backup</option>{backups.map(backup => <option key={backup.id} value={backup.id}>{backup.createdAt} · {backup.id === 'latest' ? 'Previous save' : backup.id}</option>)}
     </select></label>
     {!backups.length && <p className="muted">No backup is available. Preserve the original database files before further repair.</p>}
-    <label className="checkbox-label"><input type="checkbox" checked={confirm} onChange={event => setConfirm(event.target.checked)} />I exported any pending edits I need. Replace this workspace with the selected backup.</label>
+    <label className="checkbox-label"><input type="checkbox" checked={confirm} onChange={event => setConfirm(event.target.checked)} />I exported pending edits and assessments. Replace this workspace and its assessment history with the selected backup.</label>
     {notice && <p className="notice-inline" role="status">{notice}</p>}
     {error && <p className="inline-error" role="alert">{error}</p>}
     <footer className="modal-footer"><button className="secondary" onClick={close}>Cancel</button><button className="primary" disabled={pending || !selected || !confirm} onClick={() => void run(async () => {

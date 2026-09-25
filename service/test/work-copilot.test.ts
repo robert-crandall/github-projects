@@ -131,17 +131,23 @@ describe('isolated Copilot work operations', () => {
       const result = await sdk.rankWork(large, signal());
       expect(result.orderedIds).toEqual(large.tasks.map(task => task.id).sort().reverse());
       expect(result.reasons.map(reason => reason.id)).toEqual(result.orderedIds);
-      expect(JSON.parse(prompts[0]!).input.tasks).toHaveLength(200);
-      expect(JSON.parse(prompts[0]!).input.tasks[199].notes).toBe(large.tasks[199]!.notes);
-      expect(configs).toHaveLength(2);
-      expect(timeouts).toEqual([LIMITS.workModelMs, LIMITS.workModelMs]);
+      const batches = prompts.slice(0, -1).map(prompt => JSON.parse(prompt).input.tasks);
+      expect(batches).toHaveLength(10);
+      expect(batches.every(batch => batch.length === 20)).toBe(true);
+      expect(batches.flat().every(task => task.notes === large.tasks[0]!.notes)).toBe(true);
+      expect(JSON.parse(prompts.at(-1)!).input.tasks).toHaveLength(200);
+      expect(configs).toHaveLength(11);
+      expect(timeouts).toEqual(Array(11).fill(LIMITS.workModelMs));
     });
   });
-  test('ranking still refuses oversized input before SDK startup, without silently dropping tasks', async () => {
+  test('ranking refuses an oversized individual task before SDK startup, without truncation', async () => {
     await sdkHarness(async ({ sdk, configs }) => {
-      const large = { ...tasks, tasks: Array.from({ length: 200 }, (_, index) => ({
-        ...tasks.tasks[0]!, id: String(index), notes: 'x'.repeat(2000),
-      })) };
+      const large = { ...tasks, tasks: [{
+        ...tasks.tasks[0]!, evidence: Array.from({ length: 150 }, (_, index) => ({
+          id: String(index), source: 'manual' as const, streamId: 'test', at,
+          url: 'https://example.com/task', summary: 'x'.repeat(2000),
+        })),
+      }] };
       await expect(sdk.rankWork(large, signal())).rejects.toMatchObject({ dto: { code: 'limit' } });
       expect(configs).toEqual([]);
     });

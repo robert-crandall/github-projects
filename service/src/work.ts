@@ -81,6 +81,7 @@ export class WorkService {
     });
   }
   rank: CopilotService['rankWork'] = (input, signal) => this.copilot.rankWork(input, signal);
+  assess: CopilotService['assessWork'] = (input, signal) => this.copilot.assessWork(input, signal);
   listConnections() { return this.connections.list(); }
   pendingIntake() { return this.intake.pending(); }
   ackIntake(input: unknown) { return this.intake.ack(input); }

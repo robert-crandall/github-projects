@@ -18,6 +18,7 @@ import { RunProgress } from './RunProgress.tsx';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
+import { TaskAssessmentHistory } from './AssessmentHistory.tsx';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -118,6 +119,7 @@ function TaskDetail({ task, reason, queue, controller, remote, close }: {
     </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
+    <TaskAssessmentHistory key={task.id} task={task} controller={controller} />
     <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
       onChange={event => run(() => queue.edit(task.id, task.title, event.target.value))} /></label>
     <p className="field-help">Task notes inform Copilot's ranking.</p>
@@ -197,7 +199,7 @@ export function TaskApp({ controller, queue, remote }: {
   </main>;
   const state = saved.workspace.state;
   const runError = run.error || (run.running ? '' : state.work.lastError);
-  const error = saved.persistence.error || saved.operationError || (settings ? runError : '');
+  const error = saved.persistence.error || saved.assessmentError || saved.operationError || (settings ? runError : '');
   const runDetails = [...new Set([...run.warnings, ...runError.split('\n').filter(Boolean)])];
   const profileBusy = run.running || run.unsubscribing.length > 0;
   const ranked = rankedTasks(state);
@@ -270,6 +272,14 @@ export function TaskApp({ controller, queue, remote }: {
     {error && <div className="task-error" role="alert">
       <p>{error}</p>
       {saved.persistence.error && <button className="secondary" onClick={() => invoke(() => controller.retryStorage())}>Retry storage</button>}
+      {saved.assessmentError && <div className="button-row">
+        <button className="secondary" disabled={saved.assessmentSaving} onClick={() => invoke(() => controller.retryAssessments())}>Retry assessment save</button>
+        <button className="secondary" onClick={() => setRecovery(true)}>Export pending results</button>
+      </div>}
+    </div>}
+    {saved.assessmentQuarantined.length > 0 && <div className="task-run-details" role="status">
+      <p>{saved.assessmentQuarantined.length} results from a previous workspace are kept separately in this session. Export before quitting. Current runs and saves are unaffected.</p>
+      <button className="secondary" onClick={() => setRecovery(true)}>Export previous workspace results</button>
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
       settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)} /> : <>
@@ -321,7 +331,8 @@ export function TaskApp({ controller, queue, remote }: {
           : <aside className="task-detail task-detail-empty" aria-label="Task details"><h2>Select a task</h2><p>See why it ranks here, read its source, and keep your notes alongside.</p></aside>}
       </div>
     </>}
-    <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved' : 'Saved on this Mac'}</span>
+    <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved'
+      : saved.assessmentPending.length ? 'Task edits saved; assessments pending' : 'Saved on this Mac'}</span>
       {run.progress && <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span>}
       <span>{run.running ? 'Collecting and ranking; local edits remain available' : `Last successful run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     </div>

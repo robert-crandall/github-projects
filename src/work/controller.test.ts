@@ -9,6 +9,11 @@ import { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
 import { WorkQueue } from './controller.ts';
 import { rankedTasks, reconcileWork } from './engine.ts';
+import { assessmentBatch } from '../../tests/assessment-fixture.ts';
+import { rankInput } from './engine.ts';
+import { createWorkProfile, switchWorkProfile } from './profiles.ts';
+import { AssessmentStoreFixture } from '../../tests/assessment-store-fixture.ts';
+import { workAssessOutputSchema } from '../../service/src/work-assessment.ts';
 
 const before = '2026-09-15T10:00:00.000Z';
 const previousCompleted = '2026-09-15T11:00:00.000Z';
@@ -44,11 +49,38 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
   let saveHook: ((state: AppState) => Promise<void>) | undefined;
   const log: string[] = [];
   const requests: Request[] = [];
+  const history = new AssessmentStoreFixture();
+  const backups = new Map<string, { saved: NativeWorkspace; entries: typeof history.entries }>();
+  let recoveryToken = crypto.randomUUID();
   const platform = createNativePlatform(async (command, args) => {
     log.push(command);
     if (command === 'workspace_read') return structuredClone(saved);
     if (command === 'clock_now') return { now: before, timeZone: 'UTC', error: null };
-    if (command === 'workspace_create_backup') return { id: crypto.randomUUID(), createdAt: before };
+    if (command === 'workspace_create_backup') {
+      const id = crypto.randomUUID();
+      backups.set(id, structuredClone({ saved, entries: history.entries }));
+      return { id, createdAt: before };
+    }
+    if (command === 'assessment_append') {
+      const result = history.append(String(args?.profileId),
+        workAssessOutputSchema.parse({ assessments: args?.assessments }).assessments, saved.snapshot!.workspace.state as unknown as AppState);
+      recoveryToken = crypto.randomUUID();
+      return structuredClone(result);
+    }
+    if (command === 'assessment_read') return structuredClone(history.read(String(args?.profileId), String(args?.taskId),
+      args?.before as number | null, saved.snapshot!.workspace.state as unknown as AppState));
+    if (command === 'workspace_export_json') return JSON.stringify({ ...saved, assessments: history.entries });
+    if (command === 'workspace_read_backup') return structuredClone(backups.get(String(args?.backupId))!.saved);
+    if (command === 'workspace_storage_status') return { recoveryToken, revision: saved.revision, error: null };
+    if (command === 'workspace_recover') {
+      expect(args?.expectedRevision).toBe(saved.revision);
+      expect(args?.expectedRecoveryToken).toBe(recoveryToken);
+      const backup = structuredClone(backups.get(String(args?.backupId))!);
+      saved = { ...backup.saved, revision: crypto.randomUUID() };
+      history.entries = backup.entries;
+      recoveryToken = crypto.randomUUID();
+      return structuredClone(saved);
+    }
     if (command === 'workspace_save') {
       const snapshot = snapshotSchema.parse(args?.snapshot);
       const next = snapshot.workspace.state as unknown as AppState;
@@ -56,6 +88,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
       if (failSave(next)) throw { code: 'storage-unavailable', retryable: true, message: 'Disk unavailable' };
       expect(args?.expectedRevision).toBe(saved.revision);
       saved = { revision: crypto.randomUUID(), savedAt: new Date().toISOString(), snapshot };
+      recoveryToken = crypto.randomUUID();
       return structuredClone(saved);
     }
     throw new Error(`Unexpected native command ${command}`);
@@ -72,6 +105,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
       switch (request.op) {
         case 'work.intake': result = { items: [], hasMore: false }; break;
         case 'work.collect': result = collection(); break;
+        case 'work.assess': result = await assessmentBatch(request.input); break;
         case 'work.rank': result = ranked(request); break;
         case 'work.ackIntake': result = request.input; break;
         case 'work.connections': result = { servers: [{ name: 'slack', tools: ['search'], source: 'user' }], instructions: 'Owner configuration' }; break;
@@ -82,7 +116,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
   });
   const queue = new WorkQueue(workspace, service);
   return {
-    queue, workspace, platform, service, requests, log,
+    queue, workspace, platform, service, requests, log, history,
     fail: (predicate: (state: AppState) => boolean) => { failSave = predicate; },
     onSave: (hook?: (state: AppState) => Promise<void>) => { saveHook = hook; },
     saved: () => saved.snapshot!.workspace.state as unknown as AppState,
@@ -90,6 +124,245 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
 }
 
 describe('durable local work', () => {
+  test('assessment history persists before a failed order and retries never duplicate paid versions', async () => {
+    const state = initial();
+    state.tasks = [{ id: 'manual', title: 'Owner task', notes: 'Keep my notes', status: 'open', createdAt: before }];
+    state.work.ranking = { orderedIds: ['manual'], reasons: [{ id: 'manual', reason: 'Prior order' }], rankedAt: before };
+    let fail = true;
+    const mock = await fixture(state, request => {
+      if (request.op === 'work.rank') {
+        expect(mock.history.values('manual')).toHaveLength(1);
+        expect(request.input.assessmentIds).toEqual([mock.history.values('manual')[0]!.resultId]);
+        if (fail) throw new Error('Ordering unavailable');
+      }
+    });
+    await mock.queue.run();
+    const version = mock.history.values('manual')[0]!;
+    expect(version).toMatchObject({ id: 'manual', profileId: 'default', model: '', assessmentVersion: 'work-assessment-v2' });
+    expect(mock.saved().work.ranking).toEqual(state.work.ranking);
+    expect(mock.queue.getSnapshot().error).toContain('Ordering unavailable');
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    expect((await reloaded.platform.assessmentRead('default', 'manual')).assessments).toEqual([version]);
+    fail = false;
+    await new WorkQueue(reloaded, mock.service).run();
+    expect(mock.history.values('manual')).toEqual([version]);
+    expect(JSON.parse(await reloaded.fullPendingJson()).assessments).toEqual([version]);
+    expect(mock.saved().tasks[0]).not.toHaveProperty('assessments');
+  });
+
+  test('each subset persists before the next assessment and survives a later batch failure', async () => {
+    const state = initial();
+    state.tasks = Array.from({ length: 21 }, (_, index) => ({
+      id: `task-${index}`, title: `Task ${index}`, notes: '', status: 'open' as const, createdAt: before,
+    }));
+    let calls = 0;
+    const mock = await fixture(state, request => {
+      if (request.op === 'work.assess' && ++calls === 2) {
+        expect(mock.history.entries).toHaveLength(20);
+        throw new Error('Second batch failed');
+      }
+    });
+    await mock.queue.run();
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+    const firstVersions = [...mock.history.entries];
+    expect(firstVersions).toHaveLength(20);
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    await new WorkQueue(reloaded, mock.service).run();
+    const versions = mock.history.entries;
+    expect(versions).toHaveLength(21);
+    for (const version of firstVersions) expect(versions).toContainEqual(version);
+  });
+
+  test('failed history append preserves pending results without blocking ordinary task saves', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Assessment pending on disk');
+    await mock.workspace.flush();
+    mock.history.fail = true;
+    await mock.queue.run();
+    expect(mock.workspace.getSnapshot().persistence).toMatchObject({ pending: false, error: '' });
+    expect(mock.workspace.getSnapshot().assessmentError).toContain('History storage unavailable');
+    expect(mock.saved().tasks[0]).not.toHaveProperty('assessments');
+    expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(1);
+    const pendingExport = JSON.parse(await mock.workspace.fullPendingJson());
+    expect(pendingExport.assessments).toEqual([]);
+    expect(pendingExport.pendingAssessments.assessments).toHaveLength(1);
+    expect(pendingExport.pendingAssessments.assessments[0]).not.toHaveProperty('sequence');
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+    const id = mock.workspace.state.tasks[0]!.id;
+    mock.queue.edit(id, 'Edited despite failed history', 'New notes');
+    mock.queue.complete(id);
+    mock.queue.capture('New capture');
+    await mock.workspace.flush();
+    expect(mock.saved().tasks[0]).toMatchObject({ notes: 'New notes', status: 'done' });
+    expect(mock.saved().tasks).toHaveLength(2);
+    mock.history.fail = false;
+    await mock.workspace.retryAssessments();
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    expect((await reloaded.platform.assessmentRead('default', id)).assessments).toHaveLength(1);
+  });
+
+  test('history above 8 MiB is paged and leaves snapshots and ordinary saves small', async () => {
+    const state = initial();
+    state.tasks = [{ id: 'full', title: 'Long-lived task', notes: '', status: 'open', createdAt: before }];
+    const first = (await assessmentBatch(rankInput(state))).assessments[0]!;
+    const large = { ...first, assessment: {
+      ...first.assessment, importance: 'i'.repeat(400), urgency: 'u'.repeat(400),
+      blockers: 'b'.repeat(400), uncertainty: 'n'.repeat(400),
+      supportingEvidence: Array.from({ length: 8 }, () => ({ reference: '$title', summary: 'e'.repeat(240) })),
+    } };
+    const count = Math.ceil(8 * 1024 * 1024 / new TextEncoder().encode(JSON.stringify(large)).length) + 2;
+    const history = Array.from({ length: count }, () => ({ ...large, resultId: crypto.randomUUID() }));
+    const mock = await fixture(state);
+    for (let offset = 0; offset < history.length; offset += 20) await mock.workspace.saveAssessments('default', history.slice(offset, offset + 20));
+    mock.queue.edit('full', 'Still editable', 'Normal notes');
+    mock.queue.complete('full');
+    mock.queue.capture('Normal capture');
+    await mock.workspace.flush();
+    expect(mock.history.entries).toHaveLength(count);
+    expect(mock.saved().tasks[0]).not.toHaveProperty('assessments');
+    expect(new TextEncoder().encode(mock.workspace.pendingJson()).length).toBeLessThan(10000);
+    expect((await mock.platform.assessmentRead('default', 'full')).assessments).toHaveLength(20);
+    const pending = await mock.workspace.fullPendingJson();
+    expect(new TextEncoder().encode(pending).length).toBeGreaterThan(8 * 1024 * 1024);
+    expect(JSON.parse(pending).assessments).toHaveLength(count);
+    expect(mock.requests).toEqual([]);
+  });
+
+  test('quarantined results arriving after database recovery remain exportable while a new run succeeds', async () => {
+    const state = initial();
+    state.tasks = [{ id: 'same-id', title: 'Original task', notes: '', status: 'open', createdAt: before }];
+    const entered = deferred<Extract<Request, { op: 'work.assess' }>>();
+    const released = deferred<unknown>();
+    let calls = 0;
+    const mock = await fixture(state, request => {
+      if (request.op === 'work.assess' && calls++ === 0) { entered.resolve(request); return released.promise; }
+    });
+    mock.queue.edit('same-id', 'Different restored task', 'Different notes');
+    await mock.workspace.flush();
+    const backup = await mock.platform.createBackup((await mock.platform.workspaceRead()).revision);
+    mock.queue.edit('same-id', 'Original task', '');
+    await mock.workspace.flush();
+    const running = mock.queue.run();
+    const request = await entered.promise;
+    await mock.workspace.recoverBackup(backup.id);
+    const original = (await assessmentBatch(request.input)).assessments[0]!;
+    released.resolve({ assessments: [original] });
+    await running;
+    expect(mock.history.entries).toEqual([]);
+    expect(mock.saved().tasks[0]).toMatchObject({ title: 'Different restored task', notes: 'Different notes' });
+    expect(mock.workspace.getSnapshot().assessmentPending).toEqual([]);
+    expect(mock.workspace.getSnapshot().assessmentQuarantined).toEqual([{
+      workspaceGeneration: 0, sourceRevision: expect.any(String), assessment: original,
+    }]);
+    expect(mock.workspace.getSnapshot().assessmentError).toBe('');
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+    await mock.queue.run();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.history.entries).toHaveLength(1);
+    expect(mock.history.entries[0]!.resultId).not.toBe(original.resultId);
+    expect(mock.saved().work.ranking!.orderedIds).toEqual(['same-id']);
+    const exported = JSON.parse(await mock.workspace.fullPendingJson());
+    expect(exported.assessments).toEqual(mock.history.entries);
+    expect(exported.quarantinedAssessments).toEqual(mock.workspace.getSnapshot().assessmentQuarantined);
+    const pending = JSON.parse(mock.workspace.pendingAssessmentsJson());
+    expect(pending.workspaceGeneration).toBe(1);
+    expect(pending.assessments).toEqual([]);
+    expect(pending.quarantinedAssessments[0].assessment).toEqual(original);
+  });
+
+  test('already pending paid results become export-only quarantine when the database is recovered', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Preserve failed paid work');
+    await mock.workspace.flush();
+    const backup = await mock.platform.createBackup((await mock.platform.workspaceRead()).revision);
+    mock.history.fail = true;
+    await mock.queue.run();
+    const pending = [...mock.workspace.getSnapshot().assessmentPending];
+    expect(pending).toHaveLength(1);
+    await mock.workspace.recoverBackup(backup.id);
+    expect(mock.workspace.getSnapshot().assessmentPending).toEqual([]);
+    expect(mock.workspace.getSnapshot().assessmentQuarantined.map(value => value.assessment)).toEqual(pending);
+    mock.history.fail = false;
+    await mock.queue.run();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.history.entries).toHaveLength(1);
+    expect(JSON.parse(await mock.workspace.fullPendingJson()).quarantinedAssessments).toHaveLength(1);
+  });
+
+  test('in-flight assessments preserve edits and Done as history, ordering only unchanged active tasks', async () => {
+    const state = initial();
+    state.tasks = ['edited', 'done', 'unchanged'].map(id => ({ id, title: id, notes: '', status: 'open', createdAt: before }));
+    const entered = deferred<Extract<Request, { op: 'work.assess' }>>();
+    const released = deferred<unknown>();
+    const mock = await fixture(state, request => {
+      if (request.op === 'work.assess') { entered.resolve(request); return released.promise; }
+    });
+    const running = mock.queue.run();
+    const request = await entered.promise;
+    mock.queue.edit('edited', 'New owner title', 'New owner notes');
+    mock.queue.complete('done');
+    mock.queue.capture('Concurrent capture');
+    released.resolve(await assessmentBatch(request.input));
+    await running;
+    expect(mock.saved().tasks.find(task => task.id === 'edited')).toMatchObject({ title: 'New owner title', notes: 'New owner notes' });
+    expect(mock.saved().tasks.find(task => task.id === 'done')!.status).toBe('done');
+    expect(mock.history.entries).toHaveLength(3);
+    const rank = mock.requests.find(request => request.op === 'work.rank');
+    if (rank?.op !== 'work.rank') throw new Error('No order request');
+    expect(rank.input.tasks.map(task => task.id)).toEqual(['unchanged']);
+    expect(mock.saved().work.ranking!.orderedIds).toEqual(['unchanged']);
+    expect(mock.queue.getSnapshot().warnings.join(' ')).toContain('2 new or edited tasks');
+  });
+
+  test('in-flight results return to their original profile after external profile replacement', async () => {
+    let state = initial();
+    state.tasks = [{ id: 'original', title: 'Original profile', notes: '', status: 'open', createdAt: before }];
+    state = createWorkProfile(state, 'Other');
+    const otherId = state.activeWorkProfile.id;
+    state = switchWorkProfile(state, 'default');
+    const entered = deferred<Extract<Request, { op: 'work.assess' }>>();
+    const released = deferred<unknown>();
+    const mock = await fixture(state, request => {
+      if (request.op === 'work.assess') { entered.resolve(request); return released.promise; }
+    });
+    const running = mock.queue.run();
+    const request = await entered.promise;
+    mock.workspace.update(current => switchWorkProfile(current, otherId));
+    const otherWork = structuredClone(mock.workspace.state.work);
+    released.resolve(await assessmentBatch(request.input));
+    await running;
+    expect(mock.saved().tasks).toEqual([]);
+    expect(mock.saved().work).toEqual(otherWork);
+    expect(mock.history.values('original')).toHaveLength(1);
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+    expect(mock.queue.getSnapshot().error).toContain('profile changed');
+  });
+
+  for (const shape of ['profile', 'fingerprint', 'instructions', 'model', 'task', 'duplicate', 'empty'] as const) {
+    test(`rejects ${shape} assessment mismatch without attaching or ordering`, async () => {
+      const state = initial();
+      state.tasks = [{ id: 'owner-task', title: 'My task', notes: '', status: 'open', createdAt: before }];
+      const batch = await assessmentBatch(rankInput(state));
+      switch (shape) {
+        case 'profile': batch.assessments[0]!.profileId = 'another-profile'; break;
+        case 'fingerprint': batch.assessments[0]!.fingerprint = '0'.repeat(64); break;
+        case 'instructions': batch.assessments[0]!.instructionsFingerprint = '0'.repeat(64); break;
+        case 'model': batch.assessments[0]!.model = 'unexpected-model'; break;
+        case 'task': batch.assessments[0]!.id = 'invented'; break;
+        case 'duplicate': batch.assessments.push(batch.assessments[0]!); break;
+        case 'empty': batch.assessments = []; break;
+      }
+      const mock = await fixture(state, request => request.op === 'work.assess' ? batch : undefined);
+      await mock.queue.run();
+      expect(mock.saved().tasks[0]).not.toHaveProperty('assessments');
+      expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+      expect(mock.queue.getSnapshot().error).not.toBe('');
+    });
+  }
+
   test('source filters persist without changing collection, ranking or coverage', async () => {
     const initialState = initial();
     initialState.work.settings = defaultWorkState().settings;
@@ -1285,6 +1558,32 @@ describe('concurrency and exact ranking', () => {
 
 
 describe('collection progress', () => {
+  test.each(['collected', 'manual', 'empty'] as const)('publishes monotonic assessment/order phases for a %s queue', async kind => {
+    const saved = initial();
+    if (kind === 'collected') saved.work.settings.streams = [defaultWorkState().settings.streams[0]!];
+    if (kind === 'manual') saved.tasks = [{ id: 'manual', title: 'Local task', notes: '', status: 'open', createdAt: before }];
+    const mock = await fixture(saved, request => request.op === 'work.collect'
+      ? { ...collection(), coverageInfo: ['Older history remains'] } : undefined);
+    const phases: string[] = [];
+    const unsubscribe = mock.queue.subscribe(() => {
+      const phase = mock.queue.getSnapshot().phase;
+      if (phases.at(-1) !== phase) phases.push(phase);
+    });
+    await mock.queue.run();
+    unsubscribe();
+    expect(phases).toEqual([
+      'preparing', 'intake',
+      ...(kind === 'collected' ? ['collecting'] : []),
+      ...(kind !== 'empty' ? ['assessing'] : []),
+      'ranking', 'saving', 'idle',
+    ]);
+    expect(mock.requests.filter(request => request.op === 'work.assess' || request.op === 'work.rank')
+      .map(request => request.op)).toEqual(kind === 'empty' ? [] : ['work.assess', 'work.rank']);
+    if (kind === 'collected') expect(mock.queue.getSnapshot().warnings).toEqual([
+      `${saved.work.settings.streams[0]!.name}: Older history remains`,
+    ]);
+  });
+
   test('tracks a frozen enabled-source checklist through intake, failures, ranking and saving', async () => {
     const saved = initial();
     const template = defaultWorkState().settings.streams[0]!;

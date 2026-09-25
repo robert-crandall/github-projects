@@ -1,4 +1,5 @@
 mod appearance;
+mod assessments;
 mod conversation;
 mod error;
 mod launch;
@@ -184,6 +185,16 @@ async fn workspace_export_json(
 }
 
 #[tauri::command]
+async fn assessment_append(state: State<'_, NativeState>, profile_id: String, assessments: Vec<assessments::SavedAssessment>) -> Result<Vec<assessments::HistoryEntry>> {
+    with_store(state, move |store| store.assessment_append(&profile_id, assessments)).await
+}
+
+#[tauri::command]
+async fn assessment_read(state: State<'_, NativeState>, profile_id: String, task_id: String, before: Option<i64>) -> Result<assessments::HistoryPage> {
+    with_store(state, move |store| store.assessment_read(&profile_id, &task_id, before)).await
+}
+
+#[tauri::command]
 async fn workspace_export_raw(state: State<'_, NativeState>) -> Result<RawExport> {
     with_store(state, |store| store.export_raw()).await
 }
@@ -193,9 +204,10 @@ async fn workspace_recover(
     state: State<'_, NativeState>,
     backup_id: String,
     expected_recovery_token: String,
+    expected_revision: Option<String>,
 ) -> Result<WorkspaceRead> {
     with_store(state, move |store| {
-        store.recover(&backup_id, &expected_recovery_token)
+        store.recover_at_revision(&backup_id, &expected_recovery_token, expected_revision.as_deref())
     })
     .await
 }
@@ -480,6 +492,8 @@ pub fn run() {
             workspace_list_backups,
             workspace_read_backup,
             workspace_export_json,
+            assessment_append,
+            assessment_read,
             workspace_export_raw,
             workspace_recover,
             launch_github,

@@ -8,7 +8,7 @@ const sourceLabels: Record<CollectionProgress['state'], string> = {
 const sourceIcons = { waiting: Circle, collecting: ArrowRight, done: Check, failed: CircleAlert, 'not-run': Minus };
 const phases: Record<WorkQueueSnapshot['phase'], string> = {
   preparing: 'Saving pending changes', intake: 'Reading task intake', collecting: 'Collecting sources',
-  ranking: 'Ranking tasks', saving: 'Saving results', idle: 'Run complete', error: 'Run incomplete',
+  assessing: 'Assessing tasks', ranking: 'Ranking tasks', saving: 'Saving results', idle: 'Run complete', error: 'Run incomplete',
 };
 
 export function RunProgress({ run, details }: { run: WorkQueueSnapshot; details: string[] }) {
