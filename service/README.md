@@ -24,7 +24,7 @@ The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was release
 
 ## Code review backend and RPC (no renderer callers)
 
-**No renderer callers; #47 wires this backend into saved task sessions.** `work.reviewCode` exposes the bounded backend through strict service/native schemas, but no configured agent role or UI control invokes it yet. Existing assessors and prioritizers still have no tools.
+**No renderer callers; #47 wires this backend into saved task sessions.** `work.reviewCode` exposes the bounded backend through strict service/native schemas, but no configured agent role or UI control invokes it yet. Existing assessors and prioritizers still have no tools. Browser-safe run DTOs live in `src/code-runs.ts`; the [native storage boundary](../src/platform/README.md#code-run-storage-boundary) persists their lifecycle independently of task snapshots, without starting SDK work.
 
 Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another service instance for each task. [`src/code-review-schema.ts`](src/code-review-schema.ts) contains the browser-safe schemas/types, re-exported by [`src/code-review.ts`](src/code-review.ts). The strict input contains only:
 

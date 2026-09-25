@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { codeReviewResultSchema, type CodeReviewInput } from '../service/src/code-review-schema.ts';
+import { codeRunIntentSchema, codeRunOutcomeSchema, codeRunSchema, terminalCodeRun, type CodeRun } from '../service/src/code-runs.ts';
 
 export function codeResult(input: CodeReviewInput, inspected = true) {
   const at = '2026-09-25T01:00:00Z';
@@ -37,4 +38,41 @@ export function codeResult(input: CodeReviewInput, inspected = true) {
       path: 'src/value.ts', startLine: 1, endLine: 1, totalLines: 1, text }] : [],
     changes: [],
   });
+}
+
+export class CodeRunStoreFixture {
+  generation = crypto.randomUUID();
+  entries: CodeRun[] = [];
+  failStart = false;
+  failUpdate = false;
+  initialized = false;
+  handle(command: string, args: Record<string, unknown>) {
+    if (!this.initialized) {
+      this.initialized = true;
+      this.entries = this.entries.map(run => terminalCodeRun(run.outcome) ? run : { ...run,
+        outcome: { status: 'interrupted', finishedAt: new Date().toISOString(), error: { code: 'interrupted', message: 'Run abandoned; not replayed.' } } });
+    }
+    if (command === 'code_run_context') return { generation: this.generation };
+    if (command === 'code_run_read') {
+      const filtered = this.entries.filter(run => (args.quarantined ? run.quarantined : !run.quarantined
+        && run.intent.profileId === args.profileId && run.intent.input.taskId === args.taskId)
+        && (args.before === null || run.sequence < Number(args.before))).sort((a, b) => b.sequence - a.sequence);
+      const runs = filtered.slice(0, 10);
+      return { runs, before: filtered.length > 10 ? runs.at(-1)!.sequence : null };
+    }
+    const intent = codeRunIntentSchema.parse(args.intent);
+    const generation = String(args.generation);
+    const quarantined = generation !== this.generation;
+    if (command === 'code_run_start' && (this.failStart || quarantined)) throw { code: 'start-save', message: 'Start not saved.', retryable: true };
+    if (command === 'code_run_update' && this.failUpdate) throw { code: 'result-save', message: 'Result disk unavailable.', retryable: true };
+    const outcome = command === 'code_run_start' ? { status: 'running' as const } : codeRunOutcomeSchema.parse(args.outcome);
+    const old = this.entries.find(run => run.intent.runId === intent.runId && run.generation === generation && run.quarantined === quarantined);
+    if (old && terminalCodeRun(old.outcome) && JSON.stringify(old.outcome) !== JSON.stringify(outcome)) throw new Error('Immutable result');
+    const run = codeRunSchema.parse({ generation, intent, outcome, quarantined, sequence: old?.sequence ?? this.entries.length + 1 });
+    this.entries = [...this.entries.filter(value => value !== old), run];
+    return structuredClone(run);
+  }
+  replace(entries: CodeRun[] = []) {
+    this.generation = crypto.randomUUID(); this.entries = structuredClone(entries); this.initialized = false;
+  }
 }
