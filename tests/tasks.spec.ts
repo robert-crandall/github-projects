@@ -10,6 +10,46 @@ import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
 
 test.use({ referenceWorkspace: false });
 
+test('prioritization refreshes PR readiness while retaining the saved judgment across relaunch', async ({ page, native }, testInfo) => {
+  codeTask(native);
+  const task = native.state.tasks[0]!;
+  const { assessments } = await assessmentBatch(rankInput(native.state), '2026-08-01T12:00:00.000Z');
+  assessments[0]!.assessment.blockers = 'Was a draft when assessed';
+  native.assessments.append('default', assessments, native.state);
+  const status = {
+    observedAt: native.now, head: 'a'.repeat(40), draft: true, checks: 'failing' as const,
+    checksIncomplete: false, readiness: 'not-ready' as const,
+  };
+  native.workObservations = [{
+    url: task.work!.url, state: 'open', observedAt: native.now, reason: '',
+    reference: task.work!.reference, pullRequest: status,
+  }];
+  await page.goto('/');
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  const current = page.getByRole('region', { name: 'Current PR status' });
+  await expect(current).toContainText('CI: failing');
+  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  native.workObservations[0]!.pullRequest = { ...status, draft: false, checks: 'passing', readiness: 'ready' };
+  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await expect(current).toContainText('Not a draft');
+  await expect(current).toContainText('CI: passing');
+  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.collect', 'work.rank', 'work.collect', 'work.rank']);
+  expect(native.requests.filter(request => request.op === 'work.collect').every(request => request.input.observeOnly && request.input.stateOnly)).toBe(true);
+  expect(native.assessments.values(task.id)).toHaveLength(1);
+  await page.reload();
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  await expect(current).toContainText('CI: passing');
+  await expect(page.getByRole('region', { name: 'Assessment', exact: true })).toContainText('Was a draft when assessed');
+  await page.screenshot({ path: testInfo.outputPath('readiness-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await current.scrollIntoViewIfNeeded();
+  await expect(current).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('readiness-narrow.png') });
+});
+
 function codeTask(native: NativeMock, kind: 'pr' | 'issue' = 'pr') {
   const url = `https://github.com/octo/project/${kind === 'pr' ? 'pull' : 'issues'}/47`;
   const state = reconcileWork(emptyWorkspace(native.now, 'UTC'), {
@@ -342,8 +382,11 @@ test('assessment history stays readable after order failure, edits, Done and rel
   native.now = '2026-09-11T18:00:00.000Z';
   await page.clock.setFixedTime(new Date(native.now));
   await run(page);
-  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
+  await expect(history.getByRole('status')).toHaveText('Outdated: task content changed');
+  expect(native.assessments.values(first.id)).toHaveLength(1);
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
   await expect(history).toContainText('Assessment of Write the updated proposal');
+  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   const versions = [...native.assessments.values(first.id)];
   expect(versions).toHaveLength(2);
   await history.getByLabel('Assessment version').selectOption(first.resultId);
@@ -366,7 +409,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   expect(native.assessments.values(first.id)).toEqual(versions);
 });
 
-test('assessment expiry never hides its history', async ({ page, native }) => {
+test('assessment age never expires its reusable judgment', async ({ page, native }) => {
   await page.goto('/');
   await add(page, 'Keep this assessment');
   await run(page);
@@ -377,7 +420,10 @@ test('assessment expiry never hides its history', async ({ page, native }) => {
   await page.clock.setFixedTime(new Date(native.now));
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
-  await expect(history.getByRole('status')).toHaveText('Expired: reassessment due');
+  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
+  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  expect(native.requests.filter(request => request.op === 'work.assess')).toHaveLength(1);
   await expect(history).toContainText('Assessment of Keep this assessment');
   expect(native.assessments.values(version.id)).toEqual([version]);
 });
@@ -389,7 +435,9 @@ test('latest assessment selection follows saved logical order after the clock mo
   const original = native.assessments.values(native.state.tasks.find(task => task.title === 'Clock-safe history')!.id)[0]!;
   native.now = '2026-09-11T16:00:00.000Z';
   await page.clock.setFixedTime(new Date(native.now));
-  await run(page);
+  await page.locator('.task-row').filter({ hasText: 'Clock-safe history' }).click();
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect.poll(() => native.assessments.values(original.id).length).toBe(2);
   const versions = [...native.assessments.values(original.id)];
   expect(versions).toHaveLength(2);
   expect(Date.parse(versions[1]!.evaluatedAt)).toBeLessThan(Date.parse(versions[0]!.evaluatedAt));

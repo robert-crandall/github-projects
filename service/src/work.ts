@@ -29,10 +29,13 @@ export class WorkService {
     const input = parsed.data;
     checkAbort(signal);
     if (input.observeOnly) {
+      if (input.knownUrls.some(value => !canonicalGithubUrl(value))) throw new ServiceError('invalid_input');
       const collectedAt = this.now().toISOString();
       const observations = await this.github.observe(input.knownUrls, signal);
       return workCollectOutputSchema.parse({
-        candidates: [], observations, collectedAt,
+        candidates: [],
+        observations: input.stateOnly ? observations.map(({ context: _, ...state }) => state) : observations,
+        collectedAt,
         warnings: observations.some(observation => observation.state === 'unknown')
           ? ['Some tracked GitHub sources could not be observed. Inspect their source-state errors.'] : [],
       });

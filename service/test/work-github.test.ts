@@ -5,6 +5,7 @@ import type { Runner } from '../src/process.ts';
 import type { CopilotService } from '../src/copilot.ts';
 import { LIMITS } from '../src/schema.ts';
 import { ServiceError } from '../src/errors.ts';
+import { WorkService } from '../src/work.ts';
 
 const at = '2026-09-01T12:00:00Z';
 const requestedAt = '2026-09-10T12:00:00Z';
@@ -64,6 +65,69 @@ function harness(options: {
 }
 const input = (override: Partial<Workstream> = {}) => ({ stream: { ...stream, ...override }, model: '', since: null });
 const signal = () => new AbortController().signal;
+
+test('live PR readiness is structured separately from stable source content', async () => {
+  const current = await harness().service.observe([url], signal());
+  const draft = await harness({ graph: { ...graph, isDraft: true } }).service.observe([url], signal());
+  expect(current[0]!.context).toEqual(draft[0]!.context);
+  expect(current[0]!.pullRequest).toMatchObject({ draft: false, checks: 'none', readiness: 'ready', head });
+  expect(draft[0]!.pullRequest).toMatchObject({ draft: true, readiness: 'not-ready' });
+  expect(current[0]!.context!.body).not.toContain('Current GitHub pull request state');
+});
+
+test.each([
+  ['FAILURE', false, 'failing', 'not-ready'],
+  ['PENDING', false, 'pending', 'unknown'],
+  ['SUCCESS', false, 'passing', 'ready'],
+  ['SUCCESS', true, 'unknown', 'unknown'],
+  ['FAILURE', true, 'failing', 'not-ready'],
+  ['UNRECOGNIZED', false, 'unknown', 'unknown'],
+] as const)('readiness preserves %s with incomplete=%s rather than inventing a passing check', async (state, incomplete, checks, readiness) => {
+  const value = {
+    ...graph, commits: { nodes: [{ commit: { committedDate: at, statusCheckRollup: {
+      contexts: {
+        nodes: [{ __typename: 'StatusContext', id: 'check', context: 'CI', state, createdAt: at }],
+        pageInfo: { hasNextPage: incomplete },
+      },
+    } } }] },
+  };
+  const observations = await harness({ graph: value }).service.observe([url], signal());
+  expect(observations[0]!.pullRequest).toMatchObject({ checks, readiness, checksIncomplete: incomplete });
+});
+
+test('observation-only service reads requested sources without collecting tasks or starting a model', async () => {
+  const github = harness();
+  const service = new WorkService({ github: github.service });
+  const observe = { ...input(), knownUrls: [url], observeOnly: true, stateOnly: true };
+  const result = await service.collect(observe, signal());
+  expect(result.candidates).toEqual([]);
+  expect(result.observations).toHaveLength(1);
+  expect(github.calls.some(call => call.args.some(arg => arg.startsWith('/search/') || arg.includes('/timeline')))).toBe(false);
+  expect(result.observations[0]!.pullRequest?.readiness).toBe('ready');
+  const count = github.calls.length;
+  await expect(service.collect({ ...observe, knownUrls: ['https://example.com/task/1'] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+  expect(github.calls).toHaveLength(count);
+  const unknown = await new WorkService({ github: harness({ failGraph: true }).service }).collect(observe, signal());
+  expect(unknown.observations[0]!.state).toBe('unknown');
+  expect(unknown.warnings[0]).toContain('could not be observed');
+});
+
+test('state-only refresh omits large stable descriptions and stays within the protocol byte budget', async () => {
+  const urls = Array.from({ length: 100 }, (_, index) => `https://github.com/octo/repo/pull/${index + 1}`);
+  const observations = urls.map(url => ({
+    url, state: 'open' as const, observedAt: at, reason: '',
+    context: { title: 'Large description', body: '界'.repeat(90_000), labels: [], revision: 'a'.repeat(64) },
+  }));
+  expect(Buffer.byteLength(JSON.stringify(observations))).toBeGreaterThan(LIMITS.responseBytes);
+  const service = new WorkService({ github: {
+    observe: async requested => { expect(requested).toEqual(urls); return observations; },
+    collect: async () => { throw new Error('Readiness refresh must not collect'); },
+  } });
+  const result = await service.collect({ ...input(), knownUrls: urls, observeOnly: true, stateOnly: true }, signal());
+  expect(result.observations).toHaveLength(100);
+  expect(result.observations.every(value => !('context' in value))).toBe(true);
+  expect(Buffer.byteLength(JSON.stringify({ v: 1, id: 'state', ok: true, result }))).toBeLessThan(LIMITS.responseBytes);
+});
 
 function issues(options: {
   total: number; incomplete?: boolean; overlap?: boolean; body?: string;

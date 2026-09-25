@@ -9,6 +9,7 @@ const sourceIcons = { waiting: Circle, collecting: ArrowRight, done: Check, fail
 const phases: Record<WorkQueueSnapshot['phase'], string> = {
   preparing: 'Saving pending changes', intake: 'Reading task intake', collecting: 'Collecting sources',
   'checking-assessments': 'Checking saved assessments',
+  'refreshing-state': 'Checking current GitHub status',
   assessing: 'Assessing tasks', ranking: 'Ranking tasks', saving: 'Saving results', idle: 'Run complete', error: 'Run incomplete',
   cancelling: 'Cancelling assessment · Waiting for the active request to stop',
   cancelled: 'Assessment cancelled · Saved batches kept · Order unchanged',

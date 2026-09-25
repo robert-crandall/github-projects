@@ -36,6 +36,7 @@ export function gate() {
 class ExpectedFailure extends Error {}
 
 export class NativeMock {
+  workObservations?: WorkCollection['observations'];
   constructor(private readonly referenceWorkspace = false) {}
   appearance: Preferences | null = null;
   failAppearanceRead = false;
@@ -231,6 +232,20 @@ export class NativeMock {
         result = { servers: [], instructions: 'No shared Slack connection. Configure a selected read-only MCP server.' };
         break;
       case 'work.collect': {
+        if (request.input.observeOnly && request.input.stateOnly) {
+          result = {
+            candidates: [], warnings: [], collectedAt: this.now,
+            observations: this.workObservations ?? request.input.knownUrls.map(url => {
+              const work = this.state.tasks.find(task => task.work?.url === url)?.work;
+              return {
+                url, state: work?.availability === 'waiting' ? 'closed' : work?.availability === 'unknown' ? 'unknown' : 'open',
+                observedAt: work?.availabilityObservedAt ?? this.now, reason: work?.availabilityReason ?? '',
+                reference: work?.reference, pullRequest: work?.pullRequest,
+              };
+            }),
+          };
+          break;
+        }
         const source = this.workCollections.get(request.input.stream.id);
         if (source?.hold) await source.hold.promise;
         if (source?.error) throw new ExpectedFailure(source.error);

@@ -148,7 +148,7 @@ test('invalid service output and duplicate request IDs are rejected', async () =
 test('work deadline and cancellation errors never imply an external GitHub write', async () => {
   for (const code of ['deadline', 'cancelled'] as const) for (const op of ['work.rank', 'work.assess']) {
     const replies = await harness(async input => {
-      input.write(request('rank', op, { profileId: 'default', ...(op === 'work.rank' ? { assessmentIds: [] } : {}), instructions: '', model: '', tasks: [] }));
+      input.write(request('rank', op, { profileId: 'default', ...(op === 'work.rank' ? { assessmentIds: [], assessments: [] } : {}), instructions: '', model: '', tasks: [] }));
       await tick();
     }, async () => { throw new ServiceError(code, true); });
     expect(replies[0]!.error).toMatchObject({ code, message: expect.stringContaining('read-only') });
@@ -174,7 +174,7 @@ test('work operations get five minutes without extending legacy operation deadli
     return success;
   });
   try {
-    input.write(request('rank', 'work.rank', { profileId: 'default', assessmentIds: [], instructions: '', model: '', tasks: [] }));
+    input.write(request('rank', 'work.rank', { profileId: 'default', assessmentIds: [], assessments: [], instructions: '', model: '', tasks: [] }));
     input.write(request('assess', 'work.assess', { profileId: 'default', instructions: '', model: '', tasks: [] }));
     input.write(request('collect', 'work.collect', { stream: defaultWorkState().settings.streams[0], model: '', since: null }));
     input.write(request('legacy'));

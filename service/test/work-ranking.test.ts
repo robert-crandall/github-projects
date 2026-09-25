@@ -20,6 +20,10 @@ import { taskAgents } from '../src/work-agents.ts';
 const at = '2026-09-18T12:00:00.000Z';
 const url = 'https://github.com/example/repo/issues/1';
 const signal = () => new AbortController().signal;
+const savedInput = (values: SavedAssessment[]) => ({
+  assessmentIds: values.map(value => value.resultId),
+  assessments: values.map(result => ({ taskId: result.id, result })),
+});
 function input(): WorkRankInput {
   return {
     instructions: 'Favor explicit deadlines', model: 'chosen-model',
@@ -99,6 +103,57 @@ async function fixture(run: (h: {
 }
 
 describe('durable independent assessments and comparative ordering', () => {
+  test('week-old durable judgments rank after cache loss, with current PR state instead of historical draft blockers', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks[0]!.action = 'review';
+      const { assessments } = await h.sdk.assessWork(data, signal());
+      assessments[0]!.assessment.blockers = 'Draft PR; failing CI at assessment time';
+      h.advance(7 * 86400000);
+      data.tasks[0]!.pullRequest = {
+        observedAt: new Date(Date.parse(at) + 7 * 86400000).toISOString(), head: 'b'.repeat(40),
+        draft: false, checks: 'passing', checksIncomplete: false, readiness: 'ready',
+      };
+      const sdk = h.restart(new WorkAssessmentCache(join(h.directory, 'fresh-cache.sqlite3')));
+      await sdk.rankWork({ ...data, ...savedInput(assessments) }, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'order']);
+      const order = h.calls[1]!.input as OrderInput;
+      expect(order.tasks[0]).toMatchObject({
+        assessedAt: at, savedInputsChanged: false, assessment: { blockers: 'Draft PR; failing CI at assessment time' },
+        currentState: { action: 'review', pullRequest: { draft: false, checks: 'passing', readiness: 'ready' } },
+      });
+      expect(h.calls[1]!.config.systemMessage?.content).toContain('overrides historical draft');
+      expect(h.calls[1]!.config.systemMessage?.content).toContain("owner's own PR");
+      const state = data.tasks[0]!.pullRequest!;
+      state.observedAt = new Date(Date.parse(state.observedAt) + 1000).toISOString();
+      await sdk.rankWork({ ...data, ...savedInput(assessments) }, signal());
+      expect(h.calls).toHaveLength(2);
+      state.checks = 'failing';
+      state.readiness = 'not-ready';
+      await sdk.rankWork({ ...data, ...savedInput(assessments) }, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'order', 'order']);
+      expect((h.calls[2]!.input as OrderInput).tasks[0]!.currentState.pullRequest?.checks).toBe('failing');
+    });
+  });
+
+  test('legacy v2 judgments remain usable without a modern cache or invented ratings', async () => {
+    await fixture(async h => {
+      const data = input();
+      const batch = await h.sdk.assessWork(data, signal());
+      const legacy = batch.assessments.map(value => {
+        if (value.assessmentVersion === 'work-assessment-v2') return value;
+        const { agent: _, ...saved } = value;
+        const { impact: _i, visibility: _v, effort: _e, ...assessment } = saved.assessment;
+        return { ...saved, assessmentVersion: 'work-assessment-v2' as const, assessment };
+      });
+      h.advance(30 * 86400000);
+      await h.restart(new WorkAssessmentCache(join(h.directory, 'legacy-cache.sqlite3')))
+        .rankWork({ ...data, ...savedInput(legacy) }, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'order']);
+      expect((h.calls[1]!.input as OrderInput).tasks[0]!.assessment).not.toHaveProperty('impact');
+    });
+  });
+
   test('rank without assessment IDs never silently invokes an assessor', async () => {
     await fixture(async h => {
       await expect(h.sdk.rankWork(input(), signal())).rejects.toMatchObject({ dto: { code: 'assessment_required' } });
@@ -130,7 +185,7 @@ describe('durable independent assessments and comparative ordering', () => {
     await fixture(async h => {
       const data = input();
       const batch = await h.sdk.assessWork(data, signal());
-      const order = { ...data, assessmentIds: batch.assessments.map(value => value.resultId) };
+      const order = { ...data, ...savedInput(batch.assessments) };
       await h.sdk.rankWork(order, signal());
       await h.sdk.rankWork({ ...order, force: true }, signal());
       expect(h.calls.map(call => call.phase)).toEqual(['assess', 'order', 'order']);
@@ -146,7 +201,7 @@ describe('durable independent assessments and comparative ordering', () => {
       const second = await h.sdk.assessWork({ ...data, force: true }, signal());
       expect(second.assessments.map(value => value.resultId)).not.toEqual(first.assessments.map(value => value.resultId));
       expect(await h.restart().assessWork(data, signal())).toEqual(second);
-      const order = { ...data, assessmentIds: second.assessments.map(value => value.resultId) };
+      const order = { ...data, ...savedInput(second.assessments) };
       await h.sdk.rankWork(order, signal());
       await h.restart().rankWork(order, signal());
       await h.sdk.rankWork({ ...order, force: true }, signal());
@@ -161,7 +216,7 @@ describe('durable independent assessments and comparative ordering', () => {
         instructions: agent.jobType === 'task-assessment' ? 'Assess impact only from supplied evidence' : 'Prefer owner deadlines',
       })) };
       const first = await h.sdk.assessWork(data, signal());
-      const request = { ...data, assessmentIds: first.assessments.map(value => value.resultId) };
+      const request = { ...data, ...savedInput(first.assessments) };
       await h.sdk.rankWork(request, signal());
       const scope = assessmentScope('synthetic-test-token', data);
       data.agents[1]!.instructions = 'Prefer unblocking peers';
@@ -178,8 +233,8 @@ describe('durable independent assessments and comparative ordering', () => {
       expect(h.calls[1]!.config.systemMessage?.content).not.toContain('Assess impact only');
       for (const call of h.calls) expect(call.config).toMatchObject({ availableTools: [], tools: [], mcpServers: {}, enableSkills: false });
       data.agents[0]!.instructions = 'New assessment meaning';
-      await expect(h.sdk.rankWork(request, signal())).rejects.toMatchObject({ dto: { code: 'assessment_required' } });
-      expect(h.calls).toHaveLength(3);
+      await h.sdk.rankWork(request, signal());
+      expect(h.calls.map(call => call.phase)).toEqual(['assess', 'order', 'order', 'order']);
     });
   });
 
@@ -207,7 +262,7 @@ describe('durable independent assessments and comparative ordering', () => {
       });
       expect(JSON.stringify(result)).not.toContain('synthetic-test-token');
       expect(JSON.stringify(result)).not.toContain('FULL PRIVATE EVIDENCE');
-      const ordered = { ...data, assessmentIds: result.assessments.map(value => value.resultId) };
+      const ordered = { ...data, ...savedInput(result.assessments) };
       h.respond(call => { if (call.phase === 'order') throw new Error('ordering offline'); });
       await expect(h.sdk.rankWork(ordered, signal())).rejects.toMatchObject({ dto: { code: 'copilot_unavailable' } });
       h.respond();
@@ -231,19 +286,14 @@ describe('durable independent assessments and comparative ordering', () => {
       expect(h.calls).toHaveLength(2);
     });
   });
-  for (const change of ['profile', 'credential', 'notes', 'instructions', 'model', 'result-id', 'expired'] as const) {
+  for (const change of ['profile', 'result-id'] as const) {
     test(`order-only refuses ${change} mismatch without silently reassessing`, async () => {
       await fixture(async h => {
         const data = { ...input(), profileId: 'profile' };
         const assessed = await h.sdk.assessWork(data, signal());
-        const request = { ...structuredClone(data), assessmentIds: assessed.assessments.map(value => value.resultId) };
+        const request = { ...structuredClone(data), ...savedInput(assessed.assessments) };
         if (change === 'profile') request.profileId = 'another';
-        if (change === 'credential') h.credential('different-credential');
-        if (change === 'notes') request.tasks[0]!.notes = 'Changed notes';
-        if (change === 'instructions') request.instructions = 'Changed instructions';
-        if (change === 'model') request.model = 'different-model';
         if (change === 'result-id') request.assessmentIds[0] = crypto.randomUUID();
-        if (change === 'expired') h.advance(86400000);
         await expect(h.sdk.rankWork(request, signal())).rejects.toMatchObject({
           dto: { code: 'assessment_required' },
         });
@@ -287,7 +337,7 @@ describe('durable independent assessments and comparative ordering', () => {
       expect(JSON.stringify(h.calls[2]!.input)).not.toContain('FULL PRIVATE EVIDENCE a');
       const order = h.calls[3]!.input as OrderInput;
       expect(order.tasks).toHaveLength(2);
-      expect(Object.keys(order.tasks[0]!).sort()).toEqual(['assessedAt', 'assessment', 'id']);
+      expect(Object.keys(order.tasks[0]!).sort()).toEqual(['assessedAt', 'assessment', 'currentState', 'id', 'savedInputsChanged', 'title']);
       expect(JSON.stringify(order)).not.toContain('FULL EVIDENCE');
       expect(JSON.stringify(order)).not.toContain('Current source body');
       expect(Object.keys(order.tasks[0]!.assessment).sort()).toEqual([
@@ -444,14 +494,14 @@ describe('durable independent assessments and comparative ordering', () => {
       expect(h.calls[2]!.input.tasks).toHaveLength(2);
     });
   });
-  test('format version isolates records and a credential change between RPCs prevents ordering', async () => {
+  test('format version isolates cache records while supplied local judgments survive credential changes', async () => {
     await fixture(async h => {
       const data = input();
       expect(assessmentScope('token', data, ASSESSMENT_VERSION)).not.toBe(assessmentScope('token', data, 'next-format'));
       h.respond((call, result) => { if (call.phase === 'assess') h.credential('switched-mid-run'); return result; });
-      await expect(rankWithAssessments(h.sdk, data, signal())).rejects.toMatchObject({ dto: { code: 'assessment_required' } });
+      await rankWithAssessments(h.sdk, data, signal());
       expect(h.tokenReads()).toBe(2);
-      expect(h.clients.map(client => client.gitHubToken)).toEqual(['synthetic-test-token']);
+      expect(h.clients.map(client => client.gitHubToken)).toEqual(['synthetic-test-token', 'switched-mid-run']);
       const cache = new WorkAssessmentCache(h.path);
       expect(cache.load(assessmentScope('synthetic-test-token', data, 'next-format'), ['a', 'b']).assessments.size).toBe(0);
     });
@@ -485,7 +535,7 @@ describe('durable independent assessments and comparative ordering', () => {
       expect(h.calls[3]!.input.evaluatedAt).toBe('2026-09-19T12:00:00.000Z');
     });
   });
-  test('earlier task expiry caps order and refreshes only the expired assessment', async () => {
+  test('assessment expiry no longer caps the comparative order lifetime', async () => {
     await fixture(async h => {
       h.respond((call, result) => call.phase === 'assess' ? {
         assessments: call.input.tasks.map((task, index) => ({
@@ -494,7 +544,7 @@ describe('durable independent assessments and comparative ordering', () => {
         })),
       } : result);
       const data = input();
-      expect((await rankWithAssessments(h.sdk, data, signal())).expiresAt).toBe('2026-09-18T12:10:00.000Z');
+      expect((await rankWithAssessments(h.sdk, data, signal())).expiresAt).toBe('2026-09-18T13:00:00.000Z');
       h.advance(600000);
       await rankWithAssessments(h.sdk, data, signal());
       expect(h.calls[2]!.phase).toBe('assess');

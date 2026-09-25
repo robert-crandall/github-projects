@@ -9,6 +9,5 @@ export function assessmentFreshness(value: SavedAssessment, current: {
     || value.assessmentVersion !== ASSESSMENT_VERSION
     || value.agent.configurationFingerprint !== current.configurationFingerprint) return 'Outdated: assessment settings changed';
   if (Date.parse(value.evaluatedAt) > now) return 'Freshness unknown: clock moved backwards';
-  if (Date.parse(value.assessment.reevaluateAt) <= now) return 'Expired: reassessment due';
   return 'Current for saved task content';
 }

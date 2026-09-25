@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { z } from 'zod';
 import { checkAbort, ServiceError } from './errors.ts';
 import { LIMITS } from './schema.ts';
-import { semanticRankTask, type SemanticRankTask } from './work-rank-input.ts';
+import { orderingRankTask, semanticRankTask, type SemanticRankTask } from './work-rank-input.ts';
 import { workRankOutputSchema, type WorkRankInput } from './work-schema.ts';
 import { agentIdentity, taskAgent, taskAgentJobs } from './work-agents.ts';
 import {
@@ -116,7 +116,16 @@ export type AssessmentInput = { evaluatedAt: string; tasks: SemanticRankTask[] }
 export type AssessmentOutput = { assessments: (Assessment & { id: string })[] };
 export type OrderInput = {
   evaluatedAt: string;
-  tasks: { id: string; assessedAt: string; assessment: Assessment }[];
+  tasks: {
+    id: string; title: string; assessedAt: string; assessment: SavedAssessment['assessment'];
+    savedInputsChanged: boolean;
+    currentState: {
+      action: WorkRankInput['tasks'][number]['action'];
+      availability: 'actionable' | 'unknown';
+      reason: string;
+      pullRequest: WorkRankInput['tasks'][number]['pullRequest'] | null;
+    };
+  }[];
 };
 export type OrderOutput = { ranking: { id: string; reason: string }[]; reevaluateAt: string };
 export type RankingModels = {
@@ -188,29 +197,25 @@ export class WorkRanker {
 
   async rank(input: WorkRankInput, scope: string, models: RankingModels, signal: AbortSignal) {
     checkAbort(signal);
-    if (!input.assessmentIds) throw new ServiceError('assessment_required');
+    if (!input.assessmentIds || !input.assessments) throw new ServiceError('assessment_required');
     const tasks = input.tasks.map(semanticRankTask).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-    const { assessments, order } = this.cache.load(scope, tasks.map(task => task.id));
+    const { order } = this.cache.load(scope, []);
+    exactPermutation(tasks.map(task => task.id), input.assessments.map(value => value.taskId), 'assessment_required');
+    const saved = new Map(input.assessments.map(value => [value.taskId, value.result]));
+    const sources = new Map(input.tasks.map(task => [task.id, task]));
     const current = tasks.map(task => {
-      const cached = assessments.get(task.id);
-      if (!this.current(cached, task, input)) throw new ServiceError('assessment_required');
-      try { validateAssessment(cached.assessment, task, cached.evaluatedAt); }
-      catch (error) {
-        if (error instanceof ServiceError && error.dto.code === 'copilot_output') throw new ServiceError('assessment_storage');
-        throw error;
-      }
-      return cached;
+      const value = saved.get(task.id)!;
+      if (value.profileId !== (input.profileId ?? 'default')) throw new ServiceError('assessment_required');
+      return value;
     });
     exactPermutation(current.map(value => value.resultId), input.assessmentIds, 'assessment_required');
-    const fingerprint = digest([current, agentIdentity(taskAgent(input, 'task-prioritization')),
+    const fingerprint = digest([current, tasks.map(task => orderingRankTask(sources.get(task.id)!)), agentIdentity(taskAgent(input, 'task-prioritization')),
       taskAgentJobs['task-prioritization'].resultFormat]);
     const orderAt = this.now().toISOString();
-    const earliestExpiry = Math.min(...current.map(value => Date.parse(value.assessment.reevaluateAt)));
-    if (earliestExpiry <= Date.parse(orderAt)) throw new ServiceError('copilot_output');
     if (!input.force && order?.fingerprint === fingerprint && Date.parse(order.result.evaluatedAt) <= Date.parse(orderAt)
       && Date.parse(order.result.expiresAt) > Date.parse(orderAt)) {
       const result = order.result;
-      if (Date.parse(result.expiresAt) > Math.min(Date.parse(result.evaluatedAt) + ORDER_MAX_AGE, earliestExpiry)) {
+      if (Date.parse(result.expiresAt) > Date.parse(result.evaluatedAt) + ORDER_MAX_AGE) {
         throw new ServiceError('assessment_storage');
       }
       exactPermutation(tasks.map(task => task.id), result.orderedIds, 'assessment_storage');
@@ -219,14 +224,21 @@ export class WorkRanker {
     }
     const orderInput = {
       evaluatedAt: orderAt,
-      tasks: current.map(value => ({ id: value.id, assessedAt: value.evaluatedAt, assessment: value.assessment })),
+      tasks: tasks.map((task, index) => ({
+        id: task.id, title: task.title, assessedAt: current[index]!.evaluatedAt, assessment: current[index]!.assessment,
+        savedInputsChanged: current[index]!.fingerprint !== (sources.get(task.id)!.assessmentInputFingerprint ?? digest(task)),
+        currentState: {
+          action: task.action, availability: task.availability, reason: task.availabilityReason,
+          pullRequest: sources.get(task.id)!.pullRequest ?? null,
+        },
+      })),
     };
     if (Buffer.byteLength(JSON.stringify(orderInput)) > LIMITS.workModelBytes) throw new ServiceError('limit');
     const ordered = await models.order(orderInput);
     checkAbort(signal);
     exactPermutation(tasks.map(task => task.id), ordered.ranking.map(value => value.id));
     validateReevaluation(ordered.reevaluateAt, orderAt, ORDER_MAX_AGE);
-    const expiresAt = Math.min(Date.parse(ordered.reevaluateAt), earliestExpiry);
+    const expiresAt = Date.parse(ordered.reevaluateAt);
     if (expiresAt <= this.now().getTime()) throw new ServiceError('copilot_output');
     const result = savedOrderSchema.shape.result.parse({
       orderedIds: ordered.ranking.map(value => value.id),

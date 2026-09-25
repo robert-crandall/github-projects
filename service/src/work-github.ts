@@ -122,30 +122,40 @@ function eventEvidence(event: Event, ref: Reference, stream: Workstream, url: st
   };
 }
 
-function sourceContext(source: Source, ref: Reference, graph?: Graph): WorkSourceContext {
-  let body = source.body ?? '';
-  if (ref.kind === 'pr') {
-    const checks = graph?.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
-    const current = {
-      state: source.merged ? 'MERGED' : graph?.state ?? source.state.toUpperCase(),
-      head: graph?.headRefOid ?? null, draft: graph?.isDraft ?? source.draft ?? false,
-      queued: Boolean(graph?.mergeQueueEntry), mergeable: graph?.mergeable ?? null,
-      reviewDecision: graph?.reviewDecision ?? null,
-      checksIncomplete: checks?.pageInfo.hasNextPage ?? false,
-      checks: (checks?.nodes ?? []).map(check => check.__typename === 'CheckRun'
-        ? { name: check.name, status: check.status, conclusion: check.conclusion }
-        : { name: check.context, status: check.state, conclusion: null })
-        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-    };
-    body += `\n\n--- Current GitHub pull request state (not source-authored text) ---\n${JSON.stringify(current)}`;
-  }
+function sourceContext(source: Source): WorkSourceContext {
   const content = {
-    title: source.title, body,
+    title: source.title, body: source.body ?? '',
     labels: [...new Set((source.labels ?? []).map(label => typeof label === 'string' ? label : label.name))].sort(),
   };
   const parsed = workSourceContextSchema.safeParse({ ...content, revision: hash(content) });
   if (!parsed.success) throw new ServiceError('limit');
   return parsed.data;
+}
+
+function pullRequestState(source: Source, ref: Reference, observedAt: string, graph?: Graph): WorkObservation['pullRequest'] {
+  if (ref.kind !== 'pr') return undefined;
+  const contexts = graph?.commits.nodes[0]?.commit.statusCheckRollup?.contexts;
+  const values = contexts?.nodes ?? [];
+  const failing = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'STALE']);
+  const passing = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED']);
+  const pending = new Set(['QUEUED', 'IN_PROGRESS', 'WAITING', 'PENDING', 'REQUESTED']);
+  const state = (value: z.infer<typeof checkSchema>) => value.__typename === 'CheckRun' ? value.conclusion ?? '' : value.state;
+  const checksIncomplete = !graph || !!contexts?.pageInfo.hasNextPage;
+  const checks = values.some(value => failing.has(state(value))) ? 'failing'
+    : checksIncomplete ? 'unknown'
+      : !values.length ? 'none'
+        : values.every(value => passing.has(state(value)) && (value.__typename !== 'CheckRun' || value.status === 'COMPLETED'))
+          ? 'passing'
+          : values.every(value => passing.has(state(value)) || pending.has(value.__typename === 'CheckRun' ? value.status : value.state))
+            ? 'pending' : 'unknown';
+  const draft = graph?.isDraft ?? source.draft ?? null;
+  return {
+    observedAt, head: graph?.headRefOid ?? null, author: source.user?.login ?? null,
+    mergeable: graph?.mergeable ?? null, reviewDecision: graph?.reviewDecision ?? null,
+    draft, checks, checksIncomplete,
+    readiness: draft === true || checks === 'failing' ? 'not-ready'
+      : draft === false && (checks === 'passing' || checks === 'none') ? 'ready' : 'unknown',
+  };
 }
 
 export class WorkGitHub {
@@ -246,7 +256,8 @@ export class WorkGitHub {
             observations.push({
               url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '',
               reference: ref,
-              context: sourceContext(source, ref, graph),
+              context: sourceContext(source),
+              pullRequest: pullRequestState(source, ref, observedAt, graph),
             });
           } catch (error) {
             checkAbort(combined);
@@ -584,7 +595,8 @@ export class WorkGitHub {
           observations.push({
             url, state, observedAt, reason: state === 'queued' ? 'GitHub confirms current merge queue membership.' : '',
             reference: sourceRef,
-            context: sourceContext(source, sourceRef, graph),
+            context: sourceContext(source),
+            pullRequest: pullRequestState(source, sourceRef, observedAt, graph),
           });
           observed = true;
           if (!matched || state !== 'open') continue;

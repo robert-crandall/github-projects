@@ -45,7 +45,7 @@ test('task history survives Done, restore, profile switches and snapshot round t
   expect(state.tasks[0]!.work).toBeUndefined();
 });
 
-test('freshness distinguishes changed content, settings, expiry and a backwards clock without removing history', async () => {
+test('freshness flags changed inputs and backwards clocks but never expires a saved judgment', async () => {
   const { state, history } = await manual();
   const task = state.tasks[0]!;
   const version = history.entries[0]!;
@@ -56,7 +56,7 @@ test('freshness distinguishes changed content, settings, expiry and a backwards 
     profileId: 'default', model: '',
   };
   expect(assessmentFreshness(version, current, Date.parse(at))).toBe('Current for saved task content');
-  expect(assessmentFreshness(version, current, Date.parse(at) + 86400000)).toBe('Expired: reassessment due');
+  expect(assessmentFreshness(version, current, Date.parse(at) + 30 * 86400000)).toBe('Current for saved task content');
   expect(assessmentFreshness(version, { ...current, fingerprint: '0'.repeat(64) }, Date.parse(at)))
     .toBe('Outdated: task content changed');
   expect(assessmentFreshness(version, { ...current, model: 'changed' }, Date.parse(at))).toContain('settings changed');
