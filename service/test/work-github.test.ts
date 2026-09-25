@@ -5,6 +5,7 @@ import type { Runner } from '../src/process.ts';
 import type { CopilotService } from '../src/copilot.ts';
 import { LIMITS } from '../src/schema.ts';
 import { ServiceError } from '../src/errors.ts';
+import { WorkService } from '../src/work.ts';
 
 const at = '2026-09-01T12:00:00Z';
 const requestedAt = '2026-09-10T12:00:00Z';
@@ -64,6 +65,51 @@ function harness(options: {
 }
 const input = (override: Partial<Workstream> = {}) => ({ stream: { ...stream, ...override }, model: '', since: null });
 const signal = () => new AbortController().signal;
+
+test('live PR readiness is structured separately from stable source content', async () => {
+  const current = await harness().service.observe([url], signal());
+  const draft = await harness({ graph: { ...graph, isDraft: true } }).service.observe([url], signal());
+  expect(current[0]!.context).toEqual(draft[0]!.context);
+  expect(current[0]!.pullRequest).toMatchObject({ draft: false, checks: 'none', readiness: 'ready', head });
+  expect(draft[0]!.pullRequest).toMatchObject({ draft: true, readiness: 'not-ready' });
+  expect(current[0]!.context!.body).not.toContain('Current GitHub pull request state');
+});
+
+test.each([
+  ['FAILURE', false, 'failing', 'not-ready'],
+  ['PENDING', false, 'pending', 'unknown'],
+  ['SUCCESS', false, 'passing', 'ready'],
+  ['SUCCESS', true, 'unknown', 'unknown'],
+  ['FAILURE', true, 'failing', 'not-ready'],
+  ['UNRECOGNIZED', false, 'unknown', 'unknown'],
+] as const)('readiness preserves %s with incomplete=%s rather than inventing a passing check', async (state, incomplete, checks, readiness) => {
+  const value = {
+    ...graph, commits: { nodes: [{ commit: { committedDate: at, statusCheckRollup: {
+      contexts: {
+        nodes: [{ __typename: 'StatusContext', id: 'check', context: 'CI', state, createdAt: at }],
+        pageInfo: { hasNextPage: incomplete },
+      },
+    } } }] },
+  };
+  const observations = await harness({ graph: value }).service.observe([url], signal());
+  expect(observations[0]!.pullRequest).toMatchObject({ checks, readiness, checksIncomplete: incomplete });
+});
+
+test('observation-only service reads requested sources without collecting tasks or starting a model', async () => {
+  const github = harness();
+  const service = new WorkService({ github: github.service });
+  const result = await service.observe({ urls: [url] }, signal());
+  expect(result.candidates).toEqual([]);
+  expect(result.observations).toHaveLength(1);
+  expect(github.calls.some(call => call.args.some(arg => arg.startsWith('/search/') || arg.includes('/timeline')))).toBe(false);
+  expect(result.observations[0]!.pullRequest?.readiness).toBe('ready');
+  const count = github.calls.length;
+  await expect(service.observe({ urls: ['https://example.com/task/1'] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+  expect(github.calls).toHaveLength(count);
+  const unknown = await new WorkService({ github: harness({ failGraph: true }).service }).observe({ urls: [url] }, signal());
+  expect(unknown.observations[0]!.state).toBe('unknown');
+  expect(unknown.warnings[0]).toContain('unknown');
+});
 
 function issues(options: {
   total: number; incomplete?: boolean; overlap?: boolean; body?: string;

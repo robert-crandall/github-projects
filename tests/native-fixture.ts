@@ -36,6 +36,7 @@ export function gate() {
 class ExpectedFailure extends Error {}
 
 export class NativeMock {
+  workObservations?: WorkCollection['observations'];
   constructor(private readonly referenceWorkspace = false) {}
   appearance: Preferences | null = null;
   failAppearanceRead = false;
@@ -246,6 +247,19 @@ export class NativeMock {
         result = await assessmentBatch(request.input, this.now);
         break;
       }
+      case 'work.observe':
+        result = {
+          candidates: [], warnings: [], collectedAt: this.now,
+          observations: this.workObservations ?? request.input.urls.map(url => {
+            const work = this.state.tasks.find(task => task.work?.url === url)?.work;
+            return {
+              url, state: work?.availability === 'waiting' ? 'closed' : work?.availability === 'unknown' ? 'unknown' : 'open',
+              observedAt: work?.availabilityObservedAt ?? this.now, reason: work?.availabilityReason ?? '',
+              context: work?.context, reference: work?.reference, pullRequest: work?.pullRequest,
+            };
+          }),
+        };
+        break;
       case 'work.rank':
         if (this.holdRank) await this.holdRank.promise;
         if (this.failRank) throw new ExpectedFailure('Copilot ranking failed. Your tasks and previous order are retained.');

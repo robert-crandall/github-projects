@@ -84,12 +84,18 @@ function observe(work: WorkMetadata, observation?: WorkObservation, contextObser
   let next = reference ? { ...work, reference } : work;
   if (observation && (!work.availabilityObservedAt
     || Date.parse(observation.observedAt) >= Date.parse(work.availabilityObservedAt))) {
+    const { pullRequest: _, ...previous } = next;
+    const pullRequest = observation.pullRequest ?? (reference?.kind === 'pr' ? {
+      observedAt: observation.observedAt, head: null, draft: null, checks: 'unknown' as const,
+      checksIncomplete: true, readiness: 'unknown' as const,
+    } : undefined);
     next = {
-      ...next,
+      ...previous,
       availability: observation.state === 'open' ? 'actionable' : observation.state === 'unknown' ? 'unknown' : 'waiting',
       availabilityReason: observation.reason || (observation.state === 'open' ? 'The source is open.'
         : observation.state === 'unknown' ? 'The source state could not be confirmed.' : `The source is ${observation.state}.`),
       availabilityObservedAt: observation.observedAt,
+      ...(pullRequest ? { pullRequest } : {}),
     };
   }
   if (contextObservation?.context && (!work.contextObservedAt
@@ -124,18 +130,20 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
       .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
   const additionalNotes = second.title === first.title ? second.notes : [second.title, second.notes].filter(Boolean).join('\n');
   const reference = sourceReference({ ...first.work, reference: observation.reference ?? first.work.reference ?? second.work.reference }, [second.work.url]);
+  const { pullRequest: _, ...firstWork } = first.work;
   return {
     ...first, status, completedAt,
     assessmentTaskIds: [...new Set([first.id, second.id, ...first.assessmentTaskIds ?? [], ...second.assessmentTaskIds ?? []])],
     createdAt: Date.parse(first.createdAt) <= Date.parse(second.createdAt) ? first.createdAt : second.createdAt,
     notes: [...new Set([first.notes, additionalNotes].filter(Boolean))].join('\n\n'),
     work: workMetadataSchema.parse({
-      ...first.work,
+      ...firstWork,
       ...(reference ? { reference } : {}),
       evidence: mergeEvidence(first.work.evidence, second.work.evidence),
       handledEvidenceIds: [...new Set([...first.work.handledEvidenceIds, ...second.work.handledEvidenceIds])],
       availability: observation.availability, availabilityReason: observation.availabilityReason,
       availabilityObservedAt: observation.availabilityObservedAt, notification, unsubscribe,
+      ...(observation.pullRequest ? { pullRequest: observation.pullRequest } : {}),
       context: context?.context, contextObservedAt: context?.contextObservedAt ?? context?.availabilityObservedAt,
     }),
   };
@@ -308,5 +316,6 @@ export function rankTask(task: Task): WorkRankInput['tasks'][number] {
     availability: task.work?.availability === 'unknown' ? 'unknown' : 'actionable',
     availabilityReason: task.work?.availabilityReason ?? '',
     ...(task.work?.context ? { context: task.work.context } : {}),
+    ...(task.work?.pullRequest ? { pullRequest: task.work.pullRequest } : {}),
   };
 }

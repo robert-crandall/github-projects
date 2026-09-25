@@ -7,11 +7,10 @@ import { ServiceCallError, ServiceClient } from '../platform/service.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
 import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
-import { semanticRankTask } from '../../service/src/work-rank-input.ts';
+import { orderingRankTask, semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
-import { assessmentFreshness } from './assessments.ts';
 import { CodeSessions } from './code-sessions.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
@@ -25,7 +24,7 @@ export type RunProgress = {
 };
 export type WorkQueueSnapshot = {
   running: boolean; cancelRequested: boolean;
-  phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'checking-assessments' | 'assessing' | 'cancelling' | 'cancelled' | 'ranking' | 'saving' | 'error';
+  phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'refreshing-state' | 'checking-assessments' | 'assessing' | 'cancelling' | 'cancelled' | 'ranking' | 'saving' | 'error';
   progress: RunProgress | null; error: string; warnings: string[]; connections?: WorkConnections;
   unsubscribing: string[];
 };
@@ -251,6 +250,42 @@ export class WorkQueue {
     await this.controller.flush();
   }
 
+  private async refreshState(profileId: string, generation: number): Promise<string[]> {
+    const urls = [...new Set(this.controller.state.tasks.filter(task =>
+      task.status === 'open' && task.work && new URL(task.work.url).hostname === 'github.com',
+    ).map(task => canonicalSource(task.work!.url)))];
+    const warnings: string[] = [];
+    for (let offset = 0; offset < urls.length; offset += 100) {
+      this.assertWorkspace(generation);
+      this.assertProfile(this.controller.state, profileId);
+      this.publish({ phase: 'refreshing-state' });
+      const requested = urls.slice(offset, offset + 100);
+      const result = await this.service.call('work.observe', { urls: requested });
+      if (result.candidates.length || !exactIds(requested.map(canonicalSource), result.observations.map(value => canonicalSource(value.url)))) {
+        throw new Error('Source refresh did not return exactly the requested sources. The previous order is retained.');
+      }
+      await this.persist(result, profileId, generation);
+      warnings.push(...result.warnings);
+    }
+    return warnings;
+  }
+
+  private async unassessed(input: WorkRankInput, profileId: string, generation: number) {
+    const tasks: WorkRankInput['tasks'] = [];
+    this.publish({ phase: 'checking-assessments' });
+    for (const task of input.tasks) {
+      this.assertAssessmentNotCancelled();
+      this.assertWorkspace(generation);
+      this.assertProfile(this.controller.state, profileId);
+      const page = await this.controller.platform.assessmentRead(profileId, task.id);
+      if (!page.assessments.length) {
+        if (page.before !== null) throw new Error('Assessment history returned an empty continuation. No assessment request was sent; retry history.');
+        tasks.push(task);
+      }
+    }
+    return tasks;
+  }
+
   private async intake(profileId: string, generation: number): Promise<void> {
     const seen = new Set<string>();
     for (let page = 0; page < 20; page += 1) {
@@ -354,17 +389,16 @@ export class WorkQueue {
     };
     assertSettings(this.controller.state);
     const latestInput = rankInput(this.controller.state);
-    const submitted = new Map(latestInput.tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
-    const instructionsFingerprint = await identityDigest(assessor.instructions);
+    const submitted = new Map(latestInput.tasks.map(task => [task.id, JSON.stringify(orderingRankTask(task))]));
     const configurationFingerprint = await identityDigest(agentIdentity(assessor));
     const assessmentIds: string[] = [];
+    const selected: NonNullable<WorkRankInput['assessments']> = [];
     for (const task of latestInput.tasks) {
-      const fingerprint = await identityDigest(semanticRankTask(task));
-      const isCurrent = (value: SavedAssessment) => value.id === task.id && assessmentFreshness(value, {
-        profileId, fingerprint, instructionsFingerprint, configurationFingerprint, model: assessor.model,
-      }, Date.now()) === 'Current for saved task content';
+      const matchesAgent = (value: SavedAssessment) => value.assessmentVersion !== 'work-assessment-v2'
+        && value.agent.configurationFingerprint === configurationFingerprint;
       let value = assessments?.get(task.id);
-      if (!assessments) {
+      if (!value) {
+        let latest: SavedAssessment | undefined;
         const seen = new Set<string>();
         for (let before: number | null = null; ;) {
           assertSettings(this.controller.state);
@@ -372,7 +406,7 @@ export class WorkQueue {
           assertSettings(this.controller.state);
           let previous: number = before ?? Infinity;
           for (const entry of page.assessments) {
-            if (entry.sequence >= previous || seen.has(entry.resultId)) {
+            if (entry.profileId !== profileId || entry.sequence >= previous || seen.has(entry.resultId)) {
               throw new Error('Assessment history returned repeated or unordered results. The previous order is retained; retry history.');
             }
             previous = entry.sequence;
@@ -381,24 +415,30 @@ export class WorkQueue {
           if (page.before !== null && (!page.assessments.length || page.before !== previous)) {
             throw new Error('Assessment history did not advance. The previous order is retained; retry history.');
           }
-          value = page.assessments.find(isCurrent);
-          if (value || page.before === null) break;
+          const results = page.assessments.map(({ sequence: _, ...result }) => result);
+          latest ??= results[0];
+          value = results.find(matchesAgent);
+          if (value || page.before === null) {
+            value ??= latest;
+            break;
+          }
           before = page.before;
         }
       }
-      if (!value || !isCurrent(value)) {
-        throw new Error('Current saved assessments are required for every eligible task. Use Run assessor for unassessed tasks or Assess selected to refresh saved assessments. The previous order is retained.');
+      if (!value || value.profileId !== profileId) {
+        throw new Error('Saved assessments are required for every eligible task. Use Run assessor for unassessed tasks. The previous order is retained.');
       }
       assessmentIds.push(value.resultId);
+      selected.push({ taskId: task.id, result: value });
     }
     assertSettings(this.controller.state);
     const currentTasks = rankInput(this.controller.state).tasks;
     if (!exactIds(latestInput.tasks.map(task => task.id), currentTasks.map(task => task.id))
-      || currentTasks.some(task => submitted.get(task.id) !== JSON.stringify(semanticRankTask(task)))) {
+      || currentTasks.some(task => submitted.get(task.id) !== JSON.stringify(orderingRankTask(task)))) {
       throw new Error('Tasks changed while preparing prioritization. Use Run assessor for unassessed tasks or Assess selected to refresh saved assessments. The previous order is retained.');
     }
     const orderInput = {
-      ...latestInput, profileId, assessmentIds, force,
+      ...latestInput, profileId, assessmentIds, assessments: selected, force,
     };
     this.assertAssessmentNotCancelled();
     this.publish({ phase: 'ranking' });
@@ -415,7 +455,7 @@ export class WorkQueue {
       assertSettings(current);
       const latest: WorkRankInput = rankInput(current);
       const matching = new Set(latest.tasks.filter(task =>
-        ids.includes(task.id) && submitted.get(task.id) === JSON.stringify(semanticRankTask(task))).map(task => task.id));
+        ids.includes(task.id) && submitted.get(task.id) === JSON.stringify(orderingRankTask(task))).map(task => task.id));
       const unranked = latest.tasks.length - matching.size;
       if (unranked) warnings.push(`${unranked} new or edited task${unranked === 1 ? ' is' : 's are'} unranked. Run again to include ${unranked === 1 ? 'it' : 'them'}.`);
       return {
@@ -455,22 +495,7 @@ export class WorkQueue {
         const input = { ...rankInput(this.controller.state), profileId };
         if (kind === 'assess') {
           if (selectedIds) input.tasks = input.tasks.filter(task => selectedIds.has(task.id));
-          else {
-            this.assertAssessmentNotCancelled();
-            this.publish({ phase: 'checking-assessments' });
-            const unassessed: typeof input.tasks = [];
-            for (const task of input.tasks) {
-              this.assertAssessmentNotCancelled();
-              this.assertWorkspace(generation);
-              this.assertProfile(this.controller.state, profileId);
-              const page = await this.controller.platform.assessmentRead(profileId, task.id);
-              if (!page.assessments.length) {
-                if (page.before !== null) throw new Error('Assessment history returned an empty continuation. No assessment request was sent; retry history.');
-                unassessed.push(task);
-              }
-            }
-            input.tasks = unassessed;
-          }
+          else input.tasks = await this.unassessed(input, profileId, generation);
           const assessed = await this.assess(input, generation, true, !!selectedIds);
           if (selectedIds && assessed.size < selectedIds.size) {
             warnings.push(`${selectedIds.size - assessed.size} selected tasks were not assessed because they changed or are no longer eligible.`);
@@ -481,7 +506,10 @@ export class WorkQueue {
               ? 'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.'
               : 'Assessor settings changed during the run. Results are saved as history; use Assess selected to refresh them with the saved settings.');
           }
-        } else warnings.push(...await this.prioritize(input, generation, undefined, true));
+        } else {
+          warnings.push(...await this.refreshState(profileId, generation));
+          warnings.push(...await this.prioritize(input, generation, undefined, true));
+        }
         this.assertWorkspace(generation);
         this.update(current => { this.assertProfile(current, profileId); return { ...current, work: { ...current.work, lastError: '' } }; });
         this.publish({ phase: 'saving' });
@@ -550,8 +578,10 @@ export class WorkQueue {
       }
       this.publish({ warnings: [...warnings] });
       try {
+        warnings.push(...await this.refreshState(profileId, generation));
         const input = { ...rankInput(this.controller.state), profileId };
-        const assessments = await this.assess(input, generation);
+        const tasks = await this.unassessed(input, profileId, generation);
+        const assessments = await this.assess({ ...input, tasks }, generation);
         warnings.push(...await this.prioritize(input, generation, assessments));
       }
       catch (error) {

@@ -23,7 +23,7 @@ const messages: Record<ServiceErrorDTO['code'], string> = {
   mcp_unavailable: 'The selected MCP read or OAuth authentication failed. Authenticate that connection through supported Copilot CLI MCP setup, then retry with explicit read tools. App sign-in may not be shared.',
   assessment_storage: 'The assessment cache is unavailable or corrupt. The previous order is retained; repair local storage before retrying.',
   assessment_capacity: 'The assessment cache reached its storage limit. The previous order is retained; free assessment cache storage before retrying.',
-  assessment_required: 'Current saved assessments are required. Use Run assessor for unassessed tasks or Assess selected to refresh saved assessments. The previous order is retained.',
+  assessment_required: 'Saved assessments are required. Use Run assessor for unassessed tasks. The previous order is retained.',
 };
 export class ServiceError extends Error {
   readonly dto: ServiceErrorDTO;

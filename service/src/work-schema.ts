@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { taskAgents, taskAgentsSchema } from './work-agents.ts';
 import { codeAgents, codeAgentsSchema } from './code-agents.ts';
 import { referenceSchema } from './references.ts';
+import { savedAssessmentSchema } from './work-assessment.ts';
 
 const time = z.iso.datetime();
 const id = z.string().min(1).max(500);
@@ -34,6 +35,17 @@ export const workSourceContextSchema = z.strictObject({
   title: z.string().max(2000), body: z.string().max(100000),
   labels: z.array(z.string().max(200)).max(100),
 });
+export const pullRequestStateSchema = z.strictObject({
+  observedAt: time,
+  head: z.string().regex(/^[a-f0-9]{40,64}$/).nullable(),
+  author: z.string().max(100).nullable().optional(),
+  mergeable: z.enum(['MERGEABLE', 'CONFLICTING', 'UNKNOWN']).nullable().optional(),
+  reviewDecision: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'REVIEW_REQUIRED']).nullable().optional(),
+  draft: z.boolean().nullable(),
+  checks: z.enum(['passing', 'failing', 'pending', 'none', 'unknown']),
+  checksIncomplete: z.boolean(),
+  readiness: z.enum(['ready', 'not-ready', 'unknown']),
+});
 export const workMetadataSchema = z.strictObject({
   identity: z.string().min(1).max(2014), action: workActionSchema, url,
   reference: referenceSchema.optional(),
@@ -44,6 +56,7 @@ export const workMetadataSchema = z.strictObject({
   availabilityObservedAt: time.optional(),
   context: workSourceContextSchema.optional(),
   contextObservedAt: time.optional(),
+  pullRequest: pullRequestStateSchema.optional(),
   notification: workNotificationSchema.optional(),
   unsubscribe: workUnsubscribeSchema.optional(),
 });
@@ -97,7 +110,9 @@ export const workObservationSchema = z.strictObject({
   reference: referenceSchema.optional(),
   observedAt: time, reason: z.string().max(1000),
   context: workSourceContextSchema.optional(),
+  pullRequest: pullRequestStateSchema.optional(),
 });
+export const workObserveInputSchema = z.strictObject({ urls: z.array(url).max(100) });
 export const workCollectInputSchema = z.strictObject({
   stream: workstreamSchema, model: z.string().max(100),
   since: time.nullable(),
@@ -115,6 +130,7 @@ export const workCollectOutputSchema = z.strictObject({
 export const workRankInputSchema = z.strictObject({
   profileId: z.string().min(1).max(100).optional(),
   assessmentIds: z.array(z.uuid()).max(2000).optional(),
+  assessments: z.array(z.strictObject({ taskId: id, result: savedAssessmentSchema })).max(2000).optional(),
   instructions: z.string().max(16000), model: z.string().max(100),
   agents: taskAgentsSchema.optional(),
   force: z.boolean().optional(),
@@ -126,6 +142,7 @@ export const workRankInputSchema = z.strictObject({
     availability: z.enum(['actionable', 'unknown']).optional(),
     availabilityReason: z.string().max(1000).optional(),
     context: workSourceContextSchema.optional(),
+    pullRequest: pullRequestStateSchema.optional(),
   })).max(2000),
 });
 export const workRankOutputSchema = workRankingSchema.omit({ rankedAt: true }).extend({

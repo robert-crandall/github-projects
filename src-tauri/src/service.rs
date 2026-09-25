@@ -24,7 +24,7 @@ type Pending = Arc<Mutex<HashMap<String, (SyncSender<Result<Value>>, bool)>>>;
 fn request_timeout(op: &str) -> Duration {
     if op == "work.reviewCode" {
         Duration::from_secs(240)
-    } else if matches!(op, "work.collect" | "work.assess" | "work.rank") {
+    } else if matches!(op, "work.collect" | "work.observe" | "work.assess" | "work.rank") {
         WORK_TIMEOUT
     } else {
         TIMEOUT
@@ -78,6 +78,7 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
                 | "copilot.interpretCapture"
                 | "copilot.reconsider"
                 | "work.collect"
+                | "work.observe"
                 | "work.assess"
                 | "work.rank"
                 | "work.reviewCode"
@@ -400,7 +401,7 @@ mod tests {
     #[test]
     fn work_timeouts_leave_room_for_collection_and_model_cleanup() {
         assert_eq!(request_timeout("work.reviewCode"), Duration::from_secs(240));
-        for op in ["work.collect", "work.assess", "work.rank"] {
+        for op in ["work.collect", "work.observe", "work.assess", "work.rank"] {
             assert_eq!(request_timeout(op), Duration::from_secs(330));
         }
         for op in [

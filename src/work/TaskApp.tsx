@@ -125,6 +125,14 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
     </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
+    {task.work?.reference?.kind === 'pr' && <section aria-label="Current PR status"><h3>Current PR status</h3>
+      {task.work.pullRequest ? <>
+        <p>{task.work.pullRequest.draft === null ? 'Draft status unknown' : task.work.pullRequest.draft ? 'Draft' : 'Not a draft'}
+          {' · '}CI: {task.work.pullRequest.checks}
+          {task.work.pullRequest.checksIncomplete ? ' (incomplete coverage)' : ''}</p>
+        <p className="field-help">Checked {date(task.work.pullRequest.observedAt)}. Prioritization refreshes this separately from the saved assessment.</p>
+      </> : <p>Not checked yet. Run prioritizer to refresh current PR status without reassessing this task.</p>}
+    </section>}
     {task.status === 'open' && task.work?.availability !== 'waiting' && <button className="secondary"
       disabled={status.running || code.busy} onClick={() => run(() => queue.runAssessor([task.id]))}>Assess task</button>}
     <TaskAssessmentHistory key={task.id} task={task} controller={controller} />
@@ -304,7 +312,7 @@ export function TaskApp({ controller, queue, remote }: {
         <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
         <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
       </div>
-      <p className="field-help">Assessor only assesses tasks with no saved assessment. Use Assess task or Assess selected to reassess. Prioritizer orders all eligible tasks from current assessments. Neither collects sources.</p>
+      <p className="field-help">Run assessor fills missing judgments. Use Assess task or Assess selected to reassess. Prioritizer refreshes GitHub status and orders saved judgments.</p>
     </div>}
     {!settings && <div className="task-profile-bar">
       <label htmlFor="work-profile">Work profile</label>

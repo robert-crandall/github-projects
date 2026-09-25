@@ -113,15 +113,16 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
     <dl>
       <AssessmentRatings value={value} />
       <dt>Importance</dt><dd>{value.assessment.importance}</dd>
-      <dt>Urgency</dt><dd>{value.assessment.urgency}</dd>
-      <dt>Blockers</dt><dd>{value.assessment.blockers}</dd>
+      <dt>Urgency when assessed</dt><dd>{value.assessment.urgency}</dd>
+      <dt>Blockers when assessed</dt><dd>{value.assessment.blockers}</dd>
       <dt>Uncertainty</dt><dd>{value.assessment.uncertainty || 'None recorded.'}</dd>
     </dl>
     <h4>Supporting evidence</h4>
     <ul>{value.assessment.supportingEvidence.map((item, index) => <li key={index}>
       {item.summary} <span className="field-help">({item.reference})</span>
     </li>)}</ul>
-    <p className="field-help">Reassessment due {date(value.assessment.reevaluateAt)}. Expiry does not remove this result.</p>
+    <p className="field-help">Original reevaluation suggestion: {date(value.assessment.reevaluateAt)}.
+      {' '}This saved judgment remains usable. Assess task explicitly when its scope needs a new judgment.</p>
     <details><summary>Assessment provenance</summary><dl>
       <dt>Agent</dt><dd>{value.assessmentVersion === 'work-assessment-v3' ? `${value.agent.name} (${value.agent.id})` : 'Legacy task assessor'}</dd>
       {value.assessmentVersion === 'work-assessment-v3' && <>

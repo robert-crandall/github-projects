@@ -9,9 +9,9 @@ export const taskAgentJobs = {
   },
   'task-prioritization': {
     name: 'Task prioritizer',
-    capability: 'Order the whole eligible list from saved assessments. No tools or reassessment.',
-    resultFormat: 'work-order-v1',
-    instructions: 'Order all eligible tasks by their saved assessments. Prefer concrete urgent requests and due commitments. Explain uncertainty instead of inventing facts.',
+    capability: 'Order saved judgments using current source state. No model tools or reassessment.',
+    resultFormat: 'work-order-v2',
+    instructions: 'Order all eligible tasks by saved judgments and current source state. Prefer concrete urgent requests and due commitments. Explain uncertainty instead of inventing facts.',
   },
 } as const;
 
