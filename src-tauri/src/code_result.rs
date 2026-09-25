@@ -1,13 +1,13 @@
 use crate::{
     conversation::{ConversationKind, ConversationReference},
     error::{NativeError, Result},
-    model::timestamp,
 };
 use serde::{Deserialize, Serialize};
 
 pub const NOT_INSPECTED: &str =
     "No source-code lines were inspected. No code review or approval was completed.";
 pub const PARTIAL: &str = "Partial code inspection only. This is not an approval to merge.";
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -34,12 +34,63 @@ pub struct Input {
 }
 
 pub fn bounded(s: &str, min: usize, max: usize) -> bool {
-    (min..=max).contains(&s.chars().count())
+    (min..=max).contains(&s.encode_utf16().count())
+}
+pub fn trimmed(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c,
+        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}' |
+        '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' |
+        '\u{3000}' | '\u{feff}'))
+}
+fn prose(s: &str, max: usize) -> bool {
+    bounded(trimmed(s), 1, max)
 }
 fn hash(s: &str, size: usize) -> bool {
     s.len() == size
         && s.bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+fn repository(repo: &str) -> bool {
+    ConversationReference { repo: repo.into(), number: 1, kind: ConversationKind::Issue }
+        .validate().is_ok()
+}
+fn path(s: &str) -> bool {
+    bounded(s, 1, 1024)
+        && !s.chars().any(|c| c <= '\u{001f}' || c == '\u{007f}' || "\\%?#:".contains(c))
+        && s.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+pub(crate) fn result_timestamp(s: &str) -> Result<()> {
+    let valid = || -> Option<()> {
+        let (date, time) = s.split_once('T')?;
+        if date.len() != 10 || !date.bytes().enumerate().all(|(i, c)|
+            if i == 4 || i == 7 { c == b'-' } else { c.is_ascii_digit() }) {
+            return None;
+        }
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+        let time = time.strip_suffix('Z')?;
+        let (clock, fraction) = time.split_once('.').map_or((time, None), |(t, f)| (t, Some(f)));
+        if !matches!(clock.len(), 5 | 8)
+            || !clock.bytes().enumerate().all(|(i, c)|
+                if i == 2 || i == 5 { c == b':' } else { c.is_ascii_digit() })
+            || &clock[..2] > "23" || &clock[3..5] > "59"
+            || (clock.len() == 8 && &clock[6..] > "59")
+            || fraction.is_some_and(|f| clock.len() != 8 || f.is_empty() || !f.bytes().all(|c| c.is_ascii_digit()))
+        {
+            return None;
+        }
+        Some(())
+    };
+    valid().ok_or_else(NativeError::invalid)
+}
+fn nullable<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error> {
+    Option::deserialize(deserializer)
+}
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
 }
 
 impl Input {
@@ -101,7 +152,7 @@ pub struct Finding {
     severity: Severity,
     rationale: String,
     evidence: Vec<Citation>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     location: Option<Citation>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -156,10 +207,15 @@ pub struct Source {
     fingerprint: String,
     observed_at: String,
     head: Revision,
+    #[serde(deserialize_with = "nullable")]
     base: Option<Revision>,
+    #[serde(deserialize_with = "nullable")]
     base_tip: Option<String>,
+    #[serde(deserialize_with = "nullable")]
     default_branch: Option<String>,
+    #[serde(deserialize_with = "nullable")]
     draft: Option<bool>,
+    #[serde(deserialize_with = "nullable")]
     merged: Option<bool>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -194,6 +250,7 @@ pub struct Read {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FileCoverage {
+    #[serde(deserialize_with = "nullable")]
     expected: Option<u64>,
     compared: u64,
     retained: u64,
@@ -225,12 +282,12 @@ pub struct Coverage {
 #[serde(deny_unknown_fields)]
 pub struct Change {
     filename: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     previous_filename: Option<String>,
     status: String,
     additions: u64,
     deletions: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     patch: Option<String>,
     #[serde(rename = "patchComplete")]
     patch_complete: bool,
@@ -248,6 +305,27 @@ pub struct CodeResult {
     evidence: Vec<Read>,
     changes: Vec<Change>,
 }
+impl Revision {
+    fn valid(&self) -> bool {
+        repository(&self.repo) && hash(&self.sha, 40) && hash(&self.tree, 40)
+    }
+}
+impl Citation {
+    fn valid(&self) -> bool {
+        match self {
+            Self::Source { quote } => bounded(quote, 1, 4000),
+            Self::Code { read_id, path: file, start_line, end_line, quote, .. } => {
+                read_id.strip_prefix("read-").is_some_and(|id|
+                    matches!(id.len(), 1 | 2) && id.as_bytes()[0] != b'0'
+                        && id.bytes().all(|c| c.is_ascii_digit()))
+                    && path(file)
+                    && (1..=MAX_SAFE_INTEGER).contains(start_line)
+                    && (1..=MAX_SAFE_INTEGER).contains(end_line)
+                    && bounded(quote, 1, 4000)
+            }
+        }
+    }
+}
 impl CodeResult {
     pub fn not_inspected(&self) -> bool {
         matches!(&self.answer, Answer::PrReview { conclusion, .. } if conclusion.status == ConclusionStatus::NotInspected)
@@ -263,8 +341,9 @@ impl CodeResult {
             || config.model_requested != input.agent.model
             || !hash(&config.fingerprint, 64)
             || !hash(&self.source.fingerprint, 64)
-            || !hash(&self.source.head.sha, 40)
-            || !hash(&self.source.head.tree, 40)
+            || !self.source.head.valid()
+            || self.source.base.as_ref().is_some_and(|base| !base.valid())
+            || self.source.base_tip.as_ref().is_some_and(|tip| !hash(tip, 40))
             || self.coverage.status != "partial"
             || self.coverage.requests > 40
             || self.coverage.tool_calls > 24
@@ -272,8 +351,19 @@ impl CodeResult {
             || self.coverage.read_bytes > 8388608
             || self.coverage.files.compared > 300
             || self.coverage.files.retained > 100
+            || self.coverage.known_changed_lines > MAX_SAFE_INTEGER
+            || self.coverage.reviewed_changed_lines > MAX_SAFE_INTEGER
+            || self.coverage.files.expected.is_some_and(|n| n > MAX_SAFE_INTEGER)
+            || self.coverage.files.omitted > MAX_SAFE_INTEGER
+            || self.coverage.files.incomplete_patches > MAX_SAFE_INTEGER
             || self.changes.len() > 100
             || self.evidence.len() > 24
+            || self.changes.iter().any(|change|
+                change.additions > MAX_SAFE_INTEGER || change.deletions > MAX_SAFE_INTEGER)
+            || self.evidence.iter().any(|read|
+                !repository(&read.repo) || !hash(&read.revision, 40) || !hash(&read.blob, 40)
+                    || !path(&read.path) || !(1..=MAX_SAFE_INTEGER).contains(&read.start_line)
+                    || read.end_line > MAX_SAFE_INTEGER || read.total_lines > MAX_SAFE_INTEGER)
             || (config.model_selection == ModelSelection::SdkDefault)
                 != input.agent.model.is_empty()
         {
@@ -284,9 +374,12 @@ impl CodeResult {
             &self.source.observed_at,
             &self.verified_at,
         ] {
-            timestamp(time)?;
+            result_timestamp(time)?;
         }
         let validate_citation = |citation: &Citation| -> bool {
+            if !citation.valid() {
+                return false;
+            }
             match citation {
                 Citation::Source { quote } => {
                     !quote.is_empty()
@@ -320,11 +413,16 @@ impl CodeResult {
         };
         let findings = match &self.answer {
             Answer::ImplementationAssessment {
+                summary,
+                uncertainty,
                 findings,
                 next_step,
-                ..
             } => {
                 if input.job != Job::ImplementationAssessment
+                    || !prose(summary, 2000)
+                    || !prose(uncertainty, 2000)
+                    || !prose(&next_step.text, 2000)
+                    || !(1..=8).contains(&next_step.evidence.len())
                     || self.evidence.is_empty()
                     || !next_step
                         .evidence
@@ -356,7 +454,9 @@ impl CodeResult {
         };
         if findings.len() > 20
             || findings.iter().any(|f| {
-                f.evidence.is_empty()
+                !prose(&f.title, 240)
+                    || !prose(&f.rationale, 2000)
+                    || f.evidence.is_empty()
                     || f.evidence.len() > 8
                     || !f.evidence.iter().all(&validate_citation)
                     || if input.job == Job::PrReview {

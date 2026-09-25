@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import { createNativePlatform, NativePlatformError, clockSchema, type NativeSnapshot, type NativeTransport } from './native.ts';
 import { type CodeRunIntent } from '../../service/src/code-runs.ts';
 import { codeResult, CodeRunStoreFixture } from '../../tests/code-run-fixture.ts';
+import { codeReviewResultSchema } from '../../service/src/code-review-schema.ts';
+import { z } from 'zod';
 
 const revision = '97656881-c64b-4be7-84f4-5ec7fe6c1cc1';
 const saved = { revision, snapshot: null, savedAt: null };
@@ -167,5 +169,36 @@ describe('typed code-run boundary', () => {
     expect(await native.recoverBackup('latest', revision, revision)).toEqual(saved);
     expect(calls).toEqual([{ command: 'workspace_recover',
       args: { backupId: 'latest', expectedRecoveryToken: revision, expectedRevision: revision } }]);
+  });
+
+  test('the shared native rejection matrix is invalid for the supported result reader', async () => {
+    const mutation = z.object({ path: z.string(), value: z.json(), repeat: z.number().int().positive().optional() });
+    const cases = z.object({ common: z.array(mutation), implementation: z.array(mutation), requiredNullable: z.array(z.string()) })
+      .parse(await Bun.file(new URL('../../tests/code-result-invalid.json', import.meta.url)).json());
+    for (const implementation of [false, true]) {
+      const input = implementation
+        ? { ...intent.input, job: 'implementation-assessment' as const, source: { ...intent.input.source, kind: 'issue' as const } }
+        : intent.input;
+      const baseline = codeResult(input);
+      expect(codeReviewResultSchema.safeParse(baseline).success).toBe(true);
+      const casesForJob = implementation ? cases.implementation : cases.common;
+      for (const item of [...casesForJob, ...cases.requiredNullable.map(path => ({ path, value: undefined, repeat: undefined }))]) {
+        const invalid = z.json().parse(baseline);
+        const parts = item.path.slice(1).split('/');
+        const key = parts.pop()!;
+        let parent = invalid;
+        for (const part of parts) {
+          if (!parent || typeof parent !== 'object') throw new Error(`Missing fixture path: ${item.path}`);
+          parent = Array.isArray(parent) ? parent[Number(part)]! : parent[part]!;
+        }
+        if (!parent || typeof parent !== 'object' || Array.isArray(parent)) throw new Error(`Invalid fixture path: ${item.path}`);
+        if (item.value !== undefined) {
+          parent[key] = item.repeat ? String(item.value).repeat(item.repeat) : item.value;
+        } else {
+          delete parent[key];
+        }
+        expect(codeReviewResultSchema.safeParse(invalid).success, item.path).toBe(false);
+      }
+    }
   });
 });

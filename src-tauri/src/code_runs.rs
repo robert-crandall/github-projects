@@ -1,16 +1,40 @@
 use crate::{
     assessments::{ownership, profile_tasks, task_ids},
-    code_result::{bounded, CodeResult, Input},
+    code_result::{bounded, result_timestamp, trimmed, CodeResult, Input},
     error::{NativeError, Result},
-    model::{digest, timestamp, Snapshot},
+    model::{digest, Snapshot},
     storage::{read_connection, Store},
 };
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 const MAX_BYTES: usize = 1024 * 1024;
+const SELECT_RUN: &str = "SELECT sequence,generation,run_id,profile_id,task_id,quarantined,terminal,payload,checksum FROM code_runs";
+fn valid_uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|id|
+        id.hyphenated().to_string().eq_ignore_ascii_case(value)
+            && (id.is_nil() || id.as_u128() == u128::MAX
+                || (id.get_variant() == uuid::Variant::RFC4122
+                    && (1..=8).contains(&id.get_version_num()))))
+}
+fn run_timestamp(value: &str) -> Result<()> {
+    if value.ends_with('Z') {
+        return result_timestamp(value);
+    }
+    if value.is_ascii() && value.len() > 6 {
+        let (time, offset) = value.split_at(value.len() - 6);
+        let bytes = offset.as_bytes();
+        if matches!(bytes[0], b'+' | b'-') && bytes[3] == b':'
+            && [bytes[1], bytes[2], bytes[4], bytes[5]].iter().all(u8::is_ascii_digit)
+            && &offset[1..3] <= "23" && &offset[4..6] <= "59"
+        {
+            return result_timestamp(&format!("{time}Z"));
+        }
+    }
+    Err(NativeError::invalid())
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Intent {
@@ -72,7 +96,7 @@ impl Outcome {
                 finished_at,
                 result,
             } => {
-                timestamp(finished_at)?;
+                run_timestamp(finished_at)?;
                 if result.not_inspected() != matches!(self, Self::NotInspected { .. }) {
                     return Err(NativeError::invalid());
                 }
@@ -81,7 +105,7 @@ impl Outcome {
             Self::Failed { finished_at, error }
             | Self::Cancelled { finished_at, error }
             | Self::Interrupted { finished_at, error } => {
-                timestamp(finished_at)?;
+                run_timestamp(finished_at)?;
                 if !bounded(&error.code, 1, 100) || !bounded(&error.message, 1, 2000) {
                     return Err(NativeError::invalid());
                 }
@@ -112,14 +136,13 @@ pub struct Context {
 
 impl Intent {
     fn validate(&self) -> Result<()> {
-        if Uuid::parse_str(&self.run_id).is_err()
+        if !valid_uuid(&self.run_id)
             || !bounded(&self.profile_id, 1, 100)
-            || !bounded(&self.agent_name, 1, 100)
-            || self.agent_name.trim().is_empty()
+            || !bounded(trimmed(&self.agent_name), 1, 100)
         {
             return Err(NativeError::invalid());
         }
-        timestamp(&self.started_at)?;
+        run_timestamp(&self.started_at)?;
         self.input.validate()
     }
 }
@@ -139,14 +162,23 @@ fn exists(connection: &Connection) -> Result<bool> {
         |r| r.get::<_, i64>(0),
     )? == 1)
 }
-fn decode(payload: String, checksum: String) -> Result<Run> {
+fn decode(row: &Row<'_>) -> Result<Run> {
+    let payload: String = row.get("payload")?;
+    let checksum: String = row.get("checksum")?;
     if payload.len() > MAX_BYTES || digest(payload.as_bytes()) != checksum {
         return Err(NativeError::corrupt());
     }
     let run: Run = serde_json::from_str(&payload).map_err(|_| NativeError::corrupt())?;
     if run.sequence <= 0
         || run.sequence > 9_007_199_254_740_991
-        || Uuid::parse_str(&run.generation).is_err()
+        || !valid_uuid(&run.generation)
+        || row.get::<_, i64>("sequence")? != run.sequence
+        || row.get::<_, String>("generation")? != run.generation
+        || row.get::<_, String>("run_id")? != run.intent.run_id
+        || row.get::<_, String>("profile_id")? != run.intent.profile_id
+        || row.get::<_, String>("task_id")? != run.intent.input.task_id
+        || row.get::<_, i64>("quarantined")? != i64::from(run.quarantined)
+        || row.get::<_, i64>("terminal")? != i64::from(run.outcome.terminal())
     {
         return Err(NativeError::corrupt());
     }
@@ -162,8 +194,11 @@ fn find(
     id: &str,
     quarantined: bool,
 ) -> Result<Option<Run>> {
-    connection.query_row("SELECT payload,checksum FROM code_runs WHERE generation=? AND run_id=? AND quarantined=?", params![generation,id,quarantined],
-        |r| Ok((r.get(0)?,r.get(1)?))).optional()?.map(|(p,c)| decode(p,c)).transpose()
+    let mut query = connection.prepare(&format!(
+        "{SELECT_RUN} WHERE generation=? AND run_id=? AND quarantined=?"
+    ))?;
+    let mut rows = query.query(params![generation, id, quarantined])?;
+    rows.next()?.map(decode).transpose()
 }
 fn write(connection: &Connection, mut run: Run) -> Result<Run> {
     if run.sequence == 0 {
@@ -293,18 +328,24 @@ impl Store {
             let mut connection = self.connection()?;
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             initialize(&tx)?;
-            let rows: Vec<Run> = {
-                let mut query =
-                    tx.prepare("SELECT payload,checksum FROM code_runs WHERE terminal=0")?;
-                let rows = query.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                rows.map(|r| {
-                    let (p, c) = r?;
-                    decode(p, c)
-                })
-                .collect::<Result<_>>()?
+            let abandoned: Vec<i64> = {
+                let mut query = tx.prepare(SELECT_RUN)?;
+                let mut rows = query.query([])?;
+                let mut abandoned = Vec::new();
+                while let Some(row) = rows.next()? {
+                    let run = decode(row)?;
+                    if !run.outcome.terminal() {
+                        abandoned.push(run.sequence);
+                    }
+                }
+                abandoned
             };
-            let changed = !rows.is_empty();
-            for mut run in rows {
+            let changed = !abandoned.is_empty();
+            for sequence in abandoned {
+                let mut query = tx.prepare(&format!("{SELECT_RUN} WHERE sequence=?"))?;
+                let mut rows = query.query([sequence])?;
+                let mut run = decode(rows.next()?.ok_or_else(NativeError::corrupt)?)?;
+                drop(rows);
                 run.outcome = interrupted();
                 write(&tx, run)?;
             }
@@ -365,7 +406,7 @@ impl Store {
         self.code_run_context()?;
         intent.validate()?;
         outcome.validate(&intent.input)?;
-        if Uuid::parse_str(generation).is_err() || matches!(outcome, Outcome::Running) {
+        if !valid_uuid(generation) || matches!(outcome, Outcome::Running) {
             return Err(NativeError::invalid());
         }
         let quarantined = generation != self.code_run_generation;
@@ -437,9 +478,9 @@ impl Store {
                 task,
             )?
         };
-        let mut query = connection.prepare(
-            "SELECT payload,checksum FROM code_runs WHERE quarantined=? AND sequence<? AND (? OR (profile_id=? AND task_id IN (SELECT value FROM json_each(?)))) ORDER BY sequence DESC LIMIT 11")?;
-        let rows = query.query_map(
+        let mut query = connection.prepare(&format!(
+            "{SELECT_RUN} WHERE quarantined=? AND sequence<? AND (? OR (profile_id=? AND task_id IN (SELECT value FROM json_each(?)))) ORDER BY sequence DESC LIMIT 11"))?;
+        let mut rows = query.query(
             params![
                 quarantined,
                 before.unwrap_or(i64::MAX),
@@ -447,14 +488,11 @@ impl Store {
                 profile,
                 serde_json::to_string(&aliases).map_err(|_| NativeError::invalid())?
             ],
-            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        let mut runs = rows
-            .map(|r| {
-                let (p, c) = r?;
-                decode(p, c)
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut runs = Vec::new();
+        while let Some(row) = rows.next()? {
+            runs.push(decode(row)?);
+        }
         let more = runs.len() > 10;
         runs.truncate(10);
         Ok(Page {
@@ -472,20 +510,20 @@ pub(crate) fn append_export(connection: &Connection, output: &mut String) -> Res
     output.pop();
     output.push_str(",\"codeRuns\":[");
     if exists(connection)? {
-        let mut query =
-            connection.prepare("SELECT payload,checksum FROM code_runs ORDER BY sequence")?;
-        let rows = query.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        for (index, row) in rows.enumerate() {
-            let (p, c) = row?;
+        let mut query = connection.prepare(&format!("{SELECT_RUN} ORDER BY sequence"))?;
+        let mut rows = query.query([])?;
+        let mut first = true;
+        while let Some(row) = rows.next()? {
             let entry =
-                serde_json::to_string(&decode(p, c)?).map_err(|_| NativeError::corrupt())?;
+                serde_json::to_string(&decode(row)?).map_err(|_| NativeError::corrupt())?;
             if output.len() + entry.len() + 3 > 64 * 1024 * 1024 {
                 return Err(NativeError::new("export-too-large", "JSON export exceeds 64 MiB. Use a database backup; all code runs remain saved."));
             }
 
-            if index > 0 {
+            if !first {
                 output.push(',');
             }
+            first = false;
             output.push_str(&entry);
         }
     }
