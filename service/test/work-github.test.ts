@@ -98,17 +98,35 @@ test.each([
 test('observation-only service reads requested sources without collecting tasks or starting a model', async () => {
   const github = harness();
   const service = new WorkService({ github: github.service });
-  const result = await service.observe({ urls: [url] }, signal());
+  const observe = { ...input(), knownUrls: [url], observeOnly: true, stateOnly: true };
+  const result = await service.collect(observe, signal());
   expect(result.candidates).toEqual([]);
   expect(result.observations).toHaveLength(1);
   expect(github.calls.some(call => call.args.some(arg => arg.startsWith('/search/') || arg.includes('/timeline')))).toBe(false);
   expect(result.observations[0]!.pullRequest?.readiness).toBe('ready');
   const count = github.calls.length;
-  await expect(service.observe({ urls: ['https://example.com/task/1'] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+  await expect(service.collect({ ...observe, knownUrls: ['https://example.com/task/1'] }, signal())).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
   expect(github.calls).toHaveLength(count);
-  const unknown = await new WorkService({ github: harness({ failGraph: true }).service }).observe({ urls: [url] }, signal());
+  const unknown = await new WorkService({ github: harness({ failGraph: true }).service }).collect(observe, signal());
   expect(unknown.observations[0]!.state).toBe('unknown');
-  expect(unknown.warnings[0]).toContain('unknown');
+  expect(unknown.warnings[0]).toContain('could not be observed');
+});
+
+test('state-only refresh omits large stable descriptions and stays within the protocol byte budget', async () => {
+  const urls = Array.from({ length: 100 }, (_, index) => `https://github.com/octo/repo/pull/${index + 1}`);
+  const observations = urls.map(url => ({
+    url, state: 'open' as const, observedAt: at, reason: '',
+    context: { title: 'Large description', body: '界'.repeat(90_000), labels: [], revision: 'a'.repeat(64) },
+  }));
+  expect(Buffer.byteLength(JSON.stringify(observations))).toBeGreaterThan(LIMITS.responseBytes);
+  const service = new WorkService({ github: {
+    observe: async requested => { expect(requested).toEqual(urls); return observations; },
+    collect: async () => { throw new Error('Readiness refresh must not collect'); },
+  } });
+  const result = await service.collect({ ...input(), knownUrls: urls, observeOnly: true, stateOnly: true }, signal());
+  expect(result.observations).toHaveLength(100);
+  expect(result.observations.every(value => !('context' in value))).toBe(true);
+  expect(Buffer.byteLength(JSON.stringify({ v: 1, id: 'state', ok: true, result }))).toBeLessThan(LIMITS.responseBytes);
 });
 
 function issues(options: {

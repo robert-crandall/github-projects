@@ -5,7 +5,7 @@ import { checkAbort, ServiceError } from './errors.ts';
 import { WorkGitHub } from './work-github.ts';
 import { WorkIntake } from './work-intake.ts';
 import { canonicalGithubUrl, McpConnections, normalizeWorkUrl, sourceTime } from './work-mcp.ts';
-import { isGitHubStream, workCollectInputSchema, workCollectOutputSchema, workObserveInputSchema, type WorkCandidate } from './work-schema.ts';
+import { isGitHubStream, workCollectInputSchema, workCollectOutputSchema, type WorkCandidate } from './work-schema.ts';
 
 export class WorkService {
   private readonly github: Pick<WorkGitHub, 'collect' | 'observe'>;
@@ -29,10 +29,13 @@ export class WorkService {
     const input = parsed.data;
     checkAbort(signal);
     if (input.observeOnly) {
+      if (input.knownUrls.some(value => !canonicalGithubUrl(value))) throw new ServiceError('invalid_input');
       const collectedAt = this.now().toISOString();
       const observations = await this.github.observe(input.knownUrls, signal);
       return workCollectOutputSchema.parse({
-        candidates: [], observations, collectedAt,
+        candidates: [],
+        observations: input.stateOnly ? observations.map(({ context: _, ...state }) => state) : observations,
+        collectedAt,
         warnings: observations.some(observation => observation.state === 'unknown')
           ? ['Some tracked GitHub sources could not be observed. Inspect their source-state errors.'] : [],
       });
@@ -81,19 +84,6 @@ export class WorkService {
     });
   }
   rank: CopilotService['rankWork'] = (input, signal) => this.copilot.rankWork(input, signal);
-  async observe(raw: z.input<typeof workObserveInputSchema>, signal: AbortSignal) {
-    const parsed = workObserveInputSchema.safeParse(raw);
-    if (!parsed.success) throw new ServiceError('invalid_input');
-    const input = parsed.data;
-    if (input.urls.some(value => !canonicalGithubUrl(value))) throw new ServiceError('invalid_input');
-    const collectedAt = this.now().toISOString();
-    const observations = await this.github.observe(input.urls, signal);
-    return workCollectOutputSchema.parse({
-      candidates: [], observations, collectedAt,
-      warnings: observations.filter(value => value.state === 'unknown')
-        .map(value => `${value.url}: current source state is unknown. ${value.reason}`).slice(0, 30),
-    });
-  }
   assess: CopilotService['assessWork'] = (input, signal) => this.copilot.assessWork(input, signal);
   listConnections() { return this.connections.list(); }
   pendingIntake() { return this.intake.pending(); }

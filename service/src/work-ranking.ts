@@ -226,7 +226,7 @@ export class WorkRanker {
       evaluatedAt: orderAt,
       tasks: tasks.map((task, index) => ({
         id: task.id, title: task.title, assessedAt: current[index]!.evaluatedAt, assessment: current[index]!.assessment,
-        savedInputsChanged: current[index]!.fingerprint !== digest(task),
+        savedInputsChanged: current[index]!.fingerprint !== (sources.get(task.id)!.assessmentInputFingerprint ?? digest(task)),
         currentState: {
           action: task.action, availability: task.availability, reason: task.availabilityReason,
           pullRequest: sources.get(task.id)!.pullRequest ?? null,

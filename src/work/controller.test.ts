@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test';
 import { defaultWorkState, notificationWorkstream, workSettingsSchema, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
 import { taskAgents, type TaskAgentJob } from '../../service/src/work-agents.ts';
-import type { Request } from '../../service/src/schema.ts';
+import { LIMITS, type Request } from '../../service/src/schema.ts';
 import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
 import { createNativePlatform, snapshotSchema, type NativeWorkspace } from '../platform/native.ts';
@@ -107,18 +107,18 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
     if (result === undefined) {
       switch (request.op) {
         case 'work.intake': result = { items: [], hasMore: false }; break;
-        case 'work.collect': result = collection(); break;
-        case 'work.observe': result = {
+        case 'work.collect': result = request.input.observeOnly ? {
           candidates: [], warnings: [], collectedAt: new Date().toISOString(),
-          observations: request.input.urls.map(url => {
+          observations: request.input.knownUrls.map(url => {
             const work = workspace.state.tasks.find(task => task.work?.url === url)?.work;
             return {
               url, state: work?.availability === 'waiting' ? 'closed' : work?.availability === 'unknown' ? 'unknown' : 'open',
               observedAt: work?.availabilityObservedAt ?? before, reason: work?.availabilityReason ?? '',
-              context: work?.context, reference: work?.reference, pullRequest: work?.pullRequest,
+              ...(request.input.stateOnly ? {} : { context: work?.context }),
+              reference: work?.reference, pullRequest: work?.pullRequest,
             };
           }),
-        }; break;
+        } : collection(); break;
         case 'work.assess': result = await assessmentBatch(request.input); break;
         case 'work.rank': result = ranked(request); break;
         case 'work.ackIntake': result = request.input; break;
@@ -139,17 +139,93 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
 }
 
 describe('durable local work', () => {
+  test('generic GitHub targets remain rankable and never enter issue/PR observation requests', async () => {
+    const targets = [
+      'https://github.com/owner/repo',
+      'https://github.com/owner/repo/commit/abc',
+      'https://github.com/owner/repo/releases/tag/v1',
+      'https://github.com/owner/repo/discussions/12',
+    ];
+    const state = reconcileWork(initial(), collection([
+      candidate(), ...targets.map((url, index) => ({ ...candidate(`generic-${index}`, 'mcp'), url, action: 'follow-up' as const })),
+    ]), before);
+    const mock = await fixture(JSON.parse(JSON.stringify(state)));
+    const batch = await assessmentBatch(rankInput(mock.workspace.state), before);
+    await mock.workspace.saveAssessments('default', batch.assessments);
+    await mock.queue.runPrioritizer();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.requests.map(request => request.op)).toEqual(['work.collect', 'work.rank']);
+    expect(mock.requests[0]!.input).toMatchObject({ knownUrls: ['https://github.com/owner/repo/issues/42'], observeOnly: true, stateOnly: true });
+    expect(mock.requests[1]!.input).toMatchObject({ tasks: expect.arrayContaining(targets.map(url => expect.objectContaining({ url }))) });
+    expect(mock.saved().work.ranking?.orderedIds).toHaveLength(5);
+  });
+
+  test('large source descriptions and notes are not resent with saved judgments for ordering', async () => {
+    const candidates = Array.from({ length: 12 }, (_, index) => ({
+      ...candidate(`large-${index}`), url: `https://github.com/owner/repo/pull/${index + 1}`,
+    }));
+    const state = reconcileWork(initial(), {
+      ...collection(candidates), observations: candidates.map(value => ({
+        url: value.url, state: 'open', observedAt: before, reason: '',
+        context: { title: 'Large source', body: '界'.repeat(90_000), labels: [], revision: 'a'.repeat(64) },
+      })),
+    }, before);
+    for (const task of state.tasks) task.notes = 'Private note '.repeat(1000);
+    const mock = await fixture(state);
+    const input = rankInput(mock.workspace.state);
+    expect(Buffer.byteLength(JSON.stringify(input))).toBeGreaterThan(LIMITS.frameBytes);
+    const { assessments } = await assessmentBatch(input, before);
+    await mock.workspace.saveAssessments('default', assessments);
+    await mock.queue.runPrioritizer();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.requests.map(request => request.op)).toEqual(['work.collect', 'work.rank']);
+    const request = mock.requests[1]!;
+    if (request.op !== 'work.rank') throw new Error('Expected order');
+    expect(Buffer.byteLength(JSON.stringify(request))).toBeLessThan(LIMITS.frameBytes);
+    for (const task of request.input.tasks) {
+      expect(task.context).toBeUndefined();
+      expect(task.evidence).toEqual([]);
+      expect(task.notes).toBe('');
+      expect(task.assessmentInputFingerprint).toBe(assessments.find(value => value.id === task.id)!.fingerprint);
+    }
+    expect(mock.history.entries).toHaveLength(12);
+  });
+
+  test('serialized live replies replace older readiness even when the local clock moved backwards', async () => {
+    const state = reconcileWork(initial(), collection(), before);
+    const task = state.tasks[0]!;
+    task.work!.reference = { repo: 'owner/repo', kind: 'pr', number: 42 };
+    task.work!.availabilityObservedAt = previousCompleted;
+    task.work!.pullRequest = {
+      observedAt: previousCompleted, head: 'a'.repeat(40), draft: true, checks: 'failing',
+      checksIncomplete: false, readiness: 'not-ready',
+    };
+    const mock = await fixture(state, request => request.op === 'work.collect' ? {
+      candidates: [], warnings: [], collectedAt: before, observations: [{
+        url: task.work!.url, state: 'open', reference: task.work!.reference, observedAt: before, reason: '',
+        pullRequest: { ...task.work!.pullRequest!, observedAt: before, draft: false, checks: 'passing', readiness: 'ready' },
+      }],
+    } : undefined);
+    const { assessments } = await assessmentBatch(rankInput(mock.workspace.state), before);
+    await mock.workspace.saveAssessments('default', assessments);
+    await mock.queue.runPrioritizer();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.requests[1]!.input).toMatchObject({ tasks: [{ pullRequest: { observedAt: before, draft: false, checks: 'passing', readiness: 'ready' } }] });
+    expect(mock.saved().tasks[0]!.work!.availabilityObservedAt).toBe(before);
+    expect(mock.history.entries).toHaveLength(1);
+  });
+
   test('prioritization refreshes draft and CI facts without reassessing week-old work, including unknown refreshes', async () => {
     const state = reconcileWork(initial(), collection(), before);
     const task = state.tasks[0]!;
     task.work!.reference = { repo: 'Owner/Repo', kind: 'pr', number: 42 };
     let readiness: 'ready' | 'not-ready' | 'unknown' = 'not-ready';
     const mock = await fixture(state, request => {
-      if (request.op !== 'work.observe') return;
+      if (request.op !== 'work.collect' || !request.input.observeOnly) return;
       return {
         candidates: [], collectedAt: previousCompleted,
         warnings: readiness === 'unknown' ? ['Current PR state unavailable'] : [],
-        observations: request.input.urls.map(url => readiness === 'unknown'
+        observations: request.input.knownUrls.map(url => readiness === 'unknown'
           ? { url, state: 'unknown', observedAt: previousCompleted, reason: 'Access unavailable' }
           : {
             url, state: 'open', observedAt: previousCompleted, reason: '',
@@ -170,7 +246,7 @@ describe('durable local work', () => {
       mock.requests.length = 0;
       await mock.queue.runPrioritizer();
       expect(mock.queue.getSnapshot().error).toBe('');
-      expect(mock.requests.map(request => request.op)).toEqual(['work.observe', 'work.rank']);
+      expect(mock.requests.map(request => request.op)).toEqual(['work.collect', 'work.rank']);
       const request = mock.requests[1]!;
       if (request.op !== 'work.rank') throw new Error('Expected ordering');
       expect(request.input.tasks[0]!.pullRequest?.readiness).toBe(next);
@@ -181,7 +257,7 @@ describe('durable local work', () => {
     readiness = 'ready';
     mock.requests.length = 0;
     await mock.queue.run();
-    expect(mock.requests.map(request => request.op)).toEqual(['work.intake', 'work.observe', 'work.rank']);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.intake', 'work.collect', 'work.rank']);
     expect(mock.history.entries).toEqual(original);
     expect(mock.saved().tasks[0]!.work!.pullRequest?.readiness).toBe('ready');
   });
@@ -191,7 +267,7 @@ describe('durable local work', () => {
     state.work.ranking = { orderedIds: [state.tasks[0]!.id], reasons: [], rankedAt: before };
     let incomplete = false;
     const mock = await fixture(state, request => {
-      if (request.op !== 'work.observe') return;
+      if (request.op !== 'work.collect' || !request.input.observeOnly) return;
       if (!incomplete) throw new Error('GitHub rate limit');
       return { candidates: [], observations: [], warnings: [], collectedAt: before };
     });
@@ -202,7 +278,7 @@ describe('durable local work', () => {
       incomplete = value;
       mock.requests.length = 0;
       await mock.queue.runPrioritizer();
-      expect(mock.requests.map(request => request.op)).toEqual(['work.observe']);
+      expect(mock.requests.map(request => request.op)).toEqual(['work.collect']);
       expect(mock.saved().work.ranking).toEqual(previous);
       expect(mock.history.values(state.tasks[0]!.id)).toHaveLength(1);
       expect(mock.queue.getSnapshot().error).toContain(value ? 'exactly the requested' : 'rate limit');
@@ -1101,6 +1177,8 @@ describe('explicit task agents', () => {
       expect(mock.requests.map(request => request.op)).toEqual(['work.rank']);
       expect(mock.requests[0]!.input).toMatchObject({ assessmentIds: [history.at(-1)!.resultId] });
       expect(mock.queue.getSnapshot().error).toBe('');
+      expect(mock.queue.getSnapshot().warnings.join()).toContain('earlier assessor settings or format');
+      expect(mock.queue.getSnapshot().warnings.join()).toContain(mock.saved().tasks[0]!.title);
       expect(mock.history.entries).toEqual(history);
     } finally { read.mockRestore(); }
   });
@@ -2332,7 +2410,7 @@ describe('collection progress', () => {
     unsubscribe();
     expect(phases).toEqual([
       'preparing', 'intake',
-      ...(kind === 'collected' ? ['collecting', 'refreshing-state'] : []),
+      ...(kind === 'collected' ? ['collecting'] : []),
       'checking-assessments',
       ...(kind !== 'empty' ? ['assessing'] : []),
       'ranking', 'saving', 'idle',

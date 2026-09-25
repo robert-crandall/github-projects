@@ -27,5 +27,8 @@ export type SemanticRankTask = ReturnType<typeof semanticRankTask>;
 
 export function orderingRankTask(task: WorkRankInput['tasks'][number]) {
   const { observedAt: _, ...pullRequest } = task.pullRequest ?? {};
-  return { ...semanticRankTask(task), pullRequest: task.pullRequest ? pullRequest : null };
+  return {
+    ...semanticRankTask(task), pullRequest: task.pullRequest ? pullRequest : null,
+    assessmentInputFingerprint: task.assessmentInputFingerprint ?? null,
+  };
 }

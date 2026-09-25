@@ -12,6 +12,7 @@ import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profi
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import { CodeSessions } from './code-sessions.ts';
+import { githubReference } from '../../service/src/references.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type CollectionProgress = {
@@ -245,22 +246,27 @@ export class WorkQueue {
     this.assertWorkspace(generation);
     this.update(current => {
       this.assertProfile(current, profileId);
-      return reconcileWork(current, batch, new Date());
+      // This run's reads are serialized and generation-fenced; a clock correction cannot make a fresh reply older.
+      return reconcileWork(current, batch, new Date(), true);
     });
     await this.controller.flush();
   }
 
-  private async refreshState(profileId: string, generation: number): Promise<string[]> {
+  private async refreshState(profileId: string, generation: number, observed: ReadonlySet<string> = new Set()): Promise<string[]> {
     const urls = [...new Set(this.controller.state.tasks.filter(task =>
-      task.status === 'open' && task.work && new URL(task.work.url).hostname === 'github.com',
-    ).map(task => canonicalSource(task.work!.url)))];
+      task.status === 'open' && task.work && githubReference(task.work.url),
+    ).map(task => canonicalSource(task.work!.url)))].filter(url => !observed.has(url));
     const warnings: string[] = [];
     for (let offset = 0; offset < urls.length; offset += 100) {
       this.assertWorkspace(generation);
       this.assertProfile(this.controller.state, profileId);
       this.publish({ phase: 'refreshing-state' });
       const requested = urls.slice(offset, offset + 100);
-      const result = await this.service.call('work.observe', { urls: requested });
+      const result = await this.service.call('work.collect', {
+        // The existing observe-only path ignores the stream and model; it never executes this query.
+        stream: this.controller.state.work.settings.streams[0] ?? defaultWorkState().settings.streams[0]!,
+        model: '', since: null, knownUrls: requested, observeOnly: true, stateOnly: true,
+      });
       if (result.candidates.length || !exactIds(requested.map(canonicalSource), result.observations.map(value => canonicalSource(value.url)))) {
         throw new Error('Source refresh did not return exactly the requested sources. The previous order is retained.');
       }
@@ -393,6 +399,8 @@ export class WorkQueue {
     const configurationFingerprint = await identityDigest(agentIdentity(assessor));
     const assessmentIds: string[] = [];
     const selected: NonNullable<WorkRankInput['assessments']> = [];
+    const warnings: string[] = [];
+    const compactTasks: WorkRankInput['tasks'] = [];
     for (const task of latestInput.tasks) {
       const matchesAgent = (value: SavedAssessment) => value.assessmentVersion !== 'work-assessment-v2'
         && value.agent.configurationFingerprint === configurationFingerprint;
@@ -430,6 +438,12 @@ export class WorkQueue {
       }
       assessmentIds.push(value.resultId);
       selected.push({ taskId: task.id, result: value });
+      if (!matchesAgent(value)) warnings.push(`"${task.title}": reusing a saved judgment from earlier assessor settings or format. Use Assess selected to update it.`);
+      const { context: _, ...compact } = task;
+      compactTasks.push({
+        ...compact, notes: '', evidence: [],
+        assessmentInputFingerprint: await identityDigest(semanticRankTask(task)),
+      });
     }
     assertSettings(this.controller.state);
     const currentTasks = rankInput(this.controller.state).tasks;
@@ -438,7 +452,7 @@ export class WorkQueue {
       throw new Error('Tasks changed while preparing prioritization. Use Run assessor for unassessed tasks or Assess selected to refresh saved assessments. The previous order is retained.');
     }
     const orderInput = {
-      ...latestInput, profileId, assessmentIds, assessments: selected, force,
+      ...latestInput, tasks: compactTasks, profileId, assessmentIds, assessments: selected, force,
     };
     this.assertAssessmentNotCancelled();
     this.publish({ phase: 'ranking' });
@@ -450,7 +464,6 @@ export class WorkQueue {
       || result.reasons.some(reason => !reason.reason.trim())) {
       throw new Error('Ranking must contain every submitted task ID and exactly one reason per task, without duplicates or invented IDs.');
     }
-    const warnings: string[] = [];
     this.update(current => {
       assertSettings(current);
       const latest: WorkRankInput = rankInput(current);
@@ -535,7 +548,7 @@ export class WorkQueue {
         const diagnostics: string[] = [];
         let failed = false;
         const knownUrls = [...new Set(this.controller.state.tasks
-          .filter(task => task.status === 'open' && task.work && new URL(task.work.url).hostname === 'github.com')
+          .filter(task => task.status === 'open' && task.work && githubReference(task.work.url))
           .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
         for (let offset = 0; offset < Math.max(knownUrls.length, 1); offset += 100) {
           this.assertProfile(this.controller.state, profileId);
@@ -578,7 +591,7 @@ export class WorkQueue {
       }
       this.publish({ warnings: [...warnings] });
       try {
-        warnings.push(...await this.refreshState(profileId, generation));
+        warnings.push(...await this.refreshState(profileId, generation, observed));
         const input = { ...rankInput(this.controller.state), profileId };
         const tasks = await this.unassessed(input, profileId, generation);
         const assessments = await this.assess({ ...input, tasks }, generation);

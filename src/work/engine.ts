@@ -77,12 +77,12 @@ function latestObservations(observations: WorkObservation[]): Map<string, WorkOb
   return latest;
 }
 
-function observe(work: WorkMetadata, observation?: WorkObservation, contextObservation = observation): WorkMetadata {
+function observe(work: WorkMetadata, observation?: WorkObservation, contextObservation = observation, authoritative = false): WorkMetadata {
   const reference = sourceReference({
     ...work, reference: observation?.reference ?? work.reference,
   }, observation ? [observation.url] : []);
   let next = reference ? { ...work, reference } : work;
-  if (observation && (!work.availabilityObservedAt
+  if (observation && (authoritative || !work.availabilityObservedAt
     || Date.parse(observation.observedAt) >= Date.parse(work.availabilityObservedAt))) {
     const { pullRequest: _, ...previous } = next;
     const pullRequest = observation.pullRequest ?? (reference?.kind === 'pr' ? {
@@ -98,7 +98,7 @@ function observe(work: WorkMetadata, observation?: WorkObservation, contextObser
       ...(pullRequest ? { pullRequest } : {}),
     };
   }
-  if (contextObservation?.context && (!work.contextObservedAt
+  if (contextObservation?.context && (authoritative || !work.contextObservedAt
     || Date.parse(contextObservation.observedAt) >= Date.parse(work.contextObservedAt))) {
     next = { ...next, context: contextObservation.context, contextObservedAt: contextObservation.observedAt };
   }
@@ -205,7 +205,7 @@ export function consolidateWorkTasks(state: AppState): AppState {
 }
 
 /** Completion belongs to the owner; collection can only reopen on unseen, newer actionable evidence. */
-export function reconcileWork(state: AppState, collection: WorkCollection, now: string | Date): AppState {
+export function reconcileWork(state: AppState, collection: WorkCollection, now: string | Date, authoritative = false): AppState {
   const batch = workCollectOutputSchema.parse(collection);
   state = consolidateWorkTasks(state);
   const createdAt = timestamp(now);
@@ -225,7 +225,7 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
     ? { ...task, work: observe({
       ...task.work, ...(notifications.has(canonicalSource(task.work.url))
         ? { notification: notifications.get(canonicalSource(task.work.url)) } : {}),
-    }, observations.get(canonicalSource(task.work.url)), contexts.get(canonicalSource(task.work.url))) } : task);
+    }, observations.get(canonicalSource(task.work.url)), contexts.get(canonicalSource(task.work.url)), authoritative) } : task);
   for (const candidate of batch.candidates) {
     const identity = taskIdentity(candidate.url, candidate.action);
     const url = canonicalSource(candidate.url);
@@ -248,7 +248,7 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
       ...base, identity, url, evidence: mergeEvidence(base.evidence, candidate.evidence),
       ...(reference ? { reference } : {}),
       ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
-    }, observation, contexts.get(url)));
+    }, observation, contexts.get(url), authoritative));
     const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
     const reopen = previous?.status === 'done' && previous.completedAt !== undefined
       && work.availability === 'actionable'

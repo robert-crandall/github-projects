@@ -5,7 +5,7 @@ import { codeReviewInputSchema, codeReviewResultSchema } from './code-review-sch
 export { idSchema, repoSchema, referenceSchema } from './references.ts';
 import {
   workCollectInputSchema, workCollectOutputSchema, workConnectionsSchema,
-  workIntakeAckSchema, workIntakeOutputSchema, workRankInputSchema, workRankOutputSchema, workObserveInputSchema,
+  workIntakeAckSchema, workIntakeOutputSchema, workRankInputSchema, workRankOutputSchema,
 } from './work-schema.ts';
 
 export const LIMITS = {
@@ -200,7 +200,6 @@ export const requestSchema = z.discriminatedUnion('op', [
   z.strictObject({ ...envelope, op: z.literal('copilot.interpretCapture'), input: captureInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.reconsider'), input: reconsiderInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('work.collect'), input: workCollectInputSchema }),
-  z.strictObject({ ...envelope, op: z.literal('work.observe'), input: workObserveInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('work.assess'), input: workRankInputSchema.omit({ assessmentIds: true, assessments: true }).required({ profileId: true }) }),
   z.strictObject({ ...envelope, op: z.literal('work.rank'), input: workRankInputSchema.required({ profileId: true, assessmentIds: true, assessments: true }) }),
   z.strictObject({ ...envelope, op: z.literal('work.reviewCode'), input: codeReviewInputSchema }),
@@ -219,7 +218,6 @@ export const resultSchemas = {
   'copilot.interpretCapture': captureOutputSchema,
   'copilot.reconsider': reconsiderOutputSchema,
   'work.collect': workCollectOutputSchema,
-  'work.observe': workCollectOutputSchema,
   'work.assess': workAssessOutputSchema,
   'work.rank': workRankOutputSchema,
   'work.reviewCode': codeReviewResultSchema,

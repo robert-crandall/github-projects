@@ -35,7 +35,8 @@ test('prioritization refreshes PR readiness while retaining the saved judgment a
   await expect(current).toContainText('Not a draft');
   await expect(current).toContainText('CI: passing');
   await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
-  expect(native.requests.map(request => request.op)).toEqual(['work.observe', 'work.rank', 'work.observe', 'work.rank']);
+  expect(native.requests.map(request => request.op)).toEqual(['work.collect', 'work.rank', 'work.collect', 'work.rank']);
+  expect(native.requests.filter(request => request.op === 'work.collect').every(request => request.input.observeOnly && request.input.stateOnly)).toBe(true);
   expect(native.assessments.values(task.id)).toHaveLength(1);
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();

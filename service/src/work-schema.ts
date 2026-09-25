@@ -112,13 +112,13 @@ export const workObservationSchema = z.strictObject({
   context: workSourceContextSchema.optional(),
   pullRequest: pullRequestStateSchema.optional(),
 });
-export const workObserveInputSchema = z.strictObject({ urls: z.array(url).max(100) });
 export const workCollectInputSchema = z.strictObject({
   stream: workstreamSchema, model: z.string().max(100),
   since: time.nullable(),
   knownUrls: z.array(url).max(100).default([]),
   observeOnly: z.boolean().default(false),
-});
+  stateOnly: z.boolean().optional(),
+}).refine(input => !input.stateOnly || input.observeOnly, 'State-only requests must observe saved sources without collecting.');
 export const workCollectOutputSchema = z.strictObject({
   candidates: z.array(workCandidateSchema).max(200),
   observations: z.array(workObservationSchema).max(300),
@@ -143,6 +143,7 @@ export const workRankInputSchema = z.strictObject({
     availabilityReason: z.string().max(1000).optional(),
     context: workSourceContextSchema.optional(),
     pullRequest: pullRequestStateSchema.optional(),
+    assessmentInputFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   })).max(2000),
 });
 export const workRankOutputSchema = workRankingSchema.omit({ rankedAt: true }).extend({
