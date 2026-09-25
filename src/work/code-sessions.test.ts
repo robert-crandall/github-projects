@@ -10,7 +10,7 @@ import { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import { codeResult, CodeRunStoreFixture } from '../../tests/code-run-fixture.ts';
 import { WorkQueue } from './controller.ts';
 import { rankInput, reconcileWork } from './engine.ts';
-import { codeSource } from './code-sessions.ts';
+import { codeJob, codeSource } from './code-sessions.ts';
 import type { Request } from '../../service/src/schema.ts';
 
 function gate() {
@@ -18,6 +18,192 @@ function gate() {
   const promise = new Promise<void>(yes => { resolve = yes; });
   return { promise, resolve };
 }
+
+function addCodeTask(f: Awaited<ReturnType<typeof setup>>, id: string, kind: 'pr' | 'issue' = 'issue') {
+  f.controller.update(state => {
+    const original = state.tasks[0]!;
+    return { ...state, tasks: [...state.tasks, { ...structuredClone(original), id, title: id, work: {
+      ...original.work!, url: `https://github.com/octo/project/issues/${state.tasks.length + 100}`,
+      reference: { repo: 'octo/project', number: state.tasks.length + 100, kind }, evidence: [],
+    } }] };
+  });
+  return id;
+}
+
+test('code batches freeze only explicit eligible source kinds and keep one reservation through terminal saves', async () => {
+  const f = await setup('pr');
+  const second = addCodeTask(f, 'second', 'pr'), issue = addCodeTask(f, 'issue');
+  f.queue.capture('manual');
+  const manual = f.controller.state.tasks.at(-1)!.id;
+  const unknown = addCodeTask(f, 'unknown');
+  f.controller.update(state => ({ ...state, tasks: state.tasks.map(task => task.id === unknown
+    ? { ...task, work: { ...task.work!, reference: undefined } } : task) }));
+  const held = f.holdResultSave();
+  const ids = [f.id, second, issue, manual, unknown, 'missing'];
+  const batch = f.queue.code.startBatch(ids, 'pr-review');
+  ids.push(addCodeTask(f, 'not selected', 'pr'));
+  try {
+    await f.saving.promise;
+    expect(f.queue.code.getSnapshot().active?.phase).toBe('saving');
+    expect(f.queue.code.busy).toBe(true);
+    expect(f.queue.code.getSnapshot().busy).toBe(true);
+    await expect(f.queue.code.start(second)).rejects.toThrow('current Copilot');
+    await expect(f.queue.code.startBatch([second], 'pr-review')).rejects.toThrow('current Copilot');
+    for (const start of [() => f.queue.run(), () => f.queue.runAssessor([issue]), () => f.queue.runPrioritizer()]) {
+      await expect(start()).rejects.toThrow('code job');
+    }
+    f.queue.saveSettings({ ...f.controller.state.work.settings, schedule: { enabled: true, everyMinutes: 5 } });
+    await f.queue.tick(new Date('2030-01-01'));
+    expect(f.requests.filter(request => request.op === 'work.reviewCode')).toHaveLength(1);
+    f.queue.edit(f.id, 'Edited while saving', 'Notes preserved');
+    f.queue.complete(f.id);
+  } finally { held.resolve(); await batch; }
+  expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode', 'work.reviewCode']);
+  expect(f.requests.map(request => request.op === 'work.reviewCode' && [request.input.taskId, request.input.job]))
+    .toEqual([[f.id, 'pr-review'], [second, 'pr-review']]);
+  expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['completed', 'completed', 'skipped', 'skipped', 'skipped', 'skipped']);
+  expect(f.queue.code.busy).toBe(false);
+  expect(f.controller.state.tasks[0]).toMatchObject({ notes: 'Notes preserved', status: 'done' });
+  expect(f.runs.entries).toHaveLength(2);
+});
+
+test('batch stop marks queued tasks immediately but cancel ACK retains reservation until actual target settles', async () => {
+  for (const failure of [undefined, 'cancelled']) {
+    const f = await setup(), held = f.hold(), second = addCodeTask(f, 'second');
+    const running = f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+    try {
+      await f.started.promise;
+      await f.queue.code.stopBatch();
+      expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['running', 'not-started']);
+      expect(f.queue.code.busy).toBe(true);
+      await expect(f.queue.code.start(second)).rejects.toThrow('current Copilot');
+      await expect(f.queue.run()).rejects.toThrow('code job');
+      if (failure) f.fail(failure);
+    } finally { held.resolve(); await running; }
+    expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+    expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual([failure ? 'cancelled' : 'completed', 'not-started']);
+    expect(f.queue.code.busy).toBe(false);
+    await f.queue.code.initialize();
+    expect(f.requests).toHaveLength(2);
+  }
+});
+
+test('batch revalidates queued tasks after Done, removal or changed source without affecting new tasks', async () => {
+  const f = await setup(), held = f.hold();
+  const done = addCodeTask(f, 'done'), removed = addCodeTask(f, 'removed'), changed = addCodeTask(f, 'changed'), last = addCodeTask(f, 'last');
+  const running = f.queue.code.startBatch([f.id, done, removed, changed, last], 'implementation-assessment');
+  await f.started.promise;
+  f.queue.complete(done);
+  f.controller.update(state => ({ ...state, tasks: state.tasks.filter(task => task.id !== removed).map(task => task.id === changed
+    ? { ...task, work: { ...task.work!, reference: { ...task.work!.reference!, kind: 'pr' } } } : task) }));
+  const added = addCodeTask(f, 'new');
+  f.queue.edit(last, 'New title is fine', 'Preserved notes');
+  held.resolve(); await running;
+  expect(f.requests.map(request => request.op === 'work.reviewCode' && request.input.taskId)).toEqual([f.id, last]);
+  expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['completed', 'skipped', 'skipped', 'skipped', 'completed']);
+  expect(f.controller.state.tasks.find(task => task.id === last)?.notes).toBe('Preserved notes');
+  expect(f.controller.state.tasks.some(task => task.id === added)).toBe(true);
+});
+
+test('a saved task failure continues to the next independent task; interruptions stop the batch', async () => {
+  for (const failure of ['source_changed', 'service-crashed', 'cancelled']) {
+    const f = await setup(), second = addCodeTask(f, 'second');
+    f.fail(failure);
+    await f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+    expect(f.requests).toHaveLength(failure === 'source_changed' ? 2 : 1);
+    expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(
+      failure === 'source_changed' ? ['failed', 'failed'] : [failure === 'cancelled' ? 'cancelled' : 'failed', 'not-started']);
+    expect(f.queue.code.busy).toBe(false);
+  }
+});
+
+test('batch save failure stops dispatch and keeps the exact result retryable without another SDK call', async () => {
+  const f = await setup(), second = addCodeTask(f, 'second');
+  f.runs.failUpdate = true;
+  await f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+  expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['save-pending', 'not-started']);
+  expect(f.queue.code.busy).toBe(false);
+  const pending = f.controller.getSnapshot().codePending[0]!;
+  expect(pending.outcome.status).toBe('partial');
+  f.runs.failUpdate = false;
+  await f.controller.retryCodeRun(pending.intent.runId);
+  expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  expect(f.runs.entries[0]!.outcome.status).toBe('partial');
+  expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['completed', 'not-started']);
+});
+
+test('a reentrant stop just before RPC dispatch sends no code request', async () => {
+  const f = await setup(), second = addCodeTask(f, 'second');
+  const unsubscribe = f.queue.code.subscribe(() => {
+    if (f.queue.code.getSnapshot().active?.phase === 'inspecting') void f.queue.code.stopBatch();
+  });
+  try {
+    await f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+    expect(f.requests).toHaveLength(0);
+    expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['cancelled', 'not-started']);
+    expect(f.queue.code.busy).toBe(false);
+  } finally { unsubscribe(); }
+});
+
+test('context change stops unstarted tasks without cancelling the valid current job; explicit stop still cancels it', async () => {
+  const f = await setup(), held = f.hold(), second = addCodeTask(f, 'second');
+  const running = f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+  await f.started.promise;
+  f.queue.saveSourceFilter({ selectedSources: [], collapsedProviders: [] });
+  expect(f.queue.code.getSnapshot().batch?.items[1]?.status).toBe('not-started');
+  expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  expect(f.queue.code.busy).toBe(true);
+  await f.queue.code.stopBatch();
+  expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+  held.resolve(); await running;
+});
+
+test('batch loses scope on profile, semantic settings and recovery but waits for the original target', async () => {
+  for (const change of ['profile', 'settings', 'recovery'] as const) {
+    const f = await setup(), held = f.hold(), second = addCodeTask(f, 'second');
+    const running = f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+    try {
+      await f.started.promise;
+      if (change === 'profile') f.queue.createProfile('Other');
+      if (change === 'settings') f.queue.saveSettings({ ...f.controller.state.work.settings,
+        codeAgents: codeAgents(f.controller.state.work.settings).map(agent => ({ ...agent, instructions: 'Changed' })) });
+      if (change === 'recovery') await f.controller.recoverBackup(crypto.randomUUID());
+      await f.cancelAcknowledged.promise;
+      expect(f.queue.code.busy).toBe(true);
+      expect(f.queue.code.getSnapshot().batch?.items[1]?.status).toBe('not-started');
+      await expect(f.queue.run()).rejects.toThrow('code job');
+      if (change === 'recovery') expect(f.queue.code.getSnapshot().active).toBeNull();
+    } finally { held.resolve(); await running; }
+    expect(f.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+    expect(f.runs.entries.at(-1)?.quarantined).toBe(change === 'recovery');
+    expect(f.queue.code.busy).toBe(false);
+  }
+});
+
+test('batch changes during durable start do not dispatch a stale request and always release the reservation', async () => {
+  for (const change of ['done', 'source', 'stop', 'start-failure'] as const) {
+    const f = await setup(), held = f.holdStart(), second = addCodeTask(f, 'second');
+    if (change === 'start-failure') f.runs.failStart = true;
+    const running = f.queue.code.startBatch([f.id, second], 'implementation-assessment');
+    if (change === 'done') f.queue.complete(f.id);
+    if (change === 'source') f.controller.update(state => ({ ...state, tasks: state.tasks.map(task => task.id === f.id
+      ? { ...task, work: { ...task.work!, reference: { ...task.work!.reference!, kind: 'pr' } } } : task) }));
+    if (change === 'stop') await f.queue.code.stopBatch();
+    held.resolve(); await running;
+    expect(f.requests).toHaveLength(0);
+    expect(f.queue.code.busy).toBe(false);
+    expect(f.queue.code.getSnapshot().batch?.items[1]?.status).toBe('not-started');
+  }
+});
+
+test('bulk code eligibility never guesses legacy kind and empty or wrong-kind actions dispatch nothing', async () => {
+  const f = await setup('pr');
+  expect(codeJob(f.controller.state.tasks[0]!, f.controller.state)).toBe('pr-review');
+  await expect(f.queue.code.startBatch([f.id], 'implementation-assessment')).rejects.toThrow('No selected');
+  await expect(f.queue.code.startBatch([], 'pr-review')).rejects.toThrow('No selected');
+  expect(f.requests).toHaveLength(0);
+  expect(f.queue.code.busy).toBe(false);
+});
 async function setup(kind: 'issue' | 'pr' = 'issue') {
   const at = new Date().toISOString(), url = `https://github.com/octo/project/${kind === 'pr' ? 'pull' : 'issues'}/47`;
   let state = reconcileWork(emptyWorkspace(at, 'UTC'), { collectedAt: at, warnings: [], observations: [
@@ -76,6 +262,7 @@ async function setup(kind: 'issue' | 'pr' = 'issue') {
     started.resolve();
     if (requests.filter(request => request.op === 'work.reviewCode').length === 2) secondStarted.resolve();
     if (hold) await hold.promise;
+    if (failure?.startsWith('service-')) throw { code: failure, message: `Explicit ${failure}`, retryable: true };
     return failure ? { v: 1, id: request.id, ok: false, error: { code: failure, message: `Explicit ${failure}`, retryable: true } }
       : { v: 1, id: request.id, ok: true, result: codeResult(request.input, inspected) };
   });

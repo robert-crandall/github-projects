@@ -1060,6 +1060,188 @@ function sourceFilterFixture(native: NativeMock) {
   return state;
 }
 
+function bulkFixture(native: NativeMock) {
+  const state = sourceFilterFixture(native);
+  state.tasks[0]!.work!.reference = { repo: 'octo/project', number: 1, kind: 'pr' };
+  state.tasks[1]!.work!.reference = { repo: 'octo/project', number: 2, kind: 'issue' };
+  state.tasks.push({ ...structuredClone(state.tasks[0]!), id: 'second-pr', title: 'Second review', work: {
+    ...state.tasks[0]!.work!, url: 'https://github.com/octo/project/issues/6',
+    identity: 'https://github.com/octo/project/issues/6', reference: { repo: 'octo/project', number: 6, kind: 'pr' },
+  } });
+  native.saved.snapshot = snapshotSchema.parse({ formatVersion: 1, workspace: { version: 1, state, scroll: {} }, reminders: [] });
+}
+
+test('explicit task selection is keyboard accessible, context-bound, local-only and preserves ranks', async ({ page, native }, testInfo) => {
+  bulkFixture(native);
+  await page.goto('/');
+  const selected = page.getByRole('region', { name: 'Selected tasks', exact: true });
+  const checkbox = page.getByRole('checkbox', { name: 'Select task: Shared review', exact: true });
+  await checkbox.focus();
+  await page.keyboard.press('Space');
+  await expect(checkbox).toBeChecked();
+  await expect(checkbox).toBeFocused();
+  await expect(selected).toContainText('1 selected');
+  await expect(page.getByRole('heading', { name: 'Select a task', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Select visible tasks' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(selected).toContainText('5 selected');
+  await expect(selected.getByRole('button', { name: 'Assess selected (5)', exact: true })).toBeVisible();
+  await expect(selected.getByRole('button', { name: 'Review selected PRs (2)', exact: true })).toBeVisible();
+  await expect(selected.getByRole('button', { name: 'Assess implementation (1 issue)', exact: true })).toBeVisible();
+  await selected.getByText('Code eligibility:', { exact: false }).click();
+  await expect(selected).toContainText('Agent result: No code action');
+  await expect(selected).toContainText('Manual follow-up: No code action');
+  await expect(page.locator('.task-rank')).toHaveText(['1', '2', '3', '4', '5']);
+  await page.screenshot({ path: testInfo.outputPath('bulk-selection-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('bulk-selection-narrow.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: 'Clear selection' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(selected).toContainText('0 selected');
+  await checkbox.check();
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  await expect(checkbox).not.toBeChecked();
+  await checkbox.check();
+  await page.getByRole('checkbox', { name: 'Manual tasks', exact: true }).uncheck();
+  await expect(checkbox).not.toBeChecked();
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await expect(selected).toContainText('4 selected');
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await expect(page.getByRole('checkbox', { name: /^Select task:/ })).toHaveCount(0);
+  await page.getByRole('button', { name: /^To do/ }).click();
+  await expect(selected).toContainText('0 selected');
+  await checkbox.check();
+  await page.getByLabel('Work profile', { exact: true }).selectOption({ label: 'On call' });
+  await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await expect(checkbox).not.toBeChecked();
+  await checkbox.check();
+  await page.getByRole('button', { name: 'Mark done: Shared review', exact: true }).click();
+  await expect(selected).toContainText('0 selected');
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
+  await page.getByRole('button', { name: /^To do/ }).click();
+  await expect(checkbox).not.toBeChecked();
+  await persisted(page);
+  expect(native.requests).toEqual([]);
+  await page.reload();
+  await expect(page.getByRole('region', { name: 'Selected tasks', exact: true })).toContainText('0 selected');
+  expect(native.requests).toEqual([]);
+});
+
+test('selected assessor and detail assessor save only requested judgments without collecting or ordering', async ({ page, native }) => {
+  bulkFixture(native);
+  const priorOrder = structuredClone(native.state.work.ranking);
+  const id = native.state.tasks.find(task => task.title === 'Shared review')!.id;
+  await page.goto('/');
+  await page.getByRole('checkbox', { name: 'Select task: Shared review', exact: true }).check();
+  native.holdAssessment = gate();
+  await page.getByRole('button', { name: 'Assess selected (1)', exact: true }).click();
+  await expect.poll(() => native.requests.length).toBe(1);
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  await page.getByLabel('Task notes', { exact: true }).fill('Keep concurrent assessment notes');
+  await page.getByRole('button', { name: 'Mark done', exact: true }).click();
+  await add(page, 'Captured during assessment');
+  native.holdAssessment.release();
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  expect(native.requests[0]).toMatchObject({ op: 'work.assess', input: { force: true, tasks: [{ id }] } });
+  expect(native.assessments.entries.map(value => value.id)).toEqual([id]);
+  expect(native.state.work.ranking).toEqual(priorOrder);
+  await page.locator('.task-row').filter({ hasText: 'Assigned issue' }).click();
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess']);
+  expect(native.requests[1]).toMatchObject({ input: { tasks: [{ id: native.state.tasks.find(task => task.title === 'Assigned issue')!.id }] } });
+  expect(native.state.tasks.find(task => task.id === id)).toMatchObject({ status: 'done', notes: 'Keep concurrent assessment notes' });
+  expect(native.state.tasks.some(task => task.title === 'Captured during assessment')).toBe(true);
+});
+
+test('mixed code batch runs only named PRs, preserves detail navigation, and saves inspectable outcomes across relaunch', async ({ page, native }, testInfo) => {
+  bulkFixture(native);
+  native.holdCode = gate();
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
+  for (const name of ['Run now', 'Run assessor', 'Run prioritizer']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+  await page.locator('.task-row').filter({ hasText: 'Assigned issue' }).click();
+  await expect(page.getByRole('button', { name: 'Assess implementation', exact: true })).toBeDisabled();
+  await page.getByLabel('Task notes', { exact: true }).fill('Notes while the batch runs');
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  await page.getByRole('button', { name: 'Mark done', exact: true }).click();
+  await persisted(page);
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  await batch.getByText('Batch outcomes', { exact: true }).click();
+  await page.screenshot({ path: testInfo.outputPath('bulk-progress-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await page.locator('.task-detail').boundingBox())!.height).toBeGreaterThan(200);
+  await page.getByLabel('Task notes', { exact: true }).fill('Narrow notes stay reachable');
+  await persisted(page);
+  await batch.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath('bulk-progress-narrow.png') });
+  native.holdCode.release();
+  await expect(batch.getByRole('status')).toHaveText('Batch finished.');
+  await expect(batch).toContainText('2 completed');
+  await expect(batch).toContainText('3 skipped');
+  expect(native.requests.map(request => request.op === 'work.reviewCode' && request.input.job)).toEqual(['pr-review', 'pr-review']);
+  expect(native.codeRuns.entries).toHaveLength(2);
+  expect(native.state.tasks.find(task => task.title === 'Assigned issue')!.notes).toBe('Notes while the batch runs');
+  await page.reload();
+  await expect(batch).toHaveCount(0);
+  await page.locator('.task-row').filter({ hasText: 'Second review' }).click();
+  await expect(page.getByRole('region', { name: 'Code sessions', exact: true })).toContainText('Partial code inspection only. This is not an approval to merge.');
+  expect(native.requests).toHaveLength(2);
+});
+
+test('code batch stop waits past cancel acknowledgement and never dispatches remaining tasks', async ({ page, native }) => {
+  bulkFixture(native); native.holdCode = gate(); native.cancelCode = true;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
+  await batch.getByRole('button', { name: 'Stop batch' }).click();
+  await expect(batch).toContainText('1 not started');
+  await expect(batch.getByRole('status')).toContainText('waiting for the current task outcome');
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeDisabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+  native.holdCode.release();
+  await expect(batch.getByRole('status')).toHaveText('Batch stopped.');
+  await expect(batch).toContainText('1 cancelled');
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+});
+
+test('code batch context change stops only queued tasks and failed saves stay retryable without replay', async ({ page, native }) => {
+  bulkFixture(native); native.holdCode = gate(); native.codeRuns.failUpdate = true;
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await expect(batch).toContainText('1 not started');
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+  await page.getByRole('button', { name: /^To do/ }).click();
+  await expect(page.getByRole('region', { name: 'Selected tasks', exact: true })).toContainText('0 selected');
+  native.holdCode.release();
+  await expect(batch.getByRole('status')).toHaveText('Batch stopped.');
+  await expect(batch).toContainText('1 result not saved');
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await expect(panel).toContainText('Result not saved');
+  native.codeRuns.failUpdate = false;
+  await panel.getByRole('button', { name: 'Retry saving result' }).click();
+  await expect(panel).toContainText('Partial inspection saved');
+  await expect(batch).toContainText('1 completed');
+  await expect(batch).not.toContainText('1 result not saved');
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
+});
+
 test('source filters match merged provenance once, preserve ranks and keep task actions working', async ({ page, native }) => {
   const original = sourceFilterFixture(native);
   await page.goto('/');

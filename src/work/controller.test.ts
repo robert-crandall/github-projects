@@ -643,6 +643,87 @@ describe('work profiles', () => {
 });
 
 describe('explicit task agents', () => {
+  test('selected assessor submits only eligible explicit IDs, forces new versions and never collects or orders', async () => {
+    const state = initial();
+    state.tasks = ['first', 'second', 'done'].map(id => ({ id, title: id, notes: '', status: id === 'done' ? 'done' : 'open', createdAt: before }));
+    state.work.ranking = { orderedIds: ['second', 'first'], reasons: [], rankedAt: before };
+    const mock = await fixture(state);
+    const selection = ['first', 'first', 'done', 'missing'];
+    const running = mock.queue.runAssessor(selection);
+    selection.push('second');
+    await running;
+    await mock.queue.runAssessor(['first']);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess']);
+    for (const request of mock.requests) {
+      if (request.op !== 'work.assess') throw new Error('Unexpected request');
+      expect(request.input.tasks.map(task => task.id)).toEqual(['first']);
+      expect(request.input.force).toBe(true);
+    }
+    expect(mock.history.entries.map(value => value.id)).toEqual(['first', 'first']);
+    expect(mock.saved().work.ranking).toEqual(state.work.ranking);
+    expect(mock.saved().work.lastStartedAt).toBeNull();
+    await expect(mock.queue.runAssessor([])).rejects.toThrow('eligible');
+    await expect(mock.queue.runAssessor(['done', 'missing'])).rejects.toThrow('eligible');
+    await mock.queue.runPrioritizer();
+    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    await mock.queue.runAssessor();
+    await mock.queue.runPrioritizer();
+    const order = mock.requests.at(-1)!;
+    expect(order.op).toBe('work.rank');
+    if (order.op === 'work.rank') expect(new Set(order.input.tasks.map(task => task.id))).toEqual(new Set(['first', 'second']));
+  });
+
+  test('selected assessment continuation excludes changed, completed, removed and newly captured tasks', async () => {
+    const entered = deferred<Extract<Request, { op: 'work.assess' }>>(), release = deferred<void>();
+    const state = initial();
+    state.tasks = ['first', 'edited', 'done', 'removed', 'last', 'unselected'].map(id => ({ id, title: id, notes: '', status: 'open', createdAt: before }));
+    let count = 0;
+    const mock = await fixture(state, async request => {
+      if (request.op === 'work.assess' && count++ === 0) {
+        entered.resolve(request);
+        await release.promise;
+        return assessmentBatch({ ...request.input, tasks: request.input.tasks.slice(0, 1) });
+      }
+    });
+    const running = mock.queue.runAssessor(['first', 'edited', 'done', 'removed', 'last']);
+    await entered.promise;
+    mock.queue.edit('edited', 'edited concurrently', 'Retain these notes');
+    mock.queue.complete('done');
+    mock.workspace.update(current => ({ ...current, tasks: current.tasks.filter(task => task.id !== 'removed') }));
+    mock.queue.capture('New task');
+    release.resolve();
+    await running;
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess']);
+    const second = mock.requests[1]!;
+    if (second.op !== 'work.assess') throw new Error('Missing continuation');
+    expect(second.input.tasks.map(task => task.id)).toEqual(['last']);
+    expect(mock.history.entries.map(value => value.id)).toEqual(['first', 'last']);
+    expect(mock.saved().tasks.find(task => task.id === 'edited')?.notes).toBe('Retain these notes');
+    expect(mock.saved().tasks.find(task => task.id === 'done')?.status).toBe('done');
+    expect(mock.saved().tasks.some(task => task.title === 'New task')).toBe(true);
+    expect(mock.queue.getSnapshot().warnings).toEqual(['3 selected tasks were not assessed because they changed or are no longer eligible.']);
+  });
+
+  test('selected assessment stops continuation on semantic agent changes', async () => {
+    const entered = deferred<void>(), release = deferred<void>();
+    const mock = await fixture(initial(), async request => {
+      if (request.op === 'work.assess') {
+        entered.resolve(); await release.promise;
+        return assessmentBatch({ ...request.input, tasks: request.input.tasks.slice(0, 1) });
+      }
+    });
+    mock.queue.capture('First'); mock.queue.capture('Second');
+    const running = mock.queue.runAssessor(mock.workspace.state.tasks.map(task => task.id));
+    await entered.promise;
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, agents: taskAgents(mock.workspace.state.work.settings)
+      .map(agent => ({ ...agent, instructions: 'Changed during request' })) });
+    release.resolve();
+    await running;
+    expect(mock.requests).toHaveLength(1);
+    expect(mock.history.entries).toHaveLength(1);
+    expect(mock.queue.getSnapshot().error).toContain('Assessor settings changed');
+  });
+
   function configure(mock: Awaited<ReturnType<typeof fixture>>, job: TaskAgentJob, patch: { name?: string; instructions?: string; model?: string }) {
     mock.queue.saveSettings({ ...mock.workspace.state.work.settings, agents: taskAgents(mock.workspace.state.work.settings)
       .map(agent => agent.jobType === job ? { ...agent, ...patch } : agent) });
