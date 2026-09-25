@@ -259,7 +259,7 @@ fn insert(connection: &Connection, result: &SavedAssessment) -> Result<HistoryEn
     })
 }
 
-fn profile_tasks<'a>(snapshot: &'a Snapshot, profile_id: &str) -> Result<&'a Vec<Value>> {
+pub(crate) fn profile_tasks<'a>(snapshot: &'a Snapshot, profile_id: &str) -> Result<&'a Vec<Value>> {
     let state = &snapshot.workspace["state"];
     let active = state["activeWorkProfile"]["id"]
         .as_str()
@@ -275,7 +275,7 @@ fn profile_tasks<'a>(snapshot: &'a Snapshot, profile_id: &str) -> Result<&'a Vec
     tasks.as_array().ok_or_else(NativeError::invalid)
 }
 
-fn ownership(tasks: &[Value]) -> Result<HashMap<&str, &str>> {
+pub(crate) fn ownership(tasks: &[Value]) -> Result<HashMap<&str, &str>> {
     let mut owners = HashMap::new();
     for task in tasks {
         let id = task["id"].as_str().ok_or_else(NativeError::invalid)?;
@@ -318,7 +318,7 @@ pub(crate) fn validate_ownership(snapshot: &Snapshot) -> Result<()> {
     Ok(())
 }
 
-fn task_ids(snapshot: &Snapshot, profile_id: &str, task_id: &str) -> Result<Vec<String>> {
+pub(crate) fn task_ids(snapshot: &Snapshot, profile_id: &str, task_id: &str) -> Result<Vec<String>> {
     let owners = ownership(profile_tasks(snapshot, profile_id)?)?;
     if owners.get(task_id) != Some(&task_id) {
         return Err(NativeError::invalid());
@@ -740,7 +740,7 @@ mod tests {
         }
         let saved = store.read().unwrap();
         let envelope = serde_json::to_string(&saved).unwrap();
-        let actual_bytes = envelope.len() - 1 + ",\"assessments\":[".len() + serialized_rows + 2;
+        let actual_bytes = envelope.len() - 1 + ",\"assessments\":[".len() + serialized_rows + 2 + ",\"codeRuns\":[]".len();
         let exported = store.export_json(&saved.revision).unwrap();
         assert_eq!(exported.len(), actual_bytes);
         assert!(actual_bytes > 57 * 1024 * 1024 && actual_bytes < MAX_EXPORT_BYTES);

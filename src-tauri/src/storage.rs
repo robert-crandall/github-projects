@@ -41,6 +41,8 @@ pub struct Store {
     pub(crate) directory: PathBuf,
     _lock: File,
     recovery_token: String,
+    pub(crate) code_run_generation: String,
+    pub(crate) code_runs_ready: bool,
 }
 
 fn private_dir(path: &Path) -> Result<()> {
@@ -159,6 +161,8 @@ impl Store {
             directory,
             _lock: lock,
             recovery_token: Uuid::new_v4().to_string(),
+            code_run_generation: Uuid::new_v4().to_string(),
+            code_runs_ready: false,
         };
         if !store.path().exists() {
             store.initialize()?;
@@ -363,7 +367,12 @@ impl Store {
         if read.revision != expected_revision {
             return Err(NativeError::conflict());
         }
-        crate::assessments::export_json(&connection, read)
+        let mut output = crate::assessments::export_json(&connection, read)?;
+        crate::code_runs::append_export(&connection, &mut output)?;
+        if output.len() > 64 * 1024 * 1024 {
+            return Err(NativeError::new("export-too-large", "JSON export exceeds 64 MiB. Use a database backup; all history remains saved."));
+        }
+        Ok(output)
     }
 
     pub(crate) fn rotate_recovery_token(&mut self) {
@@ -493,6 +502,8 @@ impl Store {
             }
         }
         fs::rename(staging, self.path())?;
+        self.code_run_generation = Uuid::new_v4().to_string();
+        self.code_runs_ready = false;
         File::open(&self.directory)?.sync_all()?;
         self.recovery_token = Uuid::new_v4().to_string();
         self.read()

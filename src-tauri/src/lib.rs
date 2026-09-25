@@ -1,6 +1,7 @@
 mod appearance;
 mod assessments;
 mod code_result;
+mod code_runs;
 mod conversation;
 mod error;
 mod launch;
@@ -193,6 +194,26 @@ async fn assessment_append(state: State<'_, NativeState>, profile_id: String, as
 #[tauri::command]
 async fn assessment_read(state: State<'_, NativeState>, profile_id: String, task_id: String, before: Option<i64>) -> Result<assessments::HistoryPage> {
     with_store(state, move |store| store.assessment_read(&profile_id, &task_id, before)).await
+}
+
+#[tauri::command]
+async fn code_run_context(state: State<'_, NativeState>) -> Result<code_runs::Context> {
+    with_store(state, |store| store.code_run_context()).await
+}
+
+#[tauri::command]
+async fn code_run_start(state: State<'_, NativeState>, generation: String, intent: code_runs::Intent) -> Result<code_runs::Run> {
+    with_store(state, move |store| store.code_run_start(&generation, intent)).await
+}
+
+#[tauri::command]
+async fn code_run_update(state: State<'_, NativeState>, generation: String, intent: code_runs::Intent, outcome: code_runs::Outcome) -> Result<code_runs::Run> {
+    with_store(state, move |store| store.code_run_update(&generation, intent, outcome)).await
+}
+
+#[tauri::command]
+async fn code_run_read(state: State<'_, NativeState>, profile_id: String, task_id: String, before: Option<i64>, quarantined: bool) -> Result<code_runs::Page> {
+    with_store(state, move |store| store.code_run_read(&profile_id, &task_id, before, quarantined)).await
 }
 
 #[tauri::command]
@@ -495,6 +516,10 @@ pub fn run() {
             workspace_export_json,
             assessment_append,
             assessment_read,
+            code_run_context,
+            code_run_start,
+            code_run_update,
+            code_run_read,
             workspace_export_raw,
             workspace_recover,
             launch_github,
