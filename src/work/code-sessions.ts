@@ -24,14 +24,15 @@ type Active = {
   saved?: { generation: string; intent: CodeRun['intent'] };
   progressSave?: Promise<void>;
 };
-export type CodeSessionsStatus = { active: Active | null; error: string; revision: number };
+export type CodeSessionsStatus = { active: Active | null; busy: boolean; error: string; revision: number };
 const message = (error: unknown) => error instanceof Error ? error.message : 'The code job failed without a recognized response.';
 
 /** Single-task entry point. Selection never dispatches; a future queue must await start(). */
 export class CodeSessions {
   private listeners = new Set<() => void>();
-  private status: CodeSessionsStatus = { active: null, error: '', revision: 0 };
+  private status: CodeSessionsStatus = { active: null, busy: false, error: '', revision: 0 };
   private active?: Active;
+  private inFlight?: Active;
   constructor(private readonly controller: DesktopWorkspace, private readonly service: ServiceClient, private readonly workBusy: () => boolean) {
     controller.subscribe(() => {
       const active = this.active;
@@ -45,7 +46,7 @@ export class CodeSessions {
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getSnapshot = () => this.status;
-  get busy(): boolean { return !!this.active; }
+  get busy(): boolean { return !!this.inFlight; }
   private publish(patch: Partial<CodeSessionsStatus>): void {
     this.status = { ...this.status, ...patch };
     for (const listener of this.listeners) listener();
@@ -54,12 +55,18 @@ export class CodeSessions {
     active.phase = phase;
     if (this.active === active) this.publish({ active: { ...active } });
   }
+  private release(active: Active): void {
+    if (this.inFlight === active) {
+      this.inFlight = undefined;
+      this.publish({ busy: false });
+    }
+  }
   async initialize(): Promise<void> { await this.controller.platform.codeRunContext(); }
   history(profileId: string, taskId: string, before: number | null = null) {
     return this.controller.platform.codeRunRead(profileId, taskId, before);
   }
   start(taskId: string): Promise<CodeRun> {
-    if (this.active || this.workBusy()) return Promise.reject(new Error('Wait for the current Copilot run before starting a code job.'));
+    if (this.busy || this.workBusy()) return Promise.reject(new Error('Wait for the current Copilot run before starting a code job.'));
     if (this.controller.isRecovering) return Promise.reject(new Error('Wait for workspace recovery before starting a code job.'));
     const state = this.controller.state;
     const task = state.tasks.find(task => task.id === taskId);
@@ -76,7 +83,8 @@ export class CodeSessions {
       input: codeReviewInputSchema.parse({ taskId, source, job, agent: { id: agent.id, instructions: agent.instructions, model: agent.model } }),
     });
     this.active = active;
-    this.publish({ active: { ...active }, error: '' });
+    this.inFlight = active;
+    this.publish({ active: { ...active }, busy: true, error: '' });
     return this.execute(active, intent);
   }
   private async execute(active: Active, intent: CodeRun['intent']): Promise<CodeRun> {
@@ -116,6 +124,7 @@ export class CodeSessions {
       }
       active.dispatched = false;
       this.phase(active, 'saving');
+      this.release(active);
       await active.progressSave;
       const saved = await this.controller.saveCodeRun({ generation, workspaceGeneration: active.workspaceGeneration, intent, outcome });
       this.publish({ revision: this.status.revision + 1 });
@@ -124,6 +133,7 @@ export class CodeSessions {
       this.publish({ error: message(error) });
       throw error;
     } finally {
+      this.release(active);
       if (this.active === active) { this.active = undefined; this.publish({ active: null }); }
     }
   }

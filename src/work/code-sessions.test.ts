@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { codeAgents } from '../../service/src/code-agents.ts';
-import { codeRunSchema } from '../../service/src/code-runs.ts';
+import { codeRunOutcomeSchema, codeRunSchema } from '../../service/src/code-runs.ts';
 import { taskAgents } from '../../service/src/work-agents.ts';
 import { workSettingsSchema } from '../../service/src/work-schema.ts';
 import { emptyWorkspace } from '../domain/live.ts';
@@ -34,13 +34,19 @@ async function setup(kind: 'issue' | 'pr' = 'issue') {
   const log: string[] = [], requests: Request[] = [];
   let hold: ReturnType<typeof gate> | undefined;
   let holdStart: ReturnType<typeof gate> | undefined;
+  let holdResultSave: ReturnType<typeof gate> | undefined;
   let failure: string | undefined;
   let inspected = true;
   const started = gate();
+  const secondStarted = gate(), cancelAcknowledged = gate(), saving = gate();
   const platform = createNativePlatform(async (command, args = {}) => {
     log.push(command);
     if (command.startsWith('code_run_')) {
       if (command === 'code_run_start' && holdStart) await holdStart.promise;
+      if (command === 'code_run_update' && holdResultSave && codeRunOutcomeSchema.parse(args.outcome).status !== 'cancelling') {
+        saving.resolve();
+        await holdResultSave.promise;
+      }
       return runs.handle(command, args);
     }
     if (command === 'workspace_read') return structuredClone(saved);
@@ -60,19 +66,24 @@ async function setup(kind: 'issue' | 'pr' = 'issue') {
   await controller.load(); await controller.flush();
   const service = new ServiceClient(async request => {
     requests.push(request); log.push(request.op);
-    if (request.op === 'cancel') return { v: 1, id: request.id, ok: true, result: { requestId: request.input.requestId, cancelled: true } };
+    if (request.op === 'cancel') {
+      cancelAcknowledged.resolve();
+      return { v: 1, id: request.id, ok: true, result: { requestId: request.input.requestId, cancelled: true } };
+    }
     expect(request.op).toBe('work.reviewCode');
     if (request.op !== 'work.reviewCode') throw new Error('Unexpected network operation');
     expect(runs.entries.some(run => run.intent.runId === request.id && run.outcome.status === 'running')).toBe(true);
     started.resolve();
+    if (requests.filter(request => request.op === 'work.reviewCode').length === 2) secondStarted.resolve();
     if (hold) await hold.promise;
     return failure ? { v: 1, id: request.id, ok: false, error: { code: failure, message: `Explicit ${failure}`, retryable: true } }
       : { v: 1, id: request.id, ok: true, result: codeResult(request.input, inspected) };
   });
   const queue = new WorkQueue(controller, service);
   return {
-    controller, queue, runs, requests, log, started, id: state.tasks[0]!.id,
+    controller, queue, runs, requests, log, started, secondStarted, cancelAcknowledged, saving, id: state.tasks[0]!.id,
     hold() { hold = gate(); return hold; }, holdStart() { holdStart = gate(); return holdStart; },
+    holdResultSave() { holdResultSave = gate(); return holdResultSave; },
     fail(code: string) { failure = code; }, notInspected() { inspected = false; },
   };
 }
@@ -194,19 +205,60 @@ test('failed terminal write keeps result for paid-call-free retry and allows not
   expect(f.controller.state.tasks[0]!.status).toBe('done');
 });
 
-test('late old-generation result is quarantined despite identical task IDs; fresh runs continue', async () => {
+test('restore hides the old run but blocks every Copilot start until its target settles after cancel ACK', async () => {
   const f = await setup(), held = f.hold();
   const old = f.queue.code.start(f.id);
   await f.started.promise;
   const generation = f.runs.generation;
-  await f.controller.recoverBackup(crypto.randomUUID());
-  held.resolve();
+  try {
+    await f.controller.recoverBackup(crypto.randomUUID());
+    await f.cancelAcknowledged.promise;
+    expect(f.queue.code.getSnapshot().active).toBeNull();
+    expect(f.queue.code.busy).toBe(true);
+    expect(f.queue.code.getSnapshot().busy).toBe(true);
+    const starts = f.log.filter(command => command === 'code_run_start').length;
+    const requests = f.requests.length;
+    await expect(f.queue.code.start(f.id)).rejects.toThrow('current Copilot');
+    for (const start of [() => f.queue.run(), () => f.queue.runAssessor(), () => f.queue.runPrioritizer()]) {
+      await expect(start()).rejects.toThrow('code job');
+    }
+    expect(f.log.filter(command => command === 'code_run_start')).toHaveLength(starts);
+    expect(f.requests).toHaveLength(requests);
+  } finally {
+    held.resolve();
+    await old;
+  }
   const result = await old;
   expect(result.generation).toBe(generation);
   expect(result.quarantined).toBe(true);
+  expect(f.queue.code.busy).toBe(false);
   expect((await f.queue.code.history('default', f.id)).runs).toHaveLength(0);
   expect((await f.queue.code.start(f.id)).quarantined).toBe(false);
   expect((await f.queue.code.history('default', f.id)).runs).toHaveLength(1);
+});
+
+test('settled target releases the SDK guard while terminal persistence is pending', async () => {
+  const f = await setup(), held = f.holdResultSave();
+  const first = f.queue.code.start(f.id);
+  let second: ReturnType<typeof f.queue.code.start> | undefined;
+  try {
+    await f.saving.promise;
+    expect(f.queue.code.getSnapshot().active?.phase).toBe('saving');
+    expect(f.queue.code.busy).toBe(false);
+    expect(f.queue.code.getSnapshot().busy).toBe(false);
+    f.queue.edit(f.id, 'Edited while saving', 'Private notes');
+    f.queue.complete(f.id);
+    await f.controller.flush();
+    second = f.queue.code.start(f.id);
+    await f.secondStarted.promise;
+    expect(f.requests.filter(request => request.op === 'work.reviewCode')).toHaveLength(2);
+  } finally {
+    held.resolve();
+    await Promise.all([first, second]);
+  }
+  expect(f.runs.entries).toHaveLength(2);
+  expect(f.controller.state.tasks[0]!.status).toBe('done');
+  expect(f.controller.state.tasks[0]!.notes).toBe('Private notes');
 });
 
 test('profile switching preserves origin and settings while result is in flight', async () => {

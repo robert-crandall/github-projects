@@ -44,7 +44,9 @@ export function CodeRunResult({ run, controller, pending = false }: { run: CodeR
           <h4>Recommended next step</h4><SafeMarkdown body={result.answer.nextStep.text} open={open} />
           <Evidence items={result.answer.nextStep.evidence} result={result} open={open} />
           <p>{result.answer.uncertainty}</p></>}
-      <p className="task-detail-notice">Partial coverage: bounded, selective inspection, not a comprehensive review.
+      <p className="task-detail-notice">{result.evidence.length
+        ? 'Partial coverage: bounded, selective inspection, not a comprehensive review.'
+        : 'No code coverage obtained.'}
         {' '}Verified at {new Date(result.verifiedAt).toLocaleString()}. Changes after that time are not checked automatically; rerun to check current code.
       </p>
       {settingsChanged && <p className="field-help">Agent settings changed since this run. This result retains its original instructions and model.</p>}
@@ -104,7 +106,7 @@ export function CodeSessionPanel({ task, controller, sessions, workBusy }: {
   const result = versions.find(run => run.intent.runId === selected) ?? versions[0];
   return <section className="code-sessions" aria-label="Code sessions"><h3>Code sessions</h3>
     {!source && task.work && githubReference(task.work.url) && <p className="field-help">Source kind unknown: this saved issue-form link may identify a PR. Run now to collect its GitHub source before starting a code job. Nothing is fetched on selection.</p>}
-    {source && <div className="button-row"><button className="secondary" disabled={!!state.active || workBusy}
+    {source && <div className="button-row"><button className="secondary" disabled={state.busy || workBusy}
       onClick={() => invoke(() => sessions.start(task.id))}>{source.kind === 'pr' ? 'Review PR' : 'Assess implementation'}</button>
       {active && active.phase !== 'saving' && <button className="secondary" disabled={active.phase === 'cancelling'}
         onClick={() => invoke(() => sessions.cancel())}>Cancel code job</button>}
@@ -112,6 +114,7 @@ export function CodeSessionPanel({ task, controller, sessions, workBusy }: {
     {active && <p role="status">{active.phase === 'preparing' ? 'Saving start before contacting GitHub...' : active.phase === 'cancelling'
       ? 'Cancellation requested. Waiting for the actual outcome...' : active.phase === 'saving' ? 'Saving code result...'
       : 'Reading pinned code and running the agent (up to three minutes)...'}</p>}
+    {state.busy && !active && <p role="status">Waiting for the previous code job to finish before starting another Copilot run...</p>}
     {state.error && <p role="alert">{state.error}</p>}
     {!active && !result && !pending.length && !error && <p className="field-help">No saved code sessions. Only an explicit task action contacts GitHub and Copilot.</p>}
     {error && <><p role="alert">{error}</p><button className="secondary" onClick={() => setAttempt(value => value + 1)}>Retry code history</button></>}

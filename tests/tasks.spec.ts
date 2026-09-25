@@ -69,7 +69,8 @@ test('not-inspected and source-changed are honest, reruns retain history, cancel
   const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
   await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
   await expect(panel).toContainText('No source-code lines were inspected. No code review or approval was completed.');
-  await expect(panel).toContainText('Partial coverage');
+  await expect(panel).toContainText('No code coverage obtained.');
+  await expect(panel).not.toContainText('Partial coverage: bounded, selective inspection');
   native.codeError = 'source_changed';
   await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
   await expect(panel).toContainText('The source or branch moved. Start a new run');
@@ -84,6 +85,47 @@ test('not-inspected and source-changed are honest, reruns retain history, cancel
   await expect(panel).toContainText('Run cancelled');
   expect(native.state.tasks[0]!.status).toBe('open');
   expect(native.launches).toHaveLength(0);
+});
+
+test('restoring a workspace keeps every Copilot action disabled until the old code target settles', async ({ page, native }) => {
+  codeTask(native);
+  await page.goto('/');
+  await persisted(page);
+  const backupId = crypto.randomUUID();
+  native.backups.set(backupId, structuredClone(native.saved));
+  await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  const held = native.holdCode = gate();
+  try {
+    await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+    await expect(panel.getByRole('status')).toContainText('Reading pinned code');
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.getByRole('button', { name: 'Backups & recovery', exact: true }).click();
+    await page.getByRole('combobox', { name: 'Saved backup', exact: true }).selectOption(backupId);
+    await page.getByLabel('I exported pending edits and results.', { exact: false }).check();
+    await page.getByRole('button', { name: 'Restore selected backup', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect.poll(() => native.requests.some(request => request.op === 'cancel')).toBe(true);
+    await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+    await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
+    for (const name of ['Run now', 'Run assessor', 'Run prioritizer', 'Review PR']) {
+      await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+    }
+    await expect(panel.getByRole('status')).toContainText('Waiting for the previous code job');
+    await page.getByLabel('Task notes', { exact: true }).fill('Editable during old request cleanup');
+    await persisted(page);
+    expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+    expect(native.codeRuns.entries).toHaveLength(0);
+  } finally {
+    held.release();
+    native.holdCode = undefined;
+  }
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  await expect.poll(() => native.codeRuns.entries.some(run => run.quarantined)).toBe(true);
+  await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
+  await expect(panel).toContainText('Partial inspection saved');
+  expect(native.requests.filter(request => request.op === 'work.reviewCode')).toHaveLength(2);
+  expect(native.state.tasks[0]!.notes).toBe('Editable during old request cleanup');
 });
 
 test('implementation result save failure retries without model replay and prior-workspace results remain separate', async ({ page, native }) => {

@@ -7,7 +7,7 @@ import { createNativePlatform, snapshotSchema } from '../platform/native.ts';
 import { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import { CodeRunResult } from './CodeSessionPanel.tsx';
 
-test('empty PR findings always render service-owned conclusion and partial coverage; Markdown never loads images', async () => {
+test('empty PR findings render service-owned conclusions and distinguish zero coverage from actual inspection', async () => {
   const now = new Date().toISOString(), state = emptyWorkspace(now,'UTC');
   const controller = new DesktopWorkspace(createNativePlatform(async command => {
     if (command === 'workspace_read') return {
@@ -29,7 +29,14 @@ test('empty PR findings always render service-owned conclusion and partial cover
     const html = renderToStaticMarkup(<CodeRunResult run={run} controller={controller} />);
     expect(html).toContain(inspected ? 'Partial code inspection only. This is not an approval to merge.'
       : 'No source-code lines were inspected. No code review or approval was completed.');
-    expect(html).toContain('Partial coverage: bounded, selective inspection, not a comprehensive review.');
+    if (inspected) {
+      expect(html).toContain('Partial coverage: bounded, selective inspection, not a comprehensive review.');
+      expect(html).not.toContain('No code coverage obtained.');
+    } else {
+      expect(html).toContain('No code coverage obtained.');
+      expect(html).not.toContain('Partial coverage: bounded, selective inspection');
+    }
+    expect(html).toContain('Coverage limits');
     expect(html).toContain('No grounded findings returned. This is not approval');
     expect(html).not.toContain('<img');
   }

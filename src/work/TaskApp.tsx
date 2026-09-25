@@ -259,12 +259,12 @@ export function TaskApp({ controller, queue, remote }: {
     </aside>
     <div className="task-workspace">
     {!settings && <header className="task-top"><h1>{filters ? 'Filters' : 'Ranked Tasks'}</h1>
-      <button className="primary" disabled={run.running || !!code.active} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
+      <button className="primary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
     </header>}
     {!settings && <div className="task-agent-actions">
       <div className="button-row">
-        <button className="secondary" disabled={run.running || !!code.active} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
-        <button className="secondary" disabled={run.running || !!code.active} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
+        <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
+        <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
       </div>
       <p className="field-help">Assessor saves new judgments without changing order. Prioritizer orders all eligible tasks from current saved assessments. Neither collects sources.</p>
     </div>}
