@@ -19,6 +19,7 @@ import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
 import { TaskAssessmentHistory } from './AssessmentHistory.tsx';
+import { CodeSessionPanel } from './CodeSessionPanel.tsx';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -91,7 +92,7 @@ function TaskDetail({ task, reason, queue, controller, remote, close }: {
   const thread = threads[0];
   const parsed = referenceSchema.safeParse(task.work?.notification?.reference ?? (thread && {
     repo: thread.repo, kind: thread.kind, number: thread.number,
-  }) ?? (match && {
+  }) ?? task.work?.reference ?? (match && {
     repo: match[1], kind: match[2] === 'issues' ? 'issue' : 'pr', number: Number(match[3]),
   }));
   const reference = parsed.success ? parsed.data : null;
@@ -120,6 +121,7 @@ function TaskDetail({ task, reason, queue, controller, remote, close }: {
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
     <TaskAssessmentHistory key={task.id} task={task} controller={controller} />
+    <CodeSessionPanel key={`${controller.state.activeWorkProfile.id}:${task.id}`} task={task} controller={controller} sessions={queue.code} workBusy={status.running} />
     <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
       onChange={event => run(() => queue.edit(task.id, task.title, event.target.value))} /></label>
     <p className="field-help">Task notes inform Copilot's ranking.</p>
@@ -159,6 +161,7 @@ export function TaskApp({ controller, queue, remote }: {
 }) {
   const saved = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
   const run = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
+  const code = useSyncExternalStore(queue.code.subscribe, queue.code.getSnapshot);
   const network = useSyncExternalStore(remote.subscribe, remote.getSnapshot);
   const [capture, setCapture] = useState(false);
   const [newProfile, setNewProfile] = useState(false);
@@ -170,7 +173,10 @@ export function TaskApp({ controller, queue, remote }: {
   const [selection, setSelection] = useState<string | null>(null);
   const [view, setView] = useState<'tasks' | 'done' | 'waiting'>('tasks');
   const invoke = (operation: () => Promise<unknown>) => { void operation().catch(error => controller.report(error)); };
-  useEffect(() => { invoke(async () => { await controller.load(); if (controller.getSnapshot().workspace) await queue.tick(); }); }, [controller, queue]);
+  useEffect(() => { invoke(async () => {
+    await controller.load();
+    if (controller.getSnapshot().workspace) { await queue.code.initialize(); await queue.tick(); }
+  }); }, [controller, queue]);
   useEffect(() => {
     if (window.location.hash === '#reference') window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }, []);
@@ -199,7 +205,7 @@ export function TaskApp({ controller, queue, remote }: {
   </main>;
   const state = saved.workspace.state;
   const runError = run.error || (run.running ? '' : state.work.lastError);
-  const error = saved.persistence.error || saved.assessmentError || saved.operationError || (settings ? runError : '');
+  const error = saved.persistence.error || saved.assessmentError || saved.codeError || saved.operationError || (settings ? runError : '');
   const runDetails = [...new Set([...run.warnings, ...runError.split('\n').filter(Boolean)])];
   const profileBusy = run.running || run.unsubscribing.length > 0;
   const ranked = rankedTasks(state);
@@ -253,12 +259,12 @@ export function TaskApp({ controller, queue, remote }: {
     </aside>
     <div className="task-workspace">
     {!settings && <header className="task-top"><h1>{filters ? 'Filters' : 'Ranked Tasks'}</h1>
-      <button className="primary" disabled={run.running} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
+      <button className="primary" disabled={run.running || !!code.active} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
     </header>}
     {!settings && <div className="task-agent-actions">
       <div className="button-row">
-        <button className="secondary" disabled={run.running} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
-        <button className="secondary" disabled={run.running} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
+        <button className="secondary" disabled={run.running || !!code.active} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
+        <button className="secondary" disabled={run.running || !!code.active} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
       </div>
       <p className="field-help">Assessor saves new judgments without changing order. Prioritizer orders all eligible tasks from current saved assessments. Neither collects sources.</p>
     </div>}
@@ -339,7 +345,7 @@ export function TaskApp({ controller, queue, remote }: {
       </div>
     </>}
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved'
-      : saved.assessmentPending.length ? 'Task edits saved; assessments pending' : 'Saved on this Mac'}</span>
+      : saved.codePending.length ? 'Task edits saved; code results pending' : saved.assessmentPending.length ? 'Task edits saved; assessments pending' : 'Saved on this Mac'}</span>
       {run.progress && <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span>}
       <span>{run.running ? 'Agent run in progress; local edits remain available' : `Last successful collection run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     </div>

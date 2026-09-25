@@ -19,10 +19,12 @@ const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(150);
 const WORK_TIMEOUT: Duration = Duration::from_secs(330);
-type Pending = Arc<Mutex<HashMap<String, SyncSender<Result<Value>>>>>;
+type Pending = Arc<Mutex<HashMap<String, (SyncSender<Result<Value>>, bool)>>>;
 
 fn request_timeout(op: &str) -> Duration {
-    if matches!(op, "work.collect" | "work.assess" | "work.rank") {
+    if op == "work.reviewCode" {
+        Duration::from_secs(240)
+    } else if matches!(op, "work.collect" | "work.assess" | "work.rank") {
         WORK_TIMEOUT
     } else {
         TIMEOUT
@@ -78,6 +80,7 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
                 | "work.collect"
                 | "work.assess"
                 | "work.rank"
+                | "work.reviewCode"
                 | "work.connections"
                 | "work.intake"
                 | "work.ackIntake"
@@ -90,6 +93,10 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
         serde_json::from_value::<crate::conversation::ConversationInput>(request["input"].clone())
             .map_err(|_| NativeError::invalid())?
             .validate()?;
+    }
+    if op == "work.reviewCode" {
+        serde_json::from_value::<crate::code_result::Input>(request["input"].clone())
+            .map_err(|_| NativeError::invalid())?.validate()?;
     }
     Ok((id, op))
 }
@@ -166,6 +173,7 @@ impl ServiceHost {
             current.as_ref().unwrap().clone()
         };
         let (sender, receiver) = mpsc::sync_channel(1);
+        let code_cancel;
         {
             let mut pending = process.pending.lock().map_err(|_| protocol_error())?;
             if process.stopped.load(Ordering::SeqCst) {
@@ -178,7 +186,9 @@ impl ServiceHost {
             if pending.len() >= limit || pending.contains_key(id) {
                 return Err(failure("service-busy", "The service is already handling the maximum number of requests. Retry after one finishes."));
             }
-            pending.insert(id.to_owned(), sender);
+            code_cancel = op == "cancel" && request["input"]["requestId"].as_str()
+                .and_then(|id| pending.get(id)).is_some_and(|(_, code)| *code);
+            pending.insert(id.to_owned(), (sender, op == "work.reviewCode"));
         }
         if process.input.try_send(bytes).is_err() {
             process
@@ -200,7 +210,7 @@ impl ServiceHost {
                     );
                 let cancelled =
                     op == "cancel" && result["ok"] == true && result["result"]["cancelled"] == true;
-                if terminal || cancelled {
+                if (terminal && op != "work.reviewCode") || (cancelled && !code_cancel) {
                     process.shutdown(failure("service-interrupted", "The service interrupted this request before confirmation. A GitHub write may have completed; check GitHub or retry explicitly. Pending local work is retained."));
                 }
                 Ok(result)
@@ -298,7 +308,7 @@ impl ServiceProcess {
                         frame.clear();
                         let result = response.and_then(|value| {
                             let id = validate_response(&value)?;
-                            let sender = reader
+                            let (sender, _) = reader
                                 .pending
                                 .lock()
                                 .map_err(|_| protocol_error())?
@@ -352,7 +362,7 @@ impl ServiceProcess {
             return;
         }
         if let Ok(mut pending) = self.pending.lock() {
-            for (_, sender) in pending.drain() {
+            for (_, (sender, _)) in pending.drain() {
                 let _ = sender.try_send(Err(error.clone()));
             }
         }
@@ -389,6 +399,7 @@ mod tests {
 
     #[test]
     fn work_timeouts_leave_room_for_collection_and_model_cleanup() {
+        assert_eq!(request_timeout("work.reviewCode"), Duration::from_secs(240));
         for op in ["work.collect", "work.assess", "work.rank"] {
             assert_eq!(request_timeout(op), Duration::from_secs(330));
         }
@@ -806,6 +817,30 @@ mod tests {
             peer.join().unwrap().unwrap()["result"]["status"],
             "confirmed"
         );
+        host.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn code_cancel_ack_waits_for_target_cleanup_and_keeps_peer_service_available() {
+        let (_directory, host) = fixture("read request\ntouch code-ready\nread request\nprintf '%s\\n' '{\"v\":1,\"id\":\"cancel-code\",\"ok\":true,\"result\":{\"requestId\":\"code\",\"cancelled\":true}}'\n/bin/sleep 0.1\nprintf '%s\\n' '{\"v\":1,\"id\":\"code\",\"ok\":false,\"error\":{\"code\":\"cancelled\",\"message\":\"Read-only job cancelled\",\"retryable\":false}}'\nread request\nprintf '%s\\n' '{\"v\":1,\"id\":\"peer\",\"ok\":true,\"result\":{}}'\nread request");
+        let input = json!({"taskId":"task","source":{"repo":"octo/project","number":48,"kind":"pr"},"job":"pr-review",
+            "agent":{"id":"reviewer","instructions":"","model":""}});
+        let mut invalid = input.clone();
+        invalid["job"] = json!("implementation-assessment");
+        assert!(validate_request(&json!({"v":1,"id":"bad","op":"work.reviewCode","input":invalid})).is_err());
+        let target_host = host.clone();
+        let target = std::thread::spawn(move || target_host.request(json!({"v":1,"id":"code","op":"work.reviewCode","input":input})));
+        wait_file(&host,"code-ready");
+        let process = host.process.lock().unwrap().as_ref().unwrap().clone();
+        let ack = host.request(json!({"v":1,"id":"cancel-code","op":"cancel","input":{"requestId":"code"}})).unwrap();
+        assert_eq!(ack["result"]["cancelled"],true);
+        assert!(!process.stopped.load(Ordering::SeqCst));
+        assert!(!target.is_finished());
+        assert_eq!(target.join().unwrap().unwrap()["error"]["code"],"cancelled");
+        assert!(!process.stopped.load(Ordering::SeqCst));
+        host.request(json!({"v":1,"id":"peer","op":"work.intake","input":{}})).unwrap();
+        assert_eq!(host.process.lock().unwrap().as_ref().unwrap().pid,process.pid);
         host.shutdown();
     }
 

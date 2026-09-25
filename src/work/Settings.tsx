@@ -4,6 +4,15 @@ import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSet
 import type { WorkQueue } from './controller.ts';
 import { Appearance } from '../themes/Appearance.tsx';
 import { taskAgents, taskAgentJobs, type TaskAgent } from '../../service/src/work-agents.ts';
+import { codeAgents, codeAgentJobs } from '../../service/src/code-agents.ts';
+
+const agentJobs = { ...taskAgentJobs, ...codeAgentJobs };
+const agentLabels = {
+  'task-assessment': ['assessment-instructions', 'How should tasks be assessed?'],
+  'task-prioritization': ['priority-instructions', 'What should come first?'],
+  'implementation-assessment': ['implementation-instructions', 'How should implementation be assessed?'],
+  'pr-review': ['review-instructions', 'What should a PR review focus on?'],
+} as const;
 
 const slackReadTools = ['slack_search_public_and_private', 'slack_read_thread'] as const;
 
@@ -24,8 +33,11 @@ export function Settings({ settings, profileName, queue, close, recover }: {
   const [checking, setChecking] = useState(false);
   const [connectionInfo, setConnectionInfo] = useState('');
   function change(next: WorkSettings) { setDraft(next); setSaved(false); setError(''); }
-  function agentChange(id: string, patch: Partial<Pick<TaskAgent, 'name' | 'instructions' | 'model'>>) {
-    change({ ...draft, agents: taskAgents(draft).map(agent => agent.id === id ? { ...agent, ...patch } : agent) });
+  function agentChange(job: keyof typeof agentJobs, patch: Partial<Pick<TaskAgent, 'name' | 'instructions' | 'model'>>) {
+    change({
+      ...draft, agents: taskAgents(draft).map(agent => agent.jobType === job ? { ...agent, ...patch } : agent),
+      codeAgents: codeAgents(draft).map(agent => agent.jobType === job ? { ...agent, ...patch } : agent),
+    });
   }
   function streamChange(id: string, patch: Partial<Workstream>) {
     change({ ...draft, streams: draft.streams.map(stream => stream.id === id ? { ...stream, ...patch } : stream) });
@@ -66,24 +78,25 @@ export function Settings({ settings, profileName, queue, close, recover }: {
         <p>Agents, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
       </section>
       <section aria-labelledby="agents-heading"><h2 id="agents-heading">Task agents</h2>
-        <p>One agent assesses tasks; the other orders the whole eligible list. Instructions guide judgment, not permissions.</p>
-        {taskAgents(draft).map(agent => <fieldset className="task-agent" key={agent.id}>
-          <legend>{taskAgentJobs[agent.jobType].name}</legend>
-          <p className="field-help">{taskAgentJobs[agent.jobType].capability} Result: {taskAgentJobs[agent.jobType].resultFormat}.</p>
+        <p>The assessor and prioritizer run on your task list. Code agents run only from a single task's details. Instructions guide judgment, not permissions.</p>
+        {[...taskAgents(draft), ...codeAgents(draft)].map(agent => <fieldset className="task-agent" key={agent.jobType}>
+          <legend>{agentJobs[agent.jobType].name}</legend>
+          <p className="field-help">{agentJobs[agent.jobType].capability} Result: {agentJobs[agent.jobType].resultFormat}.</p>
           <div className="task-field-pair">
             <label>Agent name<input value={agent.name} maxLength={100} required
-              onChange={event => agentChange(agent.id, { name: event.target.value })} /></label>
+              onChange={event => agentChange(agent.jobType, { name: event.target.value })} /></label>
             <label>Agent model (optional)<input value={agent.model} maxLength={100} placeholder="Use the SDK default"
-              onChange={event => agentChange(agent.id, { model: event.target.value })} /></label>
+              onChange={event => agentChange(agent.jobType, { model: event.target.value })} /></label>
           </div>
-          <label htmlFor={agent.jobType === 'task-assessment' ? 'assessment-instructions' : 'priority-instructions'}>
-            {agent.jobType === 'task-assessment' ? 'How should tasks be assessed?' : 'What should come first?'}
+          <label htmlFor={agentLabels[agent.jobType][0]}>
+            {agentLabels[agent.jobType][1]}
           </label>
-          <textarea id={agent.jobType === 'task-assessment' ? 'assessment-instructions' : 'priority-instructions'}
+          <textarea id={agentLabels[agent.jobType][0]}
             rows={5} maxLength={16000} value={agent.instructions}
-            onChange={event => agentChange(agent.id, { instructions: event.target.value })} />
+            onChange={event => agentChange(agent.jobType, { instructions: event.target.value })} />
         </fieldset>)}
         <p className="field-help">The assessor receives task titles, task notes and source evidence. The prioritizer receives saved assessments. Saved thread notes stay private. Editing either agent keeps previous results readable.</p>
+        <p className="field-help">Code agents receive only the GitHub issue or PR and bounded, pinned code. Task notes and saved thread notes are excluded. No code agent runs on a schedule or submits changes to GitHub.</p>
       </section>
       <section aria-labelledby="sources-heading"><div className="task-section-heading"><h2 id="sources-heading">Sources of work</h2>
         <button type="button" className="secondary" disabled={draft.streams.length >= 30} onClick={() => change({

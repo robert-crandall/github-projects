@@ -3,6 +3,7 @@ import { Download, RefreshCw } from 'lucide-react';
 import { Modal } from '../Modal.tsx';
 import type { DesktopWorkspace } from './desktop-workspace.ts';
 import { downloadBackup } from '../storage.ts';
+import type { CodeRunPage } from '../../service/src/code-runs.ts';
 
 export function RecoveryPanel({ controller, close }: { controller: DesktopWorkspace; close: () => void }) {
   const [backups, setBackups] = useState<{ id: string; createdAt: string }[]>([]);
@@ -11,6 +12,7 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
   const [notice, setNotice] = useState('');
   const [pending, setPending] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [quarantine, setQuarantine] = useState<CodeRunPage>();
   async function run(operation: () => Promise<void>) {
     setPending(true); setError('');
     try { await operation(); }
@@ -27,16 +29,38 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
       {(controller.getSnapshot().assessmentPending.length > 0 || controller.getSnapshot().assessmentQuarantined.length > 0) && <button className="secondary" onClick={() => {
         downloadBackup(controller.pendingAssessmentsJson(), 'github-projects-pending-assessments.json');
       }}>Export pending assessments</button>}
+      {controller.getSnapshot().codePending.length > 0 && <button className="secondary" onClick={() => void run(async () => {
+        downloadBackup(controller.pendingCodeJson(), 'github-projects-pending-code.json');
+      })}>Export pending code results</button>}
       <button className="secondary" disabled={pending} onClick={() => void run(async () => {
         const result = await controller.platform.exportRaw();
         setNotice(`Original database files preserved locally: ${result.directory}`);
       })}>Preserve database files</button>
     </div>
+    <details><summary>Code results from previous workspaces</summary>
+      <p>Late results stay quarantined under their original workspace generation. They never attach to restored tasks.</p>
+      {controller.getSnapshot().codePending.filter(value => value.workspaceGeneration !== controller.assessmentGeneration).map(value =>
+        <div key={value.intent.runId}><p>Unsaved previous-workspace result: {value.intent.agentName} - {value.intent.startedAt}</p>
+          <button className="secondary" onClick={() => void run(async () => { await controller.retryCodeRun(value.intent.runId); })}>Retry quarantine save</button>
+          <button className="secondary" onClick={() => downloadBackup(JSON.stringify(value), 'previous-workspace-code.json')}>Export this result</button>
+        </div>)}
+      <button className="secondary" disabled={pending} onClick={() => void run(async () => {
+        setQuarantine(await controller.platform.codeRunRead('quarantine', 'quarantine', null, true));
+      })}>Read quarantined code results</button>
+      {quarantine?.runs.map(value => <div key={`${value.generation}:${value.intent.runId}`}>
+        <p>{value.intent.agentName} - {value.intent.startedAt} - {value.outcome.status}</p>
+        <button className="secondary" onClick={() => downloadBackup(JSON.stringify(value), 'previous-workspace-code.json')}>Export quarantined result</button>
+      </div>)}
+      {quarantine && !quarantine.runs.length && <p>No saved quarantined results.</p>}
+      {quarantine?.before && <button className="secondary" disabled={pending} onClick={() => void run(async () => {
+        setQuarantine(await controller.platform.codeRunRead('quarantine', 'quarantine', quarantine.before, true));
+      })}>Older quarantined results</button>}
+    </details>
     <label>Saved backup<select value={selected} onChange={event => { setSelected(event.target.value); setConfirm(false); }}>
       <option value="">Choose a backup</option>{backups.map(backup => <option key={backup.id} value={backup.id}>{backup.createdAt} · {backup.id === 'latest' ? 'Previous save' : backup.id}</option>)}
     </select></label>
     {!backups.length && <p className="muted">No backup is available. Preserve the original database files before further repair.</p>}
-    <label className="checkbox-label"><input type="checkbox" checked={confirm} onChange={event => setConfirm(event.target.checked)} />I exported pending edits and assessments. Replace this workspace and its assessment history with the selected backup.</label>
+    <label className="checkbox-label"><input type="checkbox" checked={confirm} onChange={event => setConfirm(event.target.checked)} />I exported pending edits and results. Replace this workspace and its assessment and code history with the selected backup.</label>
     {notice && <p className="notice-inline" role="status">{notice}</p>}
     {error && <p className="inline-error" role="alert">{error}</p>}
     <footer className="modal-footer"><button className="secondary" onClick={close}>Cancel</button><button className="primary" disabled={pending || !selected || !confirm} onClick={() => void run(async () => {

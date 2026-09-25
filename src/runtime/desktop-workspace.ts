@@ -6,6 +6,7 @@ import { nativePlatform, snapshotSchema } from '../platform/native.ts';
 import { PersistenceQueue, type PersistenceStatus } from './persistence.ts';
 import { savedAssessmentSchema, type SavedAssessment, type TaskAssessment } from '../../service/src/work-assessment.ts';
 import { validateWorkProfiles } from '../work/profiles.ts';
+import { codeRunSchema, terminalCodeRun, type CodeRun, type CodeRunIntent, type CodeRunOutcome } from '../../service/src/code-runs.ts';
 
 export const desktopEnvelopeSchema = z.object({
   version: z.literal(1), state: stateSchema, scroll: z.record(z.string(), z.number().nonnegative()),
@@ -13,11 +14,13 @@ export const desktopEnvelopeSchema = z.object({
 export type DesktopEnvelope = z.infer<typeof desktopEnvelopeSchema>;
 export type Platform = typeof nativePlatform;
 export type QuarantinedAssessment = { workspaceGeneration: number; sourceRevision: string; assessment: SavedAssessment };
+export type PendingCodeRun = { generation: string; workspaceGeneration: number; intent: CodeRunIntent; outcome: CodeRunOutcome };
 export type DesktopStatus = {
   workspace: DesktopEnvelope | null; loading: boolean; loadError: string; operationError: string;
   persistence: PersistenceStatus; feedback: string;
   assessmentPending: SavedAssessment[]; assessmentError: string; assessmentSaving: boolean; assessmentRevision: number;
   assessmentQuarantined: QuarantinedAssessment[];
+  codePending: PendingCodeRun[]; codeSaving: string[]; codeError: string; codeRevision: number;
 };
 const message = (error: unknown) => error instanceof Error ? error.message : 'The operation failed without a recognized response.';
 const assessmentResult = ({ sequence: _, ...value }: TaskAssessment) => savedAssessmentSchema.parse(value);
@@ -31,11 +34,13 @@ export class DesktopWorkspace {
   private workspaceOrigins = new Map<number, string>();
   private recovering = false;
   get assessmentGeneration(): number { return this.workspaceGeneration; }
+  get isRecovering(): boolean { return this.recovering; }
   private status: DesktopStatus = {
     workspace: null, loading: true, loadError: '', operationError: '', feedback: '',
     persistence: { saving: false, pending: false, error: '' },
     assessmentPending: [], assessmentError: '', assessmentSaving: false, assessmentRevision: 0,
     assessmentQuarantined: [],
+    codePending: [], codeSaving: [], codeError: '', codeRevision: 0,
   };
 
   constructor(readonly platform: Platform = nativePlatform) {}
@@ -113,6 +118,40 @@ export class DesktopWorkspace {
   async flush(): Promise<void> {
     if (!this.queue) throw new Error('The desktop workspace has not loaded.');
     await this.queue.flush();
+  }
+  async saveCodeRun(value: PendingCodeRun): Promise<CodeRun> {
+    if (!terminalCodeRun(value.outcome)) throw new Error('Only terminal results use the pending save queue.');
+    const id = value.intent.runId;
+    const existing = this.status.codePending.find(item => item.intent.runId === id);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(value)) throw new Error('A pending code result cannot be overwritten.');
+    if (!existing) this.publish({ codePending: [...this.status.codePending, value], codeRevision: this.status.codeRevision + 1 });
+    return this.retryCodeRun(id);
+  }
+  async retryCodeRun(id: string): Promise<CodeRun> {
+    const pending = this.status.codePending.find(item => item.intent.runId === id);
+    if (!pending) throw new Error('No pending result exists for this run.');
+    if (this.status.codeSaving.includes(id)) throw new Error('This code result is already being saved.');
+    this.publish({ codeSaving: [...this.status.codeSaving, id], codeError: '' });
+    try {
+      const saved = codeRunSchema.parse(await this.platform.codeRunUpdate(pending.generation, pending.intent, pending.outcome));
+      if (saved.generation !== pending.generation || JSON.stringify(saved.intent) !== JSON.stringify(pending.intent)
+        || JSON.stringify(saved.outcome) !== JSON.stringify(pending.outcome)) {
+        throw new Error('The saved code result did not match its pending result.');
+      }
+      this.publish({
+        codePending: this.status.codePending.filter(item => item.intent.runId !== id),
+        codeRevision: this.status.codeRevision + 1,
+      });
+      return saved;
+    } catch (error) {
+      this.publish({ codeError: `Code history is not saved. ${message(error)} Retry saving or export the result; task edits and new runs remain available.` });
+      throw error;
+    } finally { this.publish({ codeSaving: this.status.codeSaving.filter(value => value !== id) }); }
+  }
+  pendingCodeJson(): string {
+    const result = JSON.stringify({ pendingCodeRuns: this.status.codePending });
+    if (new TextEncoder().encode(result).length > 64 * 1024 * 1024) throw new Error('Pending code export exceeds 64 MiB. Export results individually.');
+    return result;
   }
   async saveAssessments(profileId: string, values: SavedAssessment[], generation = this.workspaceGeneration): Promise<void> {
     if (values.some(value => value.profileId !== profileId)) throw new Error('Assessment profile does not match its result.');
@@ -211,6 +250,7 @@ export class DesktopWorkspace {
         workspaceGeneration: generation, sourceRevision: this.workspaceOrigins.get(generation), assessments: [...pending.values()],
       },
       quarantinedAssessments: this.status.assessmentQuarantined,
+      pendingCodeRuns: this.status.codePending,
     });
     if (new TextEncoder().encode(result).length > 64 * 1024 * 1024) throw new Error('Combined JSON export exceeds 64 MiB. Preserve database files and export pending results separately.');
     return result;

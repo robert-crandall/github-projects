@@ -2,6 +2,8 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { assessmentAppendSchema, assessmentPageSchema, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { z } from 'zod';
 import { conversationCacheSchema, conversationPageSchema, referenceSchema, type ConversationPage, type Reference } from '../../service/src/schema.ts';
+import { codeRunContextSchema, codeRunIntentSchema, codeRunOutcomeSchema, codeRunPageSchema, codeRunSchema,
+  type CodeRunIntent, type CodeRunOutcome } from '../../service/src/code-runs.ts';
 
 const instant = z.iso.datetime({ offset: true });
 const revision = z.uuid();
@@ -76,6 +78,7 @@ export type NativeCommand =
   | 'workspace_create_backup' | 'workspace_list_backups' | 'workspace_read_backup'
   | 'workspace_export_json' | 'workspace_export_raw' | 'workspace_recover'
   | 'assessment_append' | 'assessment_read'
+  | 'code_run_context' | 'code_run_start' | 'code_run_update' | 'code_run_read'
   | 'launch_github' | 'launch_copilot' | 'launch_web_url' | 'clock_now'
   | 'conversation_read' | 'conversation_merge' | 'conversation_reset';
 export type NativeTransport = (command: NativeCommand, args?: Record<string, unknown>) => Promise<unknown>;
@@ -131,6 +134,25 @@ export function createNativePlatform(transport: NativeTransport = desktopTranspo
   }
   return {
     workspaceRead: () => call('workspace_read', workspaceReadSchema),
+    codeRunContext: () => call('code_run_context', codeRunContextSchema),
+    codeRunStart: (generation: string, intent: CodeRunIntent) => call('code_run_start', codeRunSchema, {
+      generation: parse(revision, generation), intent: parse(codeRunIntentSchema, intent),
+    }),
+    codeRunUpdate: (generation: string, intent: CodeRunIntent, outcome: CodeRunOutcome) => {
+      const args = {
+        generation: parse(revision, generation), intent: parse(codeRunIntentSchema, intent),
+        outcome: parse(codeRunOutcomeSchema, outcome),
+      };
+      if (new TextEncoder().encode(JSON.stringify(args)).length > 1_048_576) {
+        throw new NativePlatformError({ code: 'code-run-limit', message: 'The code result exceeds the 1 MiB history limit. Export the pending result.', retryable: false });
+      }
+      return call('code_run_update', codeRunSchema, args);
+    },
+    codeRunRead: (profileId: string, taskId: string, before: number | null = null, quarantined = false) =>
+      call('code_run_read', codeRunPageSchema, {
+        profileId: parse(identifier, profileId), taskId: parse(z.string().min(1).max(500), taskId),
+        before: parse(z.number().int().positive().safe().nullable(), before), quarantined,
+      }),
     assessmentAppend: (profileId: string, assessments: SavedAssessment[]) =>
       call('assessment_append', assessmentAppendSchema, {
         profileId: parse(identifier, profileId), assessments: parse(workAssessOutputSchema, { assessments }).assessments,

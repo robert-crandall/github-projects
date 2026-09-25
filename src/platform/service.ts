@@ -8,13 +8,17 @@ export type ServiceInput<O extends ServiceOperation> = Extract<Request, { op: O 
 export type ServiceOutput<O extends ServiceOperation> = z.infer<(typeof resultSchemas)[O]>;
 export type ServiceTransport = (request: Request) => Promise<unknown>;
 
+export class ServiceCallError extends Error {
+  constructor(readonly code: string, message: string) { super(message); this.name = 'ServiceCallError'; }
+}
+
 export class ServiceClient {
   constructor(private readonly transport: ServiceTransport = async request => {
     if (!isDesktop()) throw new Error('Live GitHub and Copilot operations require the desktop app.');
     return invoke('service_request', { request });
   }) {}
 
-  async call<O extends ServiceOperation>(op: O, input: ServiceInput<O>, id = crypto.randomUUID()): Promise<ServiceOutput<O>> {
+  async call<O extends ServiceOperation>(op: O, input: ServiceInput<O>, id: string = crypto.randomUUID()): Promise<ServiceOutput<O>> {
     const request = requestSchema.safeParse({ v: 1, id, op, input });
     if (!request.success) throw new Error('The selected input exceeds the supported service format or limits. No request was sent.');
     let reply: unknown;
@@ -22,7 +26,8 @@ export class ServiceClient {
     catch (error) {
       if (error instanceof Error) throw error;
       const native = nativeErrorSchema.safeParse(error);
-      throw new Error(native.success ? native.data.message : 'The native service failed without confirming an outcome.');
+      throw new ServiceCallError(native.success ? native.data.code : 'native-unavailable',
+        native.success ? native.data.message : 'The native service failed without confirming an outcome.');
     }
     if (typeof reply !== 'object' || reply === null || Array.isArray(reply)) throw new Error('The service returned an invalid response.');
     const envelope = reply as Record<string, unknown>;
@@ -32,7 +37,7 @@ export class ServiceClient {
     if (!envelope.ok) {
       const error = errorSchema.safeParse(envelope.error);
       if (!error.success || 'result' in envelope) throw new Error('The service returned an unsupported error response.');
-      throw new Error(error.data.message);
+      throw new ServiceCallError(error.data.code, error.data.message);
     }
     if ('error' in envelope) throw new Error('The service returned an unsupported result.');
     const result = resultSchemas[op].safeParse(envelope.result);

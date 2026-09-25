@@ -25,6 +25,8 @@ Settings is a full settings page, not a large modal. Separate appearance, instru
 
 Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings, each with a name, model and instructions. Put their separate run actions near Run now with the role distinction visible. Assessment ratings stay in the compact task-details definition list and history selector, not a dashboard or card grid.
 
+Implementation assessor and PR reviewer use the same Settings fieldset language. Their actions live only in task details beside compact progress/cancel/result/history controls. Show the service-owned PR conclusion and partial coverage even with no findings. Keep revision/configuration detail in a disclosure and code evidence behind explicit links. Results never displace editing, Done or navigation.
+
 Do not retain a second workspace or disabled placeholders for the retired Inbox, Filtered, Archive or Tasks destinations. Saved conversations and private thread notes appear alongside matching tasks.
 
 ## Palette and type

@@ -3,17 +3,8 @@ import { z } from 'zod';
 import { checkAbort, ServiceError } from './errors.ts';
 import { parse, requireStatus, type ApiResponse, type GitHubApi } from './github.ts';
 import { referenceSchema, repoSchema, type Reference } from './schema.ts';
-
-export const CODE_LIMITS = {
-  requests: 40, toolCalls: 24, responseBytes: 2_097_152, readBytes: 8_388_608,
-  contextBytes: 180_000, fileBytes: 131_072, lines: 200, treeEntries: 4000,
-  changedFiles: 100, patchBytes: 60_000, sourceBytes: 32_000, milliseconds: 180_000,
-} as const;
-export const shaSchema = z.string().regex(/^[a-f0-9]{40}$/);
-export const codePathSchema = z.string().min(1).max(1024).refine(path =>
-  !/[\x00-\x1f\x7f\\%?#:]/.test(path)
-  && path.split('/').every(part => part !== '' && part !== '.' && part !== '..'),
-'Use a literal repository-relative path.');
+import { CODE_LIMITS, shaSchema, codePathSchema } from './code-review-schema.ts';
+export { CODE_LIMITS, shaSchema, codePathSchema } from './code-review-schema.ts';
 const branchSchema = z.string().min(1).max(250).refine(branch =>
   !/[\x00-\x20\x7f\\%?#:~^*[\]]/.test(branch)
   && branch.split('/').every(part => part !== '' && part !== '.' && part !== '..'));

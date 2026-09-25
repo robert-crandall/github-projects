@@ -12,6 +12,7 @@ import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profi
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import { assessmentFreshness } from './assessments.ts';
+import { CodeSessions } from './code-sessions.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type CollectionProgress = {
@@ -35,6 +36,7 @@ function sourceSettings(settings: WorkSettings): string {
 }
 
 export class WorkQueue {
+  readonly code: CodeSessions;
   private listeners = new Set<() => void>();
   private active?: Promise<void>;
   private status: WorkQueueSnapshot;
@@ -44,6 +46,7 @@ export class WorkQueue {
       running: false, phase: 'idle', error: controller.getSnapshot().workspace?.state.work?.lastError ?? '', warnings: [],
       unsubscribing: [], progress: null,
     };
+    this.code = new CodeSessions(controller, service, () => this.status.running);
   }
 
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -170,7 +173,7 @@ export class WorkQueue {
   runAssessor(): Promise<void> { return this.start(new Date(), 'assess'); }
   runPrioritizer(): Promise<void> { return this.start(new Date(), 'prioritize'); }
   async tick(now = new Date()): Promise<void> {
-    if (this.status.running) return;
+    if (this.status.running || this.code.busy) return;
     const work = this.controller.state.work ?? defaultWorkState();
     if (!work.settings.schedule.enabled) return;
     const boundary = Math.max(
@@ -183,6 +186,7 @@ export class WorkQueue {
 
   private start(now: Date, kind: RunKind = 'pipeline'): Promise<void> {
     if (this.status.running) return this.active ?? Promise.resolve();
+    if (this.code.busy) return Promise.reject(new Error('Wait for the code job before starting another Copilot run.'));
     const settings = structuredClone(this.controller.state.work.settings);
     this.publish({ running: true, phase: 'preparing', error: '', warnings: [], progress: {
       startedAt: Date.now(), finishedAt: null, kind,

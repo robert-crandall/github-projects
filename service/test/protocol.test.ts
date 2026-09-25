@@ -4,6 +4,15 @@ import { serve, type Handler } from '../src/protocol.ts';
 import { LIMITS } from '../src/schema.ts';
 import { ServiceError } from '../src/errors.ts';
 import { defaultWorkState } from '../src/work-schema.ts';
+import { codeReviewInputSchema } from '../src/code-review-schema.ts';
+import { codeResult } from '../../tests/code-run-fixture.ts';
+import { createHandler } from '../src/main.ts';
+import { CopilotService } from '../src/copilot.ts';
+
+const codeInput = codeReviewInputSchema.parse({
+  taskId: 'task', source: { repo: 'octo/project', kind: 'pr', number: 48 }, job: 'pr-review',
+  agent: { id: 'reviewer', instructions: '', model: '' },
+});
 
 const success = { github: { available: true, scopes: ['repo'], viewer: 'synthetic' }, copilot: { available: true } };
 const request = (id: string, op = 'connection.check', input: unknown = {}) => JSON.stringify({ v: 1, id, op, input }) + '\n';
@@ -31,6 +40,54 @@ test('retired waiting requests are rejected without invoking a handler', async (
   expect(replies).toContainEqual({ v: 1, id: 'current', ok: true, result: success });
 });
 
+test('public code RPC routes to the shared service with validated strict input and service-owned output', async () => {
+    const copilot = new CopilotService();
+    const review = spyOn(copilot, 'reviewCode').mockImplementation(async input => codeResult(input, false));
+    try {
+      const replies = await harness(async input => {
+        input.write(request('code', 'work.reviewCode', codeInput));
+        input.write(request('bad', 'work.reviewCode', { ...codeInput, notes: 'private' }));
+        input.write(request('mismatch', 'work.reviewCode', { ...codeInput, job: 'implementation-assessment' }));
+        await tick();
+      }, createHandler(undefined, copilot));
+      expect(review).toHaveBeenCalledTimes(1);
+      expect(review.mock.calls[0]![0]).toEqual(codeInput);
+      expect(replies.find(reply => reply.id === 'code')?.result).toMatchObject({
+        answer: { conclusion: { status: 'not-inspected', summary: 'No source-code lines were inspected. No code review or approval was completed.' } },
+        coverage: { status: 'partial' },
+      });
+      expect(replies.filter(reply => reply.ok === false)).toHaveLength(2);
+    } finally { review.mockRestore(); }
+  });
+
+  test('code cancellation waits for target cleanup and the result remains explicitly read-only', async () => {
+    let release!: () => void;
+    let aborted = false;
+    const cleanup = new Promise<void>(resolve => { release = resolve; });
+    const replies = await harness(async (input, replies) => {
+      input.write(request('code', 'work.reviewCode', codeInput));
+      await tick();
+      input.write(request('cancel-code', 'cancel', { requestId: 'code' }));
+      await tick();
+      expect(aborted).toBe(true);
+      expect(replies.some(reply => reply.id === 'code')).toBe(false);
+      release(); await tick();
+    }, async (_, signal) => {
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => { aborted = true; resolve(); }, { once: true }));
+      await cleanup;
+      throw new ServiceError('cancelled');
+    });
+    expect(replies.find(reply => reply.id === 'code')?.error).toMatchObject({ code: 'cancelled', message: expect.stringContaining('read-only') });
+  });
+
+  test('code RPC has its own bounded cleanup deadline without extending other operations', async () => {
+    const timer = spyOn(globalThis, 'setTimeout'), input = new PassThrough();
+    const task = serve(input, async () => {}, async () => codeResult(codeInput));
+    try {
+      input.write(request('code', 'work.reviewCode', codeInput)); await tick();
+      expect(timer.mock.calls.filter(call => call[1] === 210_000)).toHaveLength(1);
+    } finally { input.end(); await task; timer.mockRestore(); }
+  });
 test('split frames, validated output, strict input, and protocol-only stdout', async () => {
   const replies = await harness(async input => {
     const line = request('a');

@@ -22,11 +22,11 @@ The executable embeds Bun and the SDK JavaScript. It runs outside the repository
 
 The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was released against CLI 1.0.83. The packaged arm64 executable was exercised with the installed 1.0.84-1 CLI; packaged ranking also succeeded with Homebrew 1.0.84-6 under a GUI-like PATH. Newer/older CLIs must pass the SDK handshake; failures remain explicit. An experimental MCP-start scratch probe is not a compatibility verdict for normal SDK inference, and successful ranking does not establish Slack authentication. Live Slack verification was skipped after OAuth timed out; no authentication success is assumed. The x64 build command is provided, but this implementation's real authentication/inference smoke ran on arm64.
 
-## Code review backend (not exposed to the desktop)
+## Code review backend and saved task sessions
 
-**No production callers; #47 wires this backend into saved task sessions.** No RPC operation, native schema, configured agent role or UI control invokes this capability yet. Existing assessors and prioritizers still have no tools.
+The desktop exposes this capability only through explicit single-task actions and `work.reviewCode`. Its durable lifecycle is separate from task assessment/ranking history. Existing assessors and prioritizers still have no tools.
 
-Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another SDK client for each task. [`src/code-review.ts`](src/code-review.ts) exports `codeReviewInputSchema`, `CodeReviewInput`, `codeReviewResultSchema` and `CodeReviewResult`. The strict input contains only:
+Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another service instance for each task. [`src/code-review-schema.ts`](src/code-review-schema.ts) contains the browser-safe schemas/types, re-exported by [`src/code-review.ts`](src/code-review.ts). The strict input contains only:
 
 ```ts
 {
@@ -39,9 +39,9 @@ Call the existing `CopilotService` instance's `reviewCode(input, signal)` method
 
 `implementation-assessment` requires an issue; `pr-review` requires `kind: 'pr'`. An issue URL that actually identifies a PR returns `unsupported`; callers must select its canonical PR identity. Never include workspace notes, credentials or arbitrary URLs. Blank model means SDK default, not a claimed resolved model.
 
-The validated `code-review-v1` result includes a discriminated `answer`, the task ID, service-observed source text/fingerprint, source update/observation times, a final `verifiedAt`, requested model/instructions and a semantic configuration fingerprint. Implementation answers contain findings and a recommended `nextStep`; they require at least one successful code read and validated code evidence in that next step. Source-only answers, including those after all attempted reads failed, return `copilot_output` after the existing correction attempt, never a successful implementation assessment. No answer marks a task done or submits a GitHub review. SDK sessions remain ephemeral. The future caller owns durable run IDs, status, history and saving results, including partial results and their warnings.
+The validated `code-review-v1` result includes a discriminated `answer`, the task ID, service-observed source text/fingerprint, source update/observation times, a final `verifiedAt`, requested model/instructions and a semantic configuration fingerprint. Implementation answers contain findings and a recommended `nextStep`; they require at least one successful code read and validated code evidence in that next step. Source-only answers, including those after all attempted reads failed, return `copilot_output` after the existing correction attempt, never a successful implementation assessment. No answer marks a task done or submits a GitHub review. SDK sessions remain ephemeral. The desktop owns durable run IDs, status, history and saving results, including partial results and their warnings.
 
-PR answers contain only `job`, grounded `findings` and a **service-owned `conclusion: {status, summary}`**. The model's summary and uncertainty are not returned or persisted. With no successful code reads, the conclusion is `not-inspected`: "No source-code lines were inspected. No code review or approval was completed." With actual reads, it is `partial-no-approval`: "Partial code inspection only. This is not an approval to merge." These exact status/notice pairs are enforced by the result schema, including agreement with recorded read evidence. **#47 must persist and render this conclusion as the primary review outcome**, including the deterministic scope notice, alongside coverage and grounded findings. `not-inspected` is an incomplete inspection, not a completed code review. Empty findings after actual partial inspection remain valid, but never constitute approval.
+PR answers contain only `job`, grounded `findings` and a **service-owned `conclusion: {status, summary}`**. The model's summary and uncertainty are not returned or persisted. With no successful code reads, the conclusion is `not-inspected`: "No source-code lines were inspected. No code review or approval was completed." With actual reads, it is `partial-no-approval`: "Partial code inspection only. This is not an approval to merge." These exact status/notice pairs are enforced by the result schema, including agreement with recorded read evidence. The desktop persists and renders this conclusion as the primary review outcome, including the deterministic scope notice, alongside coverage and grounded findings. `not-inspected` is an incomplete inspection, not a completed code review. Empty findings after actual partial inspection remain valid, but never constitute approval.
 
 Issue code is pinned to the recorded default-branch commit. PR results record `source.head` (head repository/commit/tree), `source.baseTip` (observed base branch SHA) and `source.base` (the selected repository's **merge-base** commit/tree). The `base` tool alias and deleted-line citations refer to that merge base, not the base branch tip. Renames use the previous path on the base side. Source metadata is rechecked after collection and after inference; issues also recheck the default branch at the end. A changed source/head/base rejects with a read-only `source_changed`, not a supposedly current result. For this first release, **any issue default-branch movement fails the run**, even if unrelated to the inspected files; there is no stale-success outcome. Later callers must still detect changes after `verifiedAt`.
 
@@ -66,7 +66,9 @@ Results always have `coverage.status: 'partial'`: bounded, selective inspection 
 
 Missing/truncated patches, capped trees/files/source bodies, binary or non-UTF-8 files, symlinks, submodules, oversized files and inaccessible paths are explicit coverage warnings. Comments/reviews/checks and private task notes are not collected. Tools support listing and reading, not repository-wide text search or execution. Budget exhaustion, malformed output, cancellation and deadlines return `ServiceError`; fatal tool budgets abort inference even if the SDK swallows the tool error. Cancellation reaches HTTP and SDK abort/disconnect/delete/force-stop cleanup. No local repository checkout or repository code is executed.
 
-`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers, to cover these contracts. No live source/model execution or desktop integration is implied by those tests. A separately authorized, bounded and isolated live SDK/transport smoke is required before #47 enables this capability for users; this backend-only layer does not perform it.
+`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers. `test/protocol.test.ts` covers the public RPC. Separately authorized, isolated live SDK 1.0.13 smokes exercised an implementation assessment of #46 and review of merged PR #48: actual read tools, grounded result persistence, partial notices and natural host exit succeeded. The implementation smoke required one format correction; these checks do not imply general model reliability.
+
+An earlier authorized attempt rejected grounding and timed out; its model payload was not retained, so its grounding cause is unknown. It exposed an SDK 1.0.13 `sendAndWait` idle timer that survives disconnect/forceStop. `src/sdk-client.ts` now waits using public `send`/`on`, with a shared abort signal, final-assistant semantics, and deterministic timer/subscription cleanup. Installed-SDK tests use a synthetic stdio runtime (no model) for send rejection, error/idle-before-ack races, deadline and cancellation. Source/model text never enters diagnostics; grounding diagnostics identify fixed reason categories only.
 
 ## Native host contract
 
@@ -125,12 +127,15 @@ The host must expose only these operation names through its native command, not 
 | `work.collect` | `workCollectInputSchema` | Candidates with immutable evidence, current source observations, and bounded-coverage warnings |
 | `work.assess` | `workRankInputSchema` without `assessmentIds`, requiring `profileId` | A nonempty subset of at most 20 immutable assessments |
 | `work.rank` | `workRankInputSchema`, requiring `profileId` and saved `assessmentIds` | Exact permutation of the active queue, one reason per task, and optional `evaluatedAt`/`expiresAt` |
+| `work.reviewCode` | `codeReviewInputSchema` | `code-review-v1` with grounded answer, pinned source/config, partial coverage and read evidence |
 | `work.connections` | `{}` | Configured MCP server/read-tool names and explicit setup instructions; no secrets |
 | `work.intake` | `{}` | Up to 200 unconsumed durable push items and `hasMore`; reading never deletes |
 | `work.ackIntake` | `{ids}` | The same acknowledgement, after the desktop has saved those items |
 | `cancel` | `{requestId}` | `{requestId, cancelled}` |
 
 All objects are strict: unknown keys fail validation. Thread IDs are positive decimal strings. Repository references are `{repo: "owner/repo", number: positiveInteger, kind: "pr" | "issue"}`. Evidence/context IDs allow up to 500 characters. The service constructs all network endpoints itself.
+
+Code operations retain their 180-second overall deadline, including the single correction attempt, plus bounded cleanup. The JSONL watchdog allows 210 seconds and the native host 240 seconds. For code cancellation, an ACK is not a terminal outcome: native waits for the target's own response after SDK cleanup rather than killing the service on the ACK. Native timeout/quit still stops the owned process group.
 
 ### Workstreams
 

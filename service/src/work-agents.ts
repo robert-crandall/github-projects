@@ -17,13 +17,13 @@ export const taskAgentJobs = {
 
 export type TaskAgentJob = keyof typeof taskAgentJobs;
 const jobTypes = Object.keys(taskAgentJobs) as [TaskAgentJob, ...TaskAgentJob[]];
-export const taskAgentSchema = z.strictObject({
+export const agentFields = {
   id: z.string().min(1).max(100),
-  jobType: z.enum(jobTypes),
   name: z.string().trim().min(1).max(100),
   instructions: z.string().max(16000),
   model: z.string().max(100),
-});
+};
+export const taskAgentSchema = z.strictObject({ ...agentFields, jobType: z.enum(jobTypes) });
 export type TaskAgent = z.infer<typeof taskAgentSchema>;
 export const taskAgentsSchema = z.array(taskAgentSchema).length(jobTypes.length).refine(agents =>
   new Set(agents.map(agent => agent.id)).size === agents.length
