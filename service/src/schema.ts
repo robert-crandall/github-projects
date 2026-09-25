@@ -1,5 +1,8 @@
 import { z } from 'zod';
 import { workAssessOutputSchema } from './work-assessment.ts';
+import { idSchema, repoSchema, referenceSchema } from './references.ts';
+import { codeReviewInputSchema, codeReviewResultSchema } from './code-review-schema.ts';
+export { idSchema, repoSchema, referenceSchema } from './references.ts';
 import {
   workCollectInputSchema, workCollectOutputSchema, workConnectionsSchema,
   workIntakeAckSchema, workIntakeOutputSchema, workRankInputSchema, workRankOutputSchema,
@@ -13,16 +16,10 @@ export const LIMITS = {
   workModelBytes: 240_000, workAssessmentTasks: 20, workModelMs: 180_000, workDeadlineMs: 300_000,
 } as const;
 
-export const idSchema = z.string().min(1).max(500).regex(/^[A-Za-z0-9:_.\/-]+$/);
 export const threadIdSchema = z.string().regex(/^[1-9]\d{0,19}$/);
 export const loginSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9-]{0,99}(?:\[bot\])?$/);
 const owner = '[A-Za-z0-9][A-Za-z0-9-]{0,99}';
-const repo = '[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}';
-export const repoSchema = z.string().regex(new RegExp(`^${owner}/${repo}$`));
 export const teamSchema = z.string().regex(new RegExp(`^${owner}/[A-Za-z0-9][A-Za-z0-9_-]{0,99}$`));
-export const referenceSchema = z.strictObject({
-  repo: repoSchema, number: z.number().int().positive().safe(), kind: z.enum(['pr', 'issue']),
-});
 const time = z.iso.datetime();
 const text = z.string().max(LIMITS.evidenceText);
 export const errorCodeSchema = z.enum([
@@ -205,6 +202,7 @@ export const requestSchema = z.discriminatedUnion('op', [
   z.strictObject({ ...envelope, op: z.literal('work.collect'), input: workCollectInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('work.assess'), input: workRankInputSchema.omit({ assessmentIds: true }).required({ profileId: true }) }),
   z.strictObject({ ...envelope, op: z.literal('work.rank'), input: workRankInputSchema.required({ profileId: true, assessmentIds: true }) }),
+  z.strictObject({ ...envelope, op: z.literal('work.reviewCode'), input: codeReviewInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('work.connections'), input: empty }),
   z.strictObject({ ...envelope, op: z.literal('work.intake'), input: empty }),
   z.strictObject({ ...envelope, op: z.literal('work.ackIntake'), input: workIntakeAckSchema }),
@@ -222,6 +220,7 @@ export const resultSchemas = {
   'work.collect': workCollectOutputSchema,
   'work.assess': workAssessOutputSchema,
   'work.rank': workRankOutputSchema,
+  'work.reviewCode': codeReviewResultSchema,
   'work.connections': workConnectionsSchema,
   'work.intake': workIntakeOutputSchema,
   'work.ackIntake': workIntakeAckSchema,

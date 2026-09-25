@@ -1,5 +1,6 @@
 mod appearance;
 mod assessments;
+mod code_result;
 mod conversation;
 mod error;
 mod launch;
