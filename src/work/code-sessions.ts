@@ -27,7 +27,7 @@ type Active = {
 };
 export type CodeBatchItem = {
   taskId: string; title: string; source: Reference | null;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'skipped' | 'not-started' | 'save-pending';
+  status: 'queued' | 'running' | 'completed' | 'not-inspected' | 'failed' | 'cancelled' | 'skipped' | 'not-started' | 'save-pending';
   detail: string; runId?: string; outcome?: CodeRunOutcome;
 };
 export type CodeBatch = {
@@ -141,7 +141,7 @@ export class CodeSessions {
   }
   private recordOutcome(item: CodeBatchItem, outcome: CodeRunOutcome, quarantined: boolean): void {
     item.outcome = outcome;
-    item.status = outcome.status === 'partial' || outcome.status === 'not-inspected' ? 'completed'
+    item.status = outcome.status === 'partial' ? 'completed' : outcome.status === 'not-inspected' ? 'not-inspected'
       : outcome.status === 'cancelled' ? 'cancelled' : 'failed';
     item.detail = quarantined ? 'Saved separately for the previous workspace; inspect or export in Backups & recovery.'
       : 'error' in outcome ? outcome.error.message

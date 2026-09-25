@@ -1216,6 +1216,51 @@ test('code batch stop waits past cancel acknowledgement and never dispatches rem
   expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
 });
 
+test('zero-read PR batch reports no inspection, not completed or partial work', async ({ page, native }) => {
+  bulkFixture(native); native.codeInspected = false;
+  await page.goto('/');
+  await page.getByRole('checkbox', { name: 'Select task: Shared review', exact: true }).check();
+  await page.getByRole('button', { name: 'Review selected PRs (1)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toHaveText('Batch finished.');
+  await expect(batch).toContainText('1 not inspected');
+  await expect(batch).not.toContainText(/completed|partial/i);
+  await batch.getByText('Batch outcomes', { exact: true }).click();
+  await expect(batch).toContainText('No code inspected');
+  await expect(batch).not.toContainText(/completed|partial/i);
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await expect(panel).toContainText('No source-code lines were inspected. No code review or approval was completed.');
+  await expect(panel).toContainText('No code coverage obtained.');
+  await expect(panel).not.toContainText('Partial inspection saved');
+  expect(native.codeRuns.entries[0]!.outcome.status).toBe('not-inspected');
+  expect(native.requests).toHaveLength(1);
+});
+
+test('task details labels batch-wide cancellation and waits past ACK on narrow windows', async ({ page, native }) => {
+  bulkFixture(native); native.holdCode = gate(); native.cancelCode = true;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Select visible tasks' }).click();
+  await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
+  const batch = page.getByRole('region', { name: 'Code batch', exact: true });
+  await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
+  await page.locator('.task-row').filter({ hasText: 'Shared review' }).click();
+  const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await expect(panel.getByRole('button', { name: 'Cancel code job', exact: true })).toHaveCount(0);
+  await expect(panel).toContainText('Stop batch cancels the current code job and leaves remaining tasks not started.');
+  await panel.getByRole('button', { name: 'Stop batch', exact: true }).click();
+  await expect(batch).toContainText('1 not started');
+  await expect(panel.getByRole('status')).toContainText('Waiting for the actual outcome');
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeDisabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+  native.holdCode.release();
+  await expect(batch.getByRole('status')).toHaveText('Batch stopped.');
+  await expect(batch).toContainText('1 cancelled');
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
+});
+
 test('code batch context change stops only queued tasks and failed saves stay retryable without replay', async ({ page, native }) => {
   bulkFixture(native); native.holdCode = gate(); native.codeRuns.failUpdate = true;
   await page.goto('/');

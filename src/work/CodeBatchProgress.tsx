@@ -3,7 +3,7 @@ import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 
 const labels = {
   queued: 'Queued', running: 'Running', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled',
-  skipped: 'Skipped', 'not-started': 'Not started', 'save-pending': 'Result not saved',
+  skipped: 'Skipped', 'not-inspected': 'No code inspected', 'not-started': 'Not started', 'save-pending': 'Result not saved',
 };
 
 export function CodeBatchProgress({ batch, sessions, controller, inspect }: {
@@ -19,11 +19,14 @@ export function CodeBatchProgress({ batch, sessions, controller, inspect }: {
     </div>
     <p role="status">{batch.running ? batch.stopping ? 'Stopping; waiting for the current task outcome.' : `Current task: ${current?.title ?? 'Preparing...'}`
       : batch.reason ? 'Batch stopped.' : 'Batch finished.'}</p>
-    <p className="field-help">{counts('completed')} completed · {counts('failed')} failed · {counts('cancelled')} cancelled · {counts('skipped')} skipped · {counts('not-started')} not started
+    <p className="field-help">{counts('completed') > 0 && `${counts('completed')} completed · `}
+      {counts('not-inspected') > 0 && `${counts('not-inspected')} not inspected · `}
+      {counts('failed')} failed · {counts('cancelled')} cancelled · {counts('skipped')} skipped · {counts('not-started')} not started
       {counts('queued') > 0 && ` · ${counts('queued')} queued`}{counts('save-pending') > 0 && ` · ${counts('save-pending')} result not saved`}</p>
     {batch.reason && <p className="field-help">{batch.reason}</p>}
     <details className="task-run-details"><summary>Batch outcomes</summary><div className="task-run-ledger">
-      <p className="field-help">Completed means a saved, partial outcome, never approval or implementation. Nothing resumes automatically.</p>
+      <p className="field-help">{counts('completed') > 0 && 'Completed means a saved, partial inspection. '}
+        Code jobs never approve or implement changes. Nothing resumes automatically.</p>
       <ul className="code-batch-items">{batch.items.map(item => <li key={item.taskId}>
         <span>{item.title} — {labels[item.status]}</span>
         {item.detail && <p className="field-help">{item.detail}</p>}

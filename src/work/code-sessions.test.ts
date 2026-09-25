@@ -132,6 +132,26 @@ test('batch save failure stops dispatch and keeps the exact result retryable wit
   expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['completed', 'not-started']);
 });
 
+test('zero-read batches preserve not-inspected outcomes distinctly, including after persistence retry', async () => {
+  for (const saveFailure of [false, true]) {
+    const f = await setup('pr'), second = addCodeTask(f, 'second', 'pr');
+    f.notInspected(); f.runs.failUpdate = saveFailure;
+    await f.queue.code.startBatch([f.id, second], 'pr-review');
+    if (saveFailure) {
+      expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status)).toEqual(['save-pending', 'not-started']);
+      const pending = f.controller.getSnapshot().codePending[0]!;
+      expect(pending.outcome.status).toBe('not-inspected');
+      f.runs.failUpdate = false;
+      await f.controller.retryCodeRun(pending.intent.runId);
+    }
+    expect(f.queue.code.getSnapshot().batch?.items.map(item => item.status))
+      .toEqual(['not-inspected', saveFailure ? 'not-started' : 'not-inspected']);
+    expect(f.runs.entries.every(run => run.outcome.status === 'not-inspected')).toBe(true);
+    expect(f.requests).toHaveLength(saveFailure ? 1 : 2);
+    expect(f.queue.code.getSnapshot().batch?.items.some(item => item.status === 'completed')).toBe(false);
+  }
+});
+
 test('a reentrant stop just before RPC dispatch sends no code request', async () => {
   const f = await setup(), second = addCodeTask(f, 'second');
   const unsubscribe = f.queue.code.subscribe(() => {
