@@ -109,8 +109,9 @@ export function CodeSessionPanel({ task, controller, sessions, workBusy }: {
     {source && <div className="button-row"><button className="secondary" disabled={state.busy || workBusy}
       onClick={() => invoke(() => sessions.start(task.id))}>{source.kind === 'pr' ? 'Review PR' : 'Assess implementation'}</button>
       {active && active.phase !== 'saving' && <button className="secondary" disabled={active.phase === 'cancelling'}
-        onClick={() => invoke(() => sessions.cancel())}>Cancel code job</button>}
+        onClick={() => invoke(() => sessions.cancel())}>{state.batch?.running ? 'Stop batch' : 'Cancel code job'}</button>}
     </div>}
+    {active && state.batch?.running && <p className="field-help">Stop batch cancels the current code job and leaves remaining tasks not started.</p>}
     {active && <p role="status">{active.phase === 'preparing' ? 'Saving start before contacting GitHub...' : active.phase === 'cancelling'
       ? 'Cancellation requested. Waiting for the actual outcome...' : active.phase === 'saving' ? 'Saving code result...'
       : 'Reading pinned code and running the agent (up to three minutes)...'}</p>}

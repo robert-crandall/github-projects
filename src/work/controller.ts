@@ -170,7 +170,7 @@ export class WorkQueue {
   }
 
   run(): Promise<void> { return this.start(new Date()); }
-  runAssessor(): Promise<void> { return this.start(new Date(), 'assess'); }
+  runAssessor(taskIds?: readonly string[]): Promise<void> { return this.start(new Date(), 'assess', taskIds); }
   runPrioritizer(): Promise<void> { return this.start(new Date(), 'prioritize'); }
   async tick(now = new Date()): Promise<void> {
     if (this.status.running || this.code.busy) return;
@@ -184,16 +184,20 @@ export class WorkQueue {
     await this.start(now);
   }
 
-  private start(now: Date, kind: RunKind = 'pipeline'): Promise<void> {
+  private start(now: Date, kind: RunKind = 'pipeline', taskIds?: readonly string[]): Promise<void> {
     if (this.status.running) return this.active ?? Promise.resolve();
     if (this.code.busy) return Promise.reject(new Error('Wait for the code job before starting another Copilot run.'));
+    const selectedIds = taskIds && new Set(taskIds);
+    if (selectedIds && !rankInput(this.controller.state).tasks.some(task => selectedIds.has(task.id))) {
+      return Promise.reject(new Error('Select at least one eligible To do task to assess.'));
+    }
     const settings = structuredClone(this.controller.state.work.settings);
     this.publish({ running: true, phase: 'preparing', error: '', warnings: [], progress: {
       startedAt: Date.now(), finishedAt: null, kind,
       sources: settings.streams.filter(stream => kind === 'pipeline' && stream.enabled)
         .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
     } });
-    const running = this.execute(now, settings, kind);
+    const running = this.execute(now, settings, kind, selectedIds);
     this.active = running;
     return running;
   }
@@ -235,7 +239,7 @@ export class WorkQueue {
     throw new Error('More task intake remains. Saved tasks are retained; run again to continue.');
   }
 
-  private async assess(input: WorkRankInput & { profileId: string }, assessmentGeneration: number, force = false) {
+  private async assess(input: WorkRankInput & { profileId: string }, assessmentGeneration: number, force = false, selected = false) {
     this.assertWorkspace(assessmentGeneration);
     this.assertProfile(this.controller.state, input.profileId);
     const agent = taskAgent(input, 'task-assessment');
@@ -249,6 +253,15 @@ export class WorkQueue {
       this.publish({ phase: 'assessing' });
       this.assertWorkspace(assessmentGeneration);
       this.assertProfile(this.controller.state, input.profileId);
+      if (selected) {
+        if (JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))
+          !== JSON.stringify(agentIdentity(agent))) {
+          throw new Error('Remaining selected assessments stopped after the assessor instructions or model changed. Saved results are retained.');
+        }
+        const current = new Map(rankInput(this.controller.state).tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
+        pending = pending.filter(task => current.get(task.id) === JSON.stringify(semanticRankTask(task)));
+        if (!pending.length) break;
+      }
       const batch = workAssessOutputSchema.parse(await this.service.call('work.assess', { ...input, tasks: pending, force }));
       const pendingIds = new Set(pending.map(task => task.id));
       if (new Set(batch.assessments.map(value => value.id)).size !== batch.assessments.length
@@ -362,7 +375,7 @@ export class WorkQueue {
     return warnings;
   }
 
-  private async execute(now: Date, settings: WorkSettings, kind: RunKind): Promise<void> {
+  private async execute(now: Date, settings: WorkSettings, kind: RunKind, selectedIds?: Set<string>): Promise<void> {
     const profileId = this.controller.state.activeWorkProfile.id;
     const generation = this.controller.assessmentGeneration;
     const errors: string[] = [];
@@ -382,10 +395,16 @@ export class WorkQueue {
       if (kind !== 'pipeline') {
         const input = { ...rankInput(this.controller.state), profileId };
         if (kind === 'assess') {
-          await this.assess(input, generation, true);
+          if (selectedIds) input.tasks = input.tasks.filter(task => selectedIds.has(task.id));
+          const assessed = await this.assess(input, generation, true, !!selectedIds);
+          if (selectedIds && assessed.size < selectedIds.size) {
+            warnings.push(`${selectedIds.size - assessed.size} selected tasks were not assessed because they changed or are no longer eligible.`);
+          }
           if (JSON.stringify(agentIdentity(taskAgent(input, 'task-assessment')))
             !== JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))) {
-            warnings.push('Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.');
+            warnings.push(selectedIds
+              ? 'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.'
+              : 'Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.');
           }
         } else warnings.push(...await this.prioritize(input, generation, undefined, true));
         this.assertWorkspace(generation);

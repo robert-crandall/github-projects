@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { Check, ExternalLink, Github, ListFilter, ListOrdered, Plus, RefreshCw, Settings2, SlidersHorizontal, X } from 'lucide-react';
 import { Modal } from '../Modal.tsx';
@@ -20,6 +20,8 @@ import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
 import { TaskAssessmentHistory } from './AssessmentHistory.tsx';
 import { CodeSessionPanel } from './CodeSessionPanel.tsx';
+import { codeJob } from './code-sessions.ts';
+import { CodeBatchProgress } from './CodeBatchProgress.tsx';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -76,12 +78,14 @@ function NewProfile({ queue, currentName, close, created }: {
     </form>
   </Modal>;
 }
-function TaskDetail({ task, reason, queue, controller, remote, close }: {
+function TaskDetail({ task, reason, queue, controller, remote, close, batchProgress }: {
   task: Task; reason?: string; queue: WorkQueue; controller: DesktopWorkspace; remote: ServiceWorkspace; close: () => void;
+  batchProgress: ReactNode;
 }) {
   const [confirmUnsubscribe, setConfirmUnsubscribe] = useState(false);
   const [unsubscribeError, setUnsubscribeError] = useState('');
   const status = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
+  const code = useSyncExternalStore(queue.code.subscribe, queue.code.getSnapshot);
   const unsubscribing = !!task.work && status.unsubscribing.includes(canonicalSource(task.work.url));
   const subscription = task.work?.unsubscribe;
   const threads = controller.state.threads.filter(thread => thread.id === task.threadId
@@ -102,6 +106,7 @@ function TaskDetail({ task, reason, queue, controller, remote, close }: {
   };
   return <aside className="task-detail" aria-label="Task details">
     <header><h2>Task details</h2><button className="quiet" aria-label="Close task details" onClick={close}><X size={18} /></button></header>
+    {batchProgress && <div className="task-detail-batch">{batchProgress}</div>}
     <label>Task<input value={task.title} maxLength={2000} onChange={event => run(() => queue.edit(task.id, event.target.value, task.notes))} /></label>
     <p className="task-source">{source(task)}</p>
     <div className="button-row"><button className="primary" onClick={() => run(() => task.status === 'done' ? queue.restore(task.id) : queue.complete(task.id))}>
@@ -120,6 +125,8 @@ function TaskDetail({ task, reason, queue, controller, remote, close }: {
     </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
+    {task.status === 'open' && task.work?.availability !== 'waiting' && <button className="secondary"
+      disabled={status.running || code.busy} onClick={() => run(() => queue.runAssessor([task.id]))}>Assess task</button>}
     <TaskAssessmentHistory key={task.id} task={task} controller={controller} />
     <CodeSessionPanel key={`${controller.state.activeWorkProfile.id}:${task.id}`} task={task} controller={controller} sessions={queue.code} workBusy={status.running} />
     <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
@@ -172,7 +179,25 @@ export function TaskApp({ controller, queue, remote }: {
   const [destination, setDestination] = useState<Destination>();
   const [selection, setSelection] = useState<string | null>(null);
   const [view, setView] = useState<'tasks' | 'done' | 'waiting'>('tasks');
+  const [checked, setChecked] = useState<{ context: string; ids: string[] }>({ context: '', ids: [] });
+  const selectionContext = JSON.stringify([saved.workspace?.state.activeWorkProfile.id, controller.assessmentGeneration,
+    view, settings, filters, saved.workspace?.state.work.sourceFilter?.selectedSources ?? null]);
+  const selectableIds = saved.workspace && view === 'tasks' && !settings ? rankedTasks(saved.workspace.state)
+    .filter(task => !filters || matchesSources(task, saved.workspace!.state.work.sourceFilter?.selectedSources ?? null))
+    .map(task => task.id) : [];
+  const selectableKey = JSON.stringify(selectableIds);
+  const checkedIds = checked.context === selectionContext ? checked.ids.filter(id => selectableIds.includes(id)) : [];
   const invoke = (operation: () => Promise<unknown>) => { void operation().catch(error => controller.report(error)); };
+  const changeContext = (change: () => void) => {
+    setChecked({ context: '', ids: [] });
+    change();
+  };
+  useEffect(() => {
+    setChecked(previous => {
+      const ids = previous.context === selectionContext ? previous.ids.filter(id => selectableIds.includes(id)) : [];
+      return previous.context === selectionContext && ids.length === previous.ids.length ? previous : { context: selectionContext, ids };
+    });
+  }, [selectionContext, selectableKey]);
   useEffect(() => { invoke(async () => {
     await controller.load();
     if (controller.getSnapshot().workspace) { await queue.code.initialize(); await queue.tick(); }
@@ -231,16 +256,25 @@ export function TaskApp({ controller, queue, remote }: {
   };
   const selectAllSources = () => saveFilter({ ...sourceFilter, selectedSources: null });
   const reasons = new Map(state.work.ranking?.reasons.map(item => [item.id, item.reason]) ?? []);
+  const checkedTasks = visible.filter(task => checkedIds.includes(task.id));
+  const issueCount = checkedTasks.filter(task => codeJob(task, state) === 'implementation-assessment').length;
+  const prCount = checkedTasks.filter(task => codeJob(task, state) === 'pr-review').length;
+  const batchProgress = code.batch && <CodeBatchProgress batch={code.batch} sessions={queue.code} controller={controller}
+    inspect={id => { setSettings(false); setFilters(false); setView('tasks'); setSelection(id); }} />;
   return <div className={`task-app ${filters && !settings ? 'task-filter-view' : ''}`}>
     <a className="skip-link" href={settings ? '#task-settings' : '#ranked-tasks'}>Skip to {settings ? 'settings' : 'tasks'}</a>
     <aside className="task-sidebar" aria-label="Workspace navigation">
       <div className="task-brand"><Github size={20} /><span>GitHub Projects</span></div>
       <button className="secondary task-capture" onClick={() => setCapture(true)}><Plus size={16} />Add task<span className="task-shortcut">⌘K</span></button>
       <nav aria-label="Workspace">
-        <button className="nav-link" aria-current={!settings && !filters ? 'page' : undefined} onClick={() => { setSettings(false); setFilters(false); }}>
+        <button className="nav-link" aria-current={!settings && !filters ? 'page' : undefined} onClick={() => {
+          if (settings || filters) changeContext(() => { setSettings(false); setFilters(false); });
+        }}>
           <ListOrdered size={17} />Ranked Tasks<span className="count">{ranked.length}</span></button>
         <button className="nav-link" aria-current={!settings && filters ? 'page' : undefined}
-          aria-expanded={!settings && filters} aria-controls="task-source-tree" onClick={() => { setSettings(false); setFilters(true); }}>
+          aria-expanded={!settings && filters} aria-controls="task-source-tree" onClick={() => {
+            if (settings || !filters) changeContext(() => { setSettings(false); setFilters(true); });
+          }}>
           <ListFilter size={17} />Filters<span className="count">{ranked.filter(task => matchesSources(task, selectedSources)).length}</span></button>
         {filters && !settings && <SourceTree key={state.activeWorkProfile.id} sources={sources} selected={selectedSources}
           collapsed={sourceFilter.collapsedProviders} counts={sourceCounts(unfiltered)} selectAll={selectAllSources}
@@ -252,7 +286,9 @@ export function TaskApp({ controller, queue, remote }: {
             ? [...sourceFilter.collapsedProviders, provider] : sourceFilter.collapsedProviders.filter(item => item !== provider) })} />}
       </nav>
       <div className="task-sidebar-bottom">
-        <button className="nav-link" aria-current={settings ? 'page' : undefined} onClick={() => setSettings(true)}><Settings2 size={17} />Settings</button>
+        <button className="nav-link" aria-current={settings ? 'page' : undefined} onClick={() => {
+          if (!settings) changeContext(() => setSettings(true));
+        }}><Settings2 size={17} />Settings</button>
         <button className="nav-link" onClick={() => setConnections(true)}><SlidersHorizontal size={17} />Connections</button>
         <p>Local workspace</p>
       </div>
@@ -295,7 +331,8 @@ export function TaskApp({ controller, queue, remote }: {
       <button className="secondary" onClick={() => setRecovery(true)}>Export previous workspace results</button>
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
-      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)} /> : <>
+      settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
+      batchProgress={batchProgress} /> : <>
       {!run.progress && <div className="task-context"><p>{state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
         <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>}
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
@@ -310,10 +347,38 @@ export function TaskApp({ controller, queue, remote }: {
       <div className={`task-body ${selected ? 'task-with-detail' : ''}`}>
         <main id="ranked-tasks" className="task-main">
           <nav className="task-tabs" aria-label="Task lists">{([['tasks', 'To do', filteredRanked.length], ['done', 'Done', filteredDone.length], ['waiting', 'No action now', filteredWaiting.length]] as const).map(([value, title, count]) =>
-            <button key={value} aria-current={view === value ? 'page' : undefined} onClick={() => { setView(value); setSelection(null); }}>{title}<span>{count}</span></button>)}</nav>
+            <button key={value} aria-current={view === value ? 'page' : undefined} onClick={() => {
+              if (view !== value) changeContext(() => { setView(value); setSelection(null); });
+            }}>{title}<span>{count}</span></button>)}</nav>
+          {batchProgress}
           {filters && view === 'tasks' && <p className="task-filter-order">Original ranks · Same order as Ranked Tasks</p>}
+          {view === 'tasks' && visible.length > 0 && <section className="task-selection" aria-label="Selected tasks">
+            <div className="button-row"><span role="status">{checkedIds.length} selected</span>
+              <button className="text-button" disabled={checkedIds.length === visible.length}
+                onClick={() => setChecked({ context: selectionContext, ids: visible.map(task => task.id) })}>Select visible tasks</button>
+              {checkedIds.length > 0 && <button className="text-button" onClick={() => setChecked({ context: selectionContext, ids: [] })}>Clear selection</button>}
+            </div>
+            {checkedIds.length > 0 && <>
+              <div className="button-row">
+                <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor(checkedIds))}>Assess selected ({checkedIds.length})</button>
+                {issueCount > 0 && <button className="secondary" disabled={run.running || code.busy}
+                  onClick={() => invoke(() => queue.code.startBatch(checkedIds, 'implementation-assessment'))}>Assess implementation ({issueCount} {issueCount === 1 ? 'issue' : 'issues'})</button>}
+                {prCount > 0 && <button className="secondary" disabled={run.running || code.busy}
+                  onClick={() => invoke(() => queue.code.startBatch(checkedIds, 'pr-review'))}>Review selected PRs ({prCount})</button>}
+              </div>
+              <p className="field-help">Assess selected saves task judgments without changing order. Code actions run only their named source kind.</p>
+              <details><summary>Code eligibility: {issueCount} issues, {prCount} PRs, {checkedIds.length - issueCount - prCount} unavailable</summary>
+                <ul>{checkedTasks.map(task => <li key={task.id}>{task.title}: {codeJob(task, state) === 'pr-review' ? 'PR review only'
+                  : codeJob(task, state) === 'implementation-assessment' ? 'Implementation assessment only'
+                  : 'No code action: not a known GitHub issue or PR. Unknown kinds need explicit Run now collection.'}</li>)}</ul>
+              </details>
+            </>}
+          </section>}
           {visible.length ? <ol className="ranked-list" aria-label={view === 'tasks' ? 'Prioritized tasks' : view === 'done' ? 'Completed tasks' : 'Tasks with no action now'}>
             {visible.map(task => <li key={task.id} data-task-id={task.id} className={task.id === selection ? 'task-selected' : ''}>
+              {view === 'tasks' && <label className="task-select"><input type="checkbox" aria-label={`Select task: ${task.title}`}
+                checked={checkedIds.includes(task.id)} onChange={event => setChecked({ context: selectionContext,
+                  ids: event.target.checked ? [...checkedIds, task.id] : checkedIds.filter(id => id !== task.id) })} /></label>}
               <span className="task-rank" aria-label={view === 'tasks' ? `Rank ${positions.get(task.id)}` : undefined}>{view === 'tasks' ? positions.get(task.id) : task.status === 'done' ? <Check size={16} /> : '—'}</span>
               <button className="task-row" aria-current={task.id === selection ? 'true' : undefined} onClick={() => setSelection(task.id)}>
                 <span className="task-title">{task.title}</span>
@@ -340,14 +405,14 @@ export function TaskApp({ controller, queue, remote }: {
           </div>}
         </main>
         {selected ? <TaskDetail key={`${state.activeWorkProfile.id}:${selected.id}`} task={selected} reason={reasons.get(selected.id)}
-          queue={queue} controller={controller} remote={remote} close={() => setSelection(null)} />
+          queue={queue} controller={controller} remote={remote} close={() => setSelection(null)} batchProgress={batchProgress} />
           : <aside className="task-detail task-detail-empty" aria-label="Task details"><h2>Select a task</h2><p>See why it ranks here, read its source, and keep your notes alongside.</p></aside>}
       </div>
     </>}
     <footer className="task-footer workspace-footer"><span role="status">{saved.persistence.pending ? 'Saving on this Mac...' : saved.persistence.error ? 'Not saved'
       : saved.codePending.length ? 'Task edits saved; code results pending' : saved.assessmentPending.length ? 'Task edits saved; assessments pending' : 'Saved on this Mac'}</span>
       {run.progress && <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span>}
-      <span>{run.running ? 'Agent run in progress; local edits remain available' : `Last successful collection run: ${date(state.work.lastCompletedAt)}`}</span></footer>
+      <span>{run.running || code.busy ? 'Agent run in progress; local edits remain available' : `Last successful collection run: ${date(state.work.lastCompletedAt)}`}</span></footer>
     </div>
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}
     {newProfile && <NewProfile queue={queue} currentName={state.activeWorkProfile.name} close={() => setNewProfile(false)}

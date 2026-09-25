@@ -31,6 +31,19 @@
 .ranked-list { padding: 0; margin: 0; list-style: none; }
 .ranked-list > li { display: flex; align-items: flex-start; gap: 10px; border-bottom: 1px solid var(--border); padding: 18px 0; }
 .ranked-list > li.task-selected { background: var(--selected); }
+.task-select { display: flex; align-items: center; justify-content: center; min-width: 24px; min-height: 32px; margin: 0; cursor: pointer; }
+.task-select input { accent-color: var(--accent); }
+.task-selection { border-bottom: 1px solid var(--border); padding: 12px 0; font-size: 13px; }
+.task-selection .button-row + .button-row { margin-top: 12px; }
+.task-selection .text-button, .code-batch .text-button { color: var(--accent); }
+.task-selection .field-help, .code-batch p { margin-top: 8px; }
+.task-selection summary { cursor: pointer; padding: 8px 0; }
+.task-selection summary:focus-visible { outline: 2px solid var(--accent); }
+.task-selection ul { padding-left: 18px; max-height: 140px; overflow-y: auto; }
+.code-batch-items { list-style: none; padding: 0; }
+.code-batch-items li { padding: 10px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.task-main .code-batch, .task-detail .code-batch { margin: 16px 0; }
+.task-detail-batch { display: none; }
 .task-rank { width: 24px; flex-shrink: 0; color: var(--secondary); font-size: 16px; font-variant-numeric: tabular-nums; padding-top: 3px; text-align: center; }
 .task-row { flex: 1; min-width: 0; align-items: flex-start; flex-direction: column; text-align: left; gap: 5px; padding: 0; }
 .task-row:not(:disabled):hover { background: transparent; }
@@ -122,6 +135,7 @@
 .task-settings-heading > button { margin: 0 0 24px -10px; }
 .task-settings-heading > p { margin-top: 12px; color: var(--secondary); }
 .task-settings section { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--border); }
+.task-settings .code-batch { margin: 24px 0; padding-top: 16px; }
 .task-settings h2 { margin-bottom: 12px; }
 .task-settings p { color: var(--secondary); margin: 12px 0; }
 .task-settings label { margin-top: 18px; }
@@ -163,6 +177,7 @@
   .task-with-detail .task-main { display: none; }
   .task-detail-empty { display: none; }
   .task-detail { border-left: 0; padding: 20px; }
+  .task-detail-batch { display: block; }
   .task-footer.workspace-footer { padding: 12px 20px; }
   .task-error { padding-left: 20px; padding-right: 20px; }
   .task-run { margin-left: 20px; margin-right: 20px; }
