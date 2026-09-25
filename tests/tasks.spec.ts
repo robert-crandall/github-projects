@@ -160,6 +160,97 @@ async function run(page: Page) {
   await persisted(page);
 }
 
+function assessmentTasks(native: NativeMock, count: number) {
+  const state = emptyWorkspace(native.now, 'UTC');
+  state.work.settings.streams = [];
+  state.tasks = Array.from({ length: count }, (_, index) => ({
+    id: `task-${index}`, title: `Assessment task ${index + 1}`, notes: '', status: 'open' as const, createdAt: native.now,
+  }));
+  native.saved = { revision: crypto.randomUUID(), savedAt: native.now, snapshot: snapshotSchema.parse({
+    formatVersion: 1, reminders: [], workspace: { version: 1, state, scroll: {} },
+  }) };
+}
+
+test('assessment progress counts saved batches through the final remainder', async ({ page, native }, testInfo) => {
+  assessmentTasks(native, 45);
+  const first = gate(), second = gate(), third = gate();
+  native.assessmentHolds = [first, second, third];
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
+  const progress = page.getByRole('progressbar', { name: 'Assessments saved' });
+  const region = page.getByRole('region', { name: 'Run progress' });
+  await expect(progress).toHaveAttribute('aria-valuemax', '45');
+  await expect(progress).toHaveAttribute('aria-valuenow', '0');
+  first.release();
+  await expect(progress).toHaveAttribute('aria-valuenow', '20');
+  await expect(progress).toHaveAttribute('aria-valuetext', '20 of 45 assessments saved');
+  await expect(region).toContainText('1 batch saved');
+  expect(native.assessments.entries).toHaveLength(20);
+  const ratio = await progress.evaluate(element =>
+    element.children[0]!.getBoundingClientRect().width / element.getBoundingClientRect().width);
+  expect(ratio).toBeCloseTo(20 / 45, 2);
+  await page.screenshot({ path: testInfo.outputPath('assessment-progress-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(region.getByRole('button', { name: 'Cancel assessment' })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('assessment-progress-narrow.png') });
+  second.release();
+  await expect(progress).toHaveAttribute('aria-valuenow', '40');
+  third.release();
+  await expect(progress).toHaveAttribute('aria-valuenow', '45');
+  await expect(region).toContainText('3 batches saved');
+  await expect(region).toContainText('Run complete');
+  await expect(region.getByRole('button', { name: 'Cancel assessment' })).toHaveCount(0);
+  expect(native.assessments.entries).toHaveLength(45);
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess', 'work.assess']);
+});
+
+test('assessment cancellation stays accessible in Settings and keeps only saved batches', async ({ page, native }) => {
+  assessmentTasks(native, 45);
+  const first = gate(), second = gate();
+  native.assessmentHolds = [first, second];
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  const region = page.getByRole('region', { name: 'Run progress' });
+  const progress = region.getByRole('progressbar', { name: 'Assessments saved' });
+  await expect(progress).toHaveAttribute('aria-valuenow', '0');
+  first.release();
+  await expect(progress).toHaveAttribute('aria-valuenow', '20');
+  await expect.poll(() => native.requests.filter(request => request.op === 'work.assess').length).toBe(2);
+  const target = native.requests.filter(request => request.op === 'work.assess')[1]!;
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(progress).toHaveAttribute('aria-valuenow', '20');
+  const cancel = region.getByRole('button', { name: 'Cancel assessment' });
+  await cancel.focus();
+  await expect(cancel).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(region.getByRole('button', { name: 'Cancelling...' })).toBeDisabled();
+  await expect.poll(() => native.requests.filter(request => request.op === 'cancel').length).toBe(1);
+  expect(native.requests.find(request => request.op === 'cancel')?.input).toEqual({ requestId: target.id });
+  await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeDisabled();
+  await expect(progress).toHaveAttribute('aria-valuenow', '20');
+  second.release();
+  await expect(region).toContainText('Assessment cancelled');
+  await expect(region).toContainText('Saved batches kept');
+  await expect(region).toContainText('25 not assessed');
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  expect(native.assessments.entries).toHaveLength(20);
+  expect(native.requests.filter(request => request.op === 'work.assess')).toHaveLength(2);
+  expect(native.requests.some(request => request.op === 'work.rank')).toBe(false);
+  expect(native.state.work.ranking).toBeNull();
+  expect(native.state.work.collectionCursor).toBeNull();
+  const savedVersions = native.assessments.entries.map(value => value.resultId);
+  await page.reload();
+  expect(native.assessments.entries).toHaveLength(20);
+  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await expect(progress).toHaveAttribute('aria-valuemax', '25');
+  await expect(progress).toHaveAttribute('aria-valuenow', '25');
+  expect(native.assessments.entries).toHaveLength(45);
+  expect(native.assessments.entries.slice(0, 20).map(value => value.resultId)).toEqual(savedVersions);
+});
+
 test('configurable agents run independently with named roles, durable ratings and whole-list priority', async ({ page, native }, testInfo) => {
   await page.goto('/');
   await add(page, 'First manual task');
@@ -178,7 +269,7 @@ test('configurable agents run independently with named roles, durable ratings an
   await page.screenshot({ path: testInfo.outputPath('agent-settings-desktop.png') });
   await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
-  await expect(page.getByText(/Run assessor first, then run prioritizer/)).toBeAttached();
+  await expect(page.getByText(/Use Run assessor for unassessed tasks or Assess selected/)).toBeAttached();
   expect(native.requests).toEqual([]);
   native.holdAssessment = gate();
   await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
@@ -214,7 +305,11 @@ test('configurable agents run independently with named roles, durable ratings an
   await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
   await persisted(page);
-  expect(native.assessments.entries).toHaveLength(4);
+  expect(native.assessments.entries).toHaveLength(2);
+  await expect(page.getByRole('region', { name: 'Run progress' })).toContainText('No tasks to assess in this run');
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  expect(native.assessments.entries).toHaveLength(3);
   await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('agents-history-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1016,7 +1111,9 @@ test('manual-only progress omits the collection bar and stays active through ass
   native.holdAssessment.release();
   native.holdAssessment = undefined;
   await expect(region).toContainText('Ranking tasks');
-  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect(page.getByRole('progressbar', { name: 'Collections processed' })).toHaveCount(0);
+  await expect(page.getByRole('progressbar', { name: 'Assessments saved' })).toHaveAttribute('aria-valuenow', '1');
+  await expect(region.getByRole('button', { name: 'Cancel assessment' })).toHaveCount(0);
   await expect(page.locator('.task-run-details')).toHaveCount(0);
   native.holdRank.release();
   await expect(region).toContainText('Run complete');

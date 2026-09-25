@@ -5,7 +5,7 @@ import type { Request } from '../../service/src/schema.ts';
 import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
 import { createNativePlatform, snapshotSchema, type NativeWorkspace } from '../platform/native.ts';
-import { ServiceClient } from '../platform/service.ts';
+import { ServiceCallError, ServiceClient } from '../platform/service.ts';
 import { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
 import { WorkQueue } from './controller.ts';
@@ -48,6 +48,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
   };
   let failSave: (state: AppState) => boolean = () => false;
   let saveHook: ((state: AppState) => Promise<void>) | undefined;
+  let appendHook: (() => Promise<void>) | undefined;
   const log: string[] = [];
   const requests: Request[] = [];
   const history = new AssessmentStoreFixture();
@@ -63,6 +64,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
       return { id, createdAt: before };
     }
     if (command === 'assessment_append') {
+      if (appendHook) await appendHook();
       const result = history.append(String(args?.profileId),
         workAssessOutputSchema.parse({ assessments: args?.assessments }).assessments, saved.snapshot!.workspace.state as unknown as AppState);
       recoveryToken = crypto.randomUUID();
@@ -120,6 +122,7 @@ async function fixture(state: unknown = initial(), handler?: Handler) {
     queue, workspace, platform, service, requests, log, history,
     fail: (predicate: (state: AppState) => boolean) => { failSave = predicate; },
     onSave: (hook?: (state: AppState) => Promise<void>) => { saveHook = hook; },
+    onAppend: (hook?: () => Promise<void>) => { appendHook = hook; },
     saved: () => saved.snapshot!.workspace.state as unknown as AppState,
   };
 }
@@ -313,7 +316,7 @@ describe('durable local work', () => {
     expect(mock.history.entries).toHaveLength(3);
     expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
     expect(mock.saved().work.ranking).toBeNull();
-    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    expect(mock.queue.getSnapshot().error).toContain('Assess selected');
   });
 
   test('in-flight results return to their original profile after external profile replacement', async () => {
@@ -642,6 +645,214 @@ describe('work profiles', () => {
   });
 });
 
+describe('assessment progress and cancellation', () => {
+  function tasks(count: number) {
+    const state = initial();
+    state.tasks = Array.from({ length: count }, (_, index) => ({
+      id: `task-${index}`, title: `Task ${index}`, notes: '', status: 'open' as const, createdAt: before,
+    }));
+    state.work.ranking = { orderedIds: state.tasks.map(task => task.id), reasons: [], rankedAt: before };
+    return state;
+  }
+
+  test('progress advances only after durable batches, including smaller batches and the final remainder', async () => {
+    const state = tasks(45);
+    const saving = deferred<void>(), releaseSave = deferred<void>();
+    const second = deferred<void>(), releaseSecond = deferred<void>();
+    let calls = 0;
+    const mock = await fixture(state, async request => {
+      if (request.op !== 'work.assess') return;
+      if (++calls === 2) {
+        second.resolve();
+        await releaseSecond.promise;
+        return assessmentBatch({ ...request.input, tasks: request.input.tasks.slice(0, 3) });
+      }
+    });
+    mock.onAppend(async () => { saving.resolve(); await releaseSave.promise; });
+    const running = mock.queue.runAssessor();
+    await saving.promise;
+    const initialProgress = mock.queue.getSnapshot().progress?.assessment;
+    expect(initialProgress).toEqual({ total: 45, saved: 0, batches: 0 });
+    expect(mock.history.entries).toHaveLength(0);
+    mock.onAppend();
+    releaseSave.resolve();
+    await second.promise;
+    expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 45, saved: 20, batches: 1 });
+    expect(initialProgress?.saved).toBe(0);
+    const savedCounts: number[] = [];
+    const unsubscribe = mock.queue.subscribe(() => {
+      const count = mock.queue.getSnapshot().progress?.assessment?.saved;
+      if (count !== undefined) savedCounts.push(count);
+    });
+    releaseSecond.resolve();
+    await running;
+    unsubscribe();
+    expect([...new Set(savedCounts)]).toEqual([23, 43, 45]);
+    expect(mock.queue.getSnapshot()).toMatchObject({
+      running: false, phase: 'idle', progress: { assessment: { total: 45, saved: 45, batches: 4 } },
+    });
+    expect(mock.history.entries).toHaveLength(45);
+    expect(mock.saved().work.ranking).toEqual(state.work.ranking);
+  });
+
+  test.each(['cancelled', 'service-interrupted', 'late-success'] as const)(
+    'cancel interrupts the exact request, retains saved batches and never ranks: %s', async outcome => {
+      const state = tasks(41);
+      const entered = deferred<Request>(), release = deferred<void>();
+      let calls = 0;
+      const mock = await fixture(state, async request => {
+        if (request.op === 'cancel') return { requestId: request.input.requestId, cancelled: true };
+        if (request.op !== 'work.assess' || ++calls !== 2) return;
+        entered.resolve(request);
+        await release.promise;
+        if (outcome !== 'late-success') throw new ServiceCallError(outcome, 'Request stopped');
+      });
+      const running = mock.queue.run();
+      const target = await entered.promise;
+      const saved = [...mock.history.entries];
+      expect(saved).toHaveLength(20);
+      await mock.queue.cancelAssessor();
+      await mock.queue.cancelAssessor();
+      expect(mock.requests.filter(request => request.op === 'cancel')).toMatchObject([
+        { input: { requestId: target.id } },
+      ]);
+      expect(mock.queue.getSnapshot()).toMatchObject({ running: true, phase: 'cancelling', cancelRequested: true });
+      release.resolve();
+      await running;
+      expect(mock.queue.getSnapshot()).toMatchObject({
+        running: false, phase: 'cancelled', error: '', warnings: [],
+        progress: { assessment: { total: 41, saved: 20, batches: 1 }, finishedAt: expect.any(Number) },
+      });
+      expect(mock.history.entries).toEqual(saved);
+      expect(mock.requests.filter(request => request.op === 'work.assess')).toHaveLength(2);
+      expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+      expect(mock.saved().work.ranking).toEqual(state.work.ranking);
+      expect(mock.saved().work.collectionCursor).toBeNull();
+      expect(mock.saved().work.lastCompletedAt).toBeNull();
+      await mock.queue.runAssessor();
+      expect(mock.queue.getSnapshot()).toMatchObject({ phase: 'idle', cancelRequested: false });
+      expect(mock.history.entries).toHaveLength(41);
+      expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 21, saved: 21, batches: 2 });
+      for (const version of saved) expect(mock.history.entries).toContainEqual(version);
+    },
+  );
+
+  test('cancellation before dispatch starts no request', async () => {
+    const mock = await fixture(tasks(1));
+    const running = mock.queue.runAssessor();
+    await mock.queue.cancelAssessor();
+    await running;
+    expect(mock.queue.getSnapshot()).toMatchObject({ running: false, phase: 'cancelled', error: '' });
+    expect(mock.requests).toEqual([]);
+    expect(mock.history.entries).toEqual([]);
+  });
+
+  test('cancel during local persistence finishes that save but starts no further batch', async () => {
+    const mock = await fixture(tasks(21));
+    const saving = deferred<void>(), release = deferred<void>();
+    mock.onAppend(async () => { saving.resolve(); await release.promise; });
+    const running = mock.queue.runAssessor();
+    await saving.promise;
+    await mock.queue.cancelAssessor();
+    expect(mock.queue.getSnapshot().progress?.assessment?.saved).toBe(0);
+    release.resolve();
+    await running;
+    expect(mock.queue.getSnapshot()).toMatchObject({
+      phase: 'cancelled', progress: { assessment: { saved: 20, total: 21, batches: 1 } },
+    });
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess']);
+    expect(mock.history.entries).toHaveLength(20);
+  });
+
+  test('run remains busy until a late cancellation acknowledgement settles', async () => {
+    const entered = deferred<void>(), releaseTarget = deferred<void>();
+    const cancelEntered = deferred<void>(), releaseCancel = deferred<void>();
+    const mock = await fixture(tasks(1), async request => {
+      if (request.op === 'work.assess') {
+        entered.resolve(); await releaseTarget.promise;
+        throw new ServiceCallError('cancelled', 'Request stopped');
+      }
+      if (request.op === 'cancel') {
+        cancelEntered.resolve(); await releaseCancel.promise;
+        return { requestId: request.input.requestId, cancelled: true };
+      }
+    });
+    const running = mock.queue.runAssessor();
+    await entered.promise;
+    const cancellation = mock.queue.cancelAssessor();
+    await cancelEntered.promise;
+    releaseTarget.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(mock.queue.getSnapshot().running).toBe(true);
+    const duplicate = mock.queue.runAssessor();
+    releaseCancel.resolve();
+    await Promise.all([running, duplicate, cancellation]);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'cancel']);
+    expect(mock.queue.getSnapshot().phase).toBe('cancelled');
+  });
+
+  test.each(['failed', 'mismatched'] as const)('unconfirmed cancellation is visible and late results are discarded: %s', async failure => {
+    const entered = deferred<void>(), release = deferred<void>();
+    const mock = await fixture(tasks(1), async request => {
+      if (request.op === 'work.assess') { entered.resolve(); await release.promise; }
+      if (request.op === 'cancel') {
+        if (failure === 'failed') throw new Error('Cancellation transport failed');
+        return { requestId: 'wrong-request', cancelled: true };
+      }
+    });
+    const running = mock.queue.runAssessor();
+    await entered.promise;
+    await mock.queue.cancelAssessor();
+    expect(mock.queue.getSnapshot().warnings.join(' ')).toContain('Cancellation is not confirmed');
+    expect(mock.queue.getSnapshot().running).toBe(true);
+    release.resolve();
+    await running;
+    expect(mock.queue.getSnapshot().warnings.join(' ')).toContain('No further batches were started');
+    expect(mock.history.entries).toEqual([]);
+  });
+
+  test('a confirmed target cancellation tolerates native shutdown interrupting the acknowledgement', async () => {
+    const entered = deferred<void>(), release = deferred<void>();
+    const mock = await fixture(tasks(1), async request => {
+      if (request.op === 'work.assess') {
+        entered.resolve(); await release.promise;
+        throw new ServiceCallError('cancelled', 'Request stopped');
+      }
+      if (request.op === 'cancel') throw new ServiceCallError('service-interrupted', 'Group stopped');
+    });
+    const running = mock.queue.runAssessor();
+    await entered.promise;
+    await mock.queue.cancelAssessor();
+    release.resolve();
+    await running;
+    expect(mock.queue.getSnapshot()).toMatchObject({ phase: 'cancelled', error: '', warnings: [] });
+  });
+
+  test('cancellation does not mask persistence failure or count unsaved results', async () => {
+    const mock = await fixture(tasks(21));
+    mock.onAppend(async () => { await mock.queue.cancelAssessor(); });
+    mock.history.fail = true;
+    await mock.queue.runAssessor();
+    expect(mock.queue.getSnapshot()).toMatchObject({
+      phase: 'error', progress: { assessment: { total: 21, saved: 0, batches: 0 } },
+    });
+    expect(mock.queue.getSnapshot().error).toContain('History storage unavailable');
+    expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(20);
+    expect(mock.history.entries).toEqual([]);
+  });
+
+  test('empty assessment runs finish without requests or a fake saved batch', async () => {
+    const mock = await fixture();
+    await mock.queue.runAssessor();
+    expect(mock.queue.getSnapshot()).toMatchObject({
+      phase: 'idle', progress: { assessment: { total: 0, saved: 0, batches: 0 } },
+    });
+    expect(mock.requests).toEqual([]);
+    await mock.queue.cancelAssessor();
+    expect(mock.queue.getSnapshot().cancelRequested).toBe(false);
+  });
+});
+
 describe('explicit task agents', () => {
   test('selected assessor submits only eligible explicit IDs, forces new versions and never collects or orders', async () => {
     const state = initial();
@@ -662,10 +873,11 @@ describe('explicit task agents', () => {
     expect(mock.history.entries.map(value => value.id)).toEqual(['first', 'first']);
     expect(mock.saved().work.ranking).toEqual(state.work.ranking);
     expect(mock.saved().work.lastStartedAt).toBeNull();
+    expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 1, saved: 1, batches: 1 });
     await expect(mock.queue.runAssessor([])).rejects.toThrow('eligible');
     await expect(mock.queue.runAssessor(['done', 'missing'])).rejects.toThrow('eligible');
     await mock.queue.runPrioritizer();
-    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    expect(mock.queue.getSnapshot().error).toContain('Assess selected');
     await mock.queue.runAssessor();
     await mock.queue.runPrioritizer();
     const order = mock.requests.at(-1)!;
@@ -702,6 +914,7 @@ describe('explicit task agents', () => {
     expect(mock.saved().tasks.find(task => task.id === 'done')?.status).toBe('done');
     expect(mock.saved().tasks.some(task => task.title === 'New task')).toBe(true);
     expect(mock.queue.getSnapshot().warnings).toEqual(['3 selected tasks were not assessed because they changed or are no longer eligible.']);
+    expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 5, saved: 2, batches: 2 });
   });
 
   test.each([true, false])('semantic agent changes stop only remaining selected assessments: selected=%s', async selected => {
@@ -729,7 +942,7 @@ describe('explicit task agents', () => {
       expect(mock.queue.getSnapshot().error).toBe('Remaining selected assessments stopped after the assessor instructions or model changed. Saved results are retained.');
     } else {
       expect(mock.queue.getSnapshot().error).toBe('');
-      expect(mock.queue.getSnapshot().warnings).toEqual(['Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.']);
+      expect(mock.queue.getSnapshot().warnings).toEqual(['Assessor settings changed during the run. Results are saved as history; use Assess selected to refresh them with the saved settings.']);
     }
   });
 
@@ -766,13 +979,14 @@ describe('explicit task agents', () => {
   async function historyAcrossConfigurations() {
     const mock = await fixture();
     mock.queue.capture('Reuse the original judgment');
+    const ids = mock.workspace.state.tasks.map(task => task.id);
     configure(mock, 'task-assessment', { instructions: 'Configuration A' });
     await mock.queue.runAssessor();
-    await mock.queue.runAssessor();
+    await mock.queue.runAssessor(ids);
     await mock.queue.runPrioritizer();
     const originalA = mock.history.entries.at(-1)!;
     configure(mock, 'task-assessment', { instructions: 'Configuration B' });
-    for (let index = 0; index < 21; index++) await mock.queue.runAssessor();
+    for (let index = 0; index < 21; index++) await mock.queue.runAssessor(ids);
     return { mock, originalA };
   }
 
@@ -805,7 +1019,7 @@ describe('explicit task agents', () => {
       await mock.queue.runPrioritizer();
       expect(read.mock.calls.map(call => call[2])).toEqual([null, 4]);
       expect(mock.requests).toEqual([]);
-      expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+      expect(mock.queue.getSnapshot().error).toContain('Assess selected');
       expect(mock.saved().work.ranking).toEqual(prior);
       expect(mock.history.entries).toEqual(history);
     } finally { read.mockRestore(); }
@@ -839,7 +1053,7 @@ describe('explicit task agents', () => {
     });
   }
 
-  test('assessor-only forces versions without collecting, ordering or advancing schedule coverage', async () => {
+  test('assessor-only skips saved versions without collecting, ordering or advancing schedule coverage', async () => {
     const state = initial();
     state.tasks = ['first', 'second'].map(id => ({ id, title: id, notes: '', status: 'open', createdAt: before }));
     state.work.settings.streams = defaultWorkState().settings.streams;
@@ -854,16 +1068,136 @@ describe('explicit task agents', () => {
     const firstIds = mock.history.entries.map(value => value.resultId);
     await mock.queue.runAssessor();
     expect(mock.saved().work.ranking).toEqual(state.work.ranking);
-    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess']);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess']);
     expect(mock.requests.every(request => request.op === 'work.assess' && request.input.force === true)).toBe(true);
-    expect(mock.history.entries).toHaveLength(4);
-    expect(new Set(mock.history.entries.map(value => value.resultId)).size).toBe(4);
+    expect(mock.history.entries).toHaveLength(2);
+    expect(new Set(mock.history.entries.map(value => value.resultId)).size).toBe(2);
     expect(mock.history.entries.slice(0, 2).map(value => value.resultId)).toEqual(firstIds);
     expect(mock.saved().work).toMatchObject({
       ranking: state.work.ranking, lastStartedAt: before, lastCompletedAt: previousCompleted, collectionCursor: before,
       settings: { schedule: { enabled: true } },
     });
-    expect(mock.queue.getSnapshot()).toMatchObject({ running: false, error: '', progress: { kind: 'assess', sources: [] } });
+    expect(mock.queue.getSnapshot()).toMatchObject({
+      running: false, error: '', progress: { kind: 'assess', sources: [], assessment: { total: 0, saved: 0, batches: 0 } },
+    });
+  });
+
+  test('Run assessor skips current, expired, edited, old-settings and legacy history, but explicit reassessment still works', async () => {
+    const state = initial();
+    state.tasks = ['current', 'expired', 'edited', 'old-settings', 'legacy', 'unassessed'].map(id => ({
+      id, title: id, notes: '', status: 'open', createdAt: before,
+    }));
+    const mock = await fixture(state);
+    const { assessments } = await assessmentBatch({ ...rankInput(state), force: true });
+    const history = assessments.slice(0, 5).map(value => {
+      if (value.id === 'expired') return { ...value, evaluatedAt: before, assessment: { ...value.assessment, reevaluateAt: previousCompleted } };
+      if (value.id === 'old-settings') return { ...value, instructionsFingerprint: 'f'.repeat(64) };
+      if (value.id !== 'legacy') return value;
+      const { agent: _agent, assessmentVersion: _version, ...legacy } = value;
+      const { impact: _impact, visibility: _visibility, effort: _effort, ...assessment } = value.assessment;
+      return { ...legacy, assessmentVersion: 'work-assessment-v2' as const, assessment };
+    });
+    await mock.workspace.saveAssessments('default', workAssessOutputSchema.parse({ assessments: history }).assessments);
+    mock.queue.edit('edited', 'Changed since assessment', 'Updated notes');
+    await mock.queue.runAssessor();
+    expect(mock.requests).toMatchObject([{ op: 'work.assess', input: { tasks: [{ id: 'unassessed' }], force: true } }]);
+    expect(mock.history.entries).toHaveLength(6);
+    expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 1, saved: 1, batches: 1 });
+    configure(mock, 'task-assessment', { instructions: 'New settings', model: 'new-model' });
+    const read = spyOn(mock.history, 'read');
+    try {
+      await mock.queue.runAssessor();
+      expect(mock.requests).toHaveLength(1);
+      expect(read.mock.calls).toHaveLength(6);
+      expect(mock.history.entries).toHaveLength(6);
+      expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 0, saved: 0, batches: 0 });
+    } finally { read.mockRestore(); }
+    await mock.queue.runAssessor(['expired']);
+    expect(mock.history.values('expired')).toHaveLength(2);
+    expect(mock.requests.at(-1)).toMatchObject({ op: 'work.assess', input: { tasks: [{ id: 'expired' }], force: true } });
+    expect(mock.queue.getSnapshot().error).toBe('');
+  });
+
+  test('Run now still refreshes an expired assessment skipped by Run assessor', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Expired assessment');
+    const { assessments } = await assessmentBatch(rankInput(mock.workspace.state), before);
+    await mock.workspace.saveAssessments('default', assessments);
+    await mock.queue.runAssessor();
+    expect(mock.requests).toEqual([]);
+    await mock.queue.run();
+    expect(mock.requests.map(request => request.op)).toEqual(['work.intake', 'work.assess', 'work.rank']);
+    expect(mock.history.entries).toHaveLength(2);
+    expect(mock.queue.getSnapshot().error).toBe('');
+  });
+
+  test('history checks include consolidated aliases and stay scoped to the active profile', async () => {
+    const state = initial();
+    state.tasks = [{ id: 'original', title: 'Original task', notes: '', status: 'open', createdAt: before }];
+    const mock = await fixture(state);
+    await mock.queue.runAssessor();
+    mock.workspace.update(current => ({ ...current, tasks: current.tasks.map(task => ({
+      ...task, id: 'consolidated', assessmentTaskIds: ['original'],
+    })) }));
+    await mock.queue.runAssessor();
+    expect(mock.requests).toHaveLength(1);
+    expect(mock.history.entries).toHaveLength(1);
+    mock.queue.createProfile('Other');
+    mock.workspace.update(current => ({ ...current, tasks: state.tasks }));
+    await mock.queue.runAssessor();
+    expect(mock.requests).toHaveLength(2);
+    expect(mock.history.entries.map(value => value.profileId)).toEqual(['default', mock.workspace.state.activeWorkProfile.id]);
+  });
+
+  test('pending results are saved before checking for unassessed tasks', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Pending assessment');
+    mock.history.fail = true;
+    await mock.queue.runAssessor();
+    expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(1);
+    mock.history.fail = false;
+    await mock.queue.runAssessor();
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess']);
+    expect(mock.history.entries).toHaveLength(1);
+    expect(mock.workspace.getSnapshot().assessmentPending).toEqual([]);
+    expect(mock.queue.getSnapshot().progress?.assessment).toEqual({ total: 0, saved: 0, batches: 0 });
+  });
+
+  test.each(['unavailable', 'empty-continuation'] as const)('unreadable history never counts as unassessed: %s', async failure => {
+    const mock = await fixture();
+    mock.queue.capture('Unknown history');
+    const read = spyOn(mock.history, 'read').mockImplementation(() => {
+      if (failure === 'unavailable') throw { code: 'storage-failed', retryable: true, message: 'History storage unavailable' };
+      return { assessments: [], before: 1 };
+    });
+    try {
+      await mock.queue.runAssessor();
+      expect(mock.requests).toEqual([]);
+      expect(mock.queue.getSnapshot().phase).toBe('error');
+      expect(mock.queue.getSnapshot().error).toMatch(/history/i);
+    } finally { read.mockRestore(); }
+  });
+
+  test('cancelling history checks prevents remaining reads and model requests', async () => {
+    const mock = await fixture();
+    mock.queue.capture('First'); mock.queue.capture('Second');
+    const entered = deferred<void>(), release = deferred<void>();
+    const originalRead = mock.platform.assessmentRead;
+    const read = spyOn(mock.platform, 'assessmentRead').mockImplementation(async (...args) => {
+      entered.resolve(); await release.promise;
+      return originalRead(...args);
+    });
+    try {
+      const running = mock.queue.runAssessor();
+      await entered.promise;
+      expect(mock.queue.getSnapshot().phase).toBe('checking-assessments');
+      await mock.queue.cancelAssessor();
+      release.resolve();
+      await running;
+      expect(read.mock.calls).toHaveLength(1);
+      expect(mock.requests).toEqual([]);
+      expect(mock.queue.getSnapshot()).toMatchObject({ phase: 'cancelled', error: '' });
+    } finally { read.mockRestore(); }
   });
 
   test('prioritizer-only requires saved work, recomputes the whole list and never assesses or collects', async () => {
@@ -874,7 +1208,7 @@ describe('explicit task agents', () => {
     mock.workspace.update(current => ({ ...current, work: { ...current.work, ranking: prior } }));
     await mock.queue.runPrioritizer();
     expect(mock.requests).toEqual([]);
-    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    expect(mock.queue.getSnapshot().error).toContain('Assess selected');
     expect(mock.saved().work.ranking).toEqual(prior);
     await mock.queue.runAssessor();
     const versions = structuredClone(mock.history.entries);
@@ -907,7 +1241,7 @@ describe('explicit task agents', () => {
     const prior = structuredClone(mock.saved().work.ranking);
     configure(mock, 'task-assessment', { instructions: 'Changed intrinsic meaning' });
     await mock.queue.runPrioritizer();
-    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    expect(mock.queue.getSnapshot().error).toContain('Assess selected');
     expect(mock.saved().work.ranking).toEqual(prior);
     expect(mock.history.entries).toEqual(versions);
     expect(mock.requests).toHaveLength(2);
