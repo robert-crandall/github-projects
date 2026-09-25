@@ -30,7 +30,7 @@ export const errorCodeSchema = z.enum([
   'access', 'rate_limit', 'unavailable', 'deadline', 'cancelled', 'busy', 'protocol',
   'limit', 'unsupported', 'copilot_unavailable', 'copilot_output', 'internal', 'source_changed',
   'mcp_configuration', 'mcp_unavailable',
-  'assessment_storage', 'assessment_capacity',
+  'assessment_storage', 'assessment_capacity', 'assessment_required',
 ]);
 export const errorSchema = z.strictObject({
   code: errorCodeSchema, message: z.string().max(300), retryable: z.boolean(),

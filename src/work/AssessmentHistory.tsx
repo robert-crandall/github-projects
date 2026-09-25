@@ -1,5 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
-import { identityDigest, type TaskAssessment } from '../../service/src/work-assessment.ts';
+import { identityDigest, type SavedAssessment, type TaskAssessment } from '../../service/src/work-assessment.ts';
+import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import type { WorkSettings } from '../../service/src/work-schema.ts';
@@ -8,6 +9,15 @@ import { assessmentFreshness } from './assessments.ts';
 import { rankTask } from './engine.ts';
 
 function date(value: string) { return new Date(value).toLocaleString(); }
+
+function AssessmentRatings({ value }: { value: SavedAssessment }) {
+  return <>{(['impact', 'visibility', 'effort'] as const).map(field => <div key={field}>
+    <dt>{field[0]!.toUpperCase() + field.slice(1)}</dt>
+    <dd>{value.assessmentVersion === 'work-assessment-v3'
+      ? `${value.assessment[field].rating} - ${value.assessment[field].rationale}`
+      : 'Not recorded in this assessment format.'}</dd>
+  </div>)}</>;
+}
 
 export function TaskAssessmentHistory({ task, controller }: { task: Task; controller: DesktopWorkspace }) {
   const snapshot = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
@@ -35,6 +45,7 @@ export function TaskAssessmentHistory({ task, controller }: { task: Task; contro
       <h3>Unsaved assessments</h3><p role="alert">{snapshot.assessmentError || 'Saving assessment history...'}</p>
       <p>Task edits save separately. These results remain available for retry or export.</p>
       {pending.map(value => <details key={value.resultId}><summary>{new Date(value.evaluatedAt).toLocaleString()}</summary>
+        <dl><AssessmentRatings value={value} /></dl>
         <p>{value.assessment.importance}</p><p>{value.assessment.urgency}</p><p>{value.assessment.blockers}</p>
         <p>{value.assessment.uncertainty}</p>
         <ul>{value.assessment.supportingEvidence.map((item, index) => <li key={index}>{item.summary} ({item.reference})</li>)}</ul>
@@ -61,15 +72,17 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
 }) {
   const [selected, setSelected] = useState('');
   const [, updateClock] = useState(0);
-  const [identity, setIdentity] = useState<{ key: string; fingerprint: string; instructionsFingerprint: string }>();
+  const [identity, setIdentity] = useState<{ key: string; fingerprint: string; instructionsFingerprint: string; configurationFingerprint: string }>();
   const [error, setError] = useState('');
   const semantic = semanticRankTask(rankTask(task));
-  const key = JSON.stringify([semantic, settings.instructions]);
+  const agent = taskAgent(settings, 'task-assessment');
+  const key = JSON.stringify([semantic, agentIdentity(agent)]);
   useEffect(() => {
     let disposed = false;
     setError('');
-    void Promise.all([identityDigest(semantic), identityDigest(settings.instructions)]).then(([fingerprint, instructionsFingerprint]) => {
-      if (!disposed) setIdentity({ key, fingerprint, instructionsFingerprint });
+    void Promise.all([identityDigest(semantic), identityDigest(agent.instructions), identityDigest(agentIdentity(agent))])
+      .then(([fingerprint, instructionsFingerprint, configurationFingerprint]) => {
+      if (!disposed) setIdentity({ key, fingerprint, instructionsFingerprint, configurationFingerprint });
     }).catch(error => {
       if (!disposed) setError(`Freshness could not be checked: ${error instanceof Error ? error.message : 'input hashing failed'}`);
     });
@@ -83,10 +96,10 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
   const latest = versions.at(-1);
   const value = versions.find(value => value.resultId === selected) ?? latest;
   if (!value) return <section aria-label="Assessment"><h3>Assessment</h3>
-    <p>No saved assessment yet. Run now assesses active tasks; earlier cache results are not task history.</p>
+    <p>No saved assessment yet. Run assessor or Run now to assess active tasks; earlier cache results are not task history.</p>
   </section>;
   const freshness = identity?.key === key
-    ? assessmentFreshness(value, { ...identity, profileId, model: settings.model }, Date.now())
+    ? assessmentFreshness(value, { ...identity, profileId, model: agent.model }, Date.now())
     : 'Checking saved input identity...';
   return <section className="task-assessment" aria-label="Assessment">
     <h3>Assessment</h3>
@@ -98,6 +111,7 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
     <p className="field-help">Assessed {date(value.evaluatedAt)}. {value.resultId === (latestResultId ?? latest?.resultId) ? 'Latest saved result.' : 'Historical result.'}</p>
     {error ? <p role="alert">{error}</p> : <p role="status">{freshness}</p>}
     <dl>
+      <AssessmentRatings value={value} />
       <dt>Importance</dt><dd>{value.assessment.importance}</dd>
       <dt>Urgency</dt><dd>{value.assessment.urgency}</dd>
       <dt>Blockers</dt><dd>{value.assessment.blockers}</dd>
@@ -109,6 +123,10 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
     </li>)}</ul>
     <p className="field-help">Reassessment due {date(value.assessment.reevaluateAt)}. Expiry does not remove this result.</p>
     <details><summary>Assessment provenance</summary><dl>
+      <dt>Agent</dt><dd>{value.assessmentVersion === 'work-assessment-v3' ? `${value.agent.name} (${value.agent.id})` : 'Legacy task assessor'}</dd>
+      {value.assessmentVersion === 'work-assessment-v3' && <>
+        <dt>Agent configuration identity</dt><dd>{value.agent.configurationFingerprint}</dd>
+      </>}
       <dt>Model requested</dt><dd>{value.model || 'SDK default (resolved model not reported)'}</dd>
       <dt>Assessment format</dt><dd>{value.assessmentVersion}</dd>
       <dt>Profile ID</dt><dd>{value.profileId}</dd>

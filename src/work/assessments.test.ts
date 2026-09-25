@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { assessmentBatch } from '../../tests/assessment-fixture.ts';
 import { AssessmentStoreFixture } from '../../tests/assessment-store-fixture.ts';
 import { assessmentScope, WorkAssessmentCache, WorkRanker, type RankingModels } from '../../service/src/work-ranking.ts';
-import { identityDigest, type TaskAssessment } from '../../service/src/work-assessment.ts';
+import { identityDigest, savedAssessmentSchema, storedAssessmentSchema, type TaskAssessment } from '../../service/src/work-assessment.ts';
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { type Task } from '../types.ts';
@@ -14,6 +14,7 @@ import { assessmentFreshness } from './assessments.ts';
 import { completeWorkTask, consolidateWorkTasks, rankInput, rankTask, reconcileWork, restoreWorkTask } from './engine.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
 import { AssessmentHistory } from './AssessmentHistory.tsx';
+import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 
 const at = '2026-09-24T12:00:00.000Z';
 async function manual() {
@@ -50,7 +51,8 @@ test('freshness distinguishes changed content, settings, expiry and a backwards 
   const version = history.entries[0]!;
   const current = {
     fingerprint: await identityDigest(semanticRankTask(rankTask(task))),
-    instructionsFingerprint: await identityDigest(state.work.settings.instructions),
+    instructionsFingerprint: await identityDigest(taskAgent(state.work.settings, 'task-assessment').instructions),
+    configurationFingerprint: await identityDigest(agentIdentity(taskAgent(state.work.settings, 'task-assessment'))),
     profileId: 'default', model: '',
   };
   expect(assessmentFreshness(version, current, Date.parse(at))).toBe('Current for saved task content');
@@ -156,4 +158,27 @@ for (const shape of ['live-task', 'shared-alias'] as const) test(`rejects ambigu
   if (shape === 'live-task') state.tasks[0]!.assessmentTaskIds = ['other'];
   else for (const task of state.tasks) task.assessmentTaskIds = ['shared'];
   expect(() => restoreDesktop(state, at)).toThrow('exactly one task');
+});
+
+test('legacy v2 history decodes and displays without manufacturing new ratings or agent identity', async () => {
+  const { state, history } = await manual();
+  const current = history.entries[0]!;
+  const legacy = storedAssessmentSchema.parse({
+    resultId: crypto.randomUUID(), id: current.id, profileId: current.profileId, fingerprint: current.fingerprint,
+    instructionsFingerprint: current.instructionsFingerprint, model: current.model, evaluatedAt: current.evaluatedAt,
+    sequence: current.sequence, assessmentVersion: 'work-assessment-v2', assessment: {
+      importance: 'Historical importance', urgency: 'Historical urgency', blockers: 'None known',
+      supportingEvidence: current.assessment.supportingEvidence, uncertainty: 'Historical uncertainty',
+      reevaluateAt: current.assessment.reevaluateAt,
+    },
+  });
+  const html = renderToStaticMarkup(createElement(AssessmentHistory, {
+    task: { ...state.tasks[0]!, assessments: [legacy] }, profileId: 'default', settings: state.work.settings,
+  }));
+  expect(html).toContain('Historical importance');
+  expect(html).toContain('Legacy task assessor');
+  expect(html.match(/Not recorded in this assessment format/g)).toHaveLength(3);
+  const { sequence: _, ...result } = legacy;
+  expect(savedAssessmentSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result);
+  expect(savedAssessmentSchema.safeParse({ ...result, assessmentVersion: 'work-assessment-v3' }).success).toBe(false);
 });

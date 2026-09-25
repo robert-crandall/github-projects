@@ -23,6 +23,8 @@ The header contains Run now, work profiles, ranking time and cadence. To do, Don
 
 Settings is a full settings page, not a large modal. Separate appearance, instructions, source queries, the opt-in schedule, connection guidance and recovery. Appearance applies and saves immediately, independently of the work-settings form. Manual capture uses a small focused dialog and Command/Ctrl+K. Local edits stay available during collection and ranking.
 
+Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings, each with a name, model and instructions. Put their separate run actions near Run now with the role distinction visible. Assessment ratings stay in the compact task-details definition list and history selector, not a dashboard or card grid.
+
 Do not retain a second workspace or disabled placeholders for the retired Inbox, Filtered, Archive or Tasks destinations. Saved conversations and private thread notes appear alongside matching tasks.
 
 ## Palette and type

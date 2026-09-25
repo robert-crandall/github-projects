@@ -10,12 +10,15 @@ import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWor
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
+import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
+import { assessmentFreshness } from './assessments.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type CollectionProgress = {
   id: string; name: string; state: 'waiting' | 'collecting' | 'done' | 'failed' | 'not-run'; diagnostics: string[];
 };
-export type RunProgress = { startedAt: number; finishedAt: number | null; sources: CollectionProgress[] };
+export type RunKind = 'pipeline' | 'assess' | 'prioritize';
+export type RunProgress = { startedAt: number; finishedAt: number | null; sources: CollectionProgress[]; kind?: RunKind };
 export type WorkQueueSnapshot = {
   running: boolean; phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'assessing' | 'ranking' | 'saving' | 'error';
   progress: RunProgress | null; error: string; warnings: string[]; connections?: WorkConnections;
@@ -164,6 +167,8 @@ export class WorkQueue {
   }
 
   run(): Promise<void> { return this.start(new Date()); }
+  runAssessor(): Promise<void> { return this.start(new Date(), 'assess'); }
+  runPrioritizer(): Promise<void> { return this.start(new Date(), 'prioritize'); }
   async tick(now = new Date()): Promise<void> {
     if (this.status.running) return;
     const work = this.controller.state.work ?? defaultWorkState();
@@ -176,15 +181,15 @@ export class WorkQueue {
     await this.start(now);
   }
 
-  private start(now: Date): Promise<void> {
+  private start(now: Date, kind: RunKind = 'pipeline'): Promise<void> {
     if (this.status.running) return this.active ?? Promise.resolve();
     const settings = structuredClone(this.controller.state.work.settings);
     this.publish({ running: true, phase: 'preparing', error: '', warnings: [], progress: {
-      startedAt: Date.now(), finishedAt: null,
-      sources: settings.streams.filter(stream => stream.enabled)
+      startedAt: Date.now(), finishedAt: null, kind,
+      sources: settings.streams.filter(stream => kind === 'pipeline' && stream.enabled)
         .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
     } });
-    const running = this.execute(now, settings);
+    const running = this.execute(now, settings, kind);
     this.active = running;
     return running;
   }
@@ -226,45 +231,99 @@ export class WorkQueue {
     throw new Error('More task intake remains. Saved tasks are retained; run again to continue.');
   }
 
-  private async rank(profileId: string, assessmentGeneration: number): Promise<string[]> {
+  private async assess(input: WorkRankInput & { profileId: string }, assessmentGeneration: number, force = false) {
     this.assertWorkspace(assessmentGeneration);
-    this.assertProfile(this.controller.state, profileId);
-    const input = { ...rankInput(this.controller.state), profileId };
-    const submitted = new Map(input.tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
+    this.assertProfile(this.controller.state, input.profileId);
+    const agent = taskAgent(input, 'task-assessment');
     const fingerprints = new Map(await Promise.all(input.tasks.map(async task =>
       [task.id, await identityDigest(semanticRankTask(task))] as const)));
-    const instructionsFingerprint = await identityDigest(input.instructions);
+    const instructionsFingerprint = await identityDigest(agent.instructions);
+    const configurationFingerprint = await identityDigest(agentIdentity(agent));
     const assessments = new Map<string, SavedAssessment>();
     let pending = input.tasks;
     while (pending.length) {
       this.publish({ phase: 'assessing' });
-      const batch = workAssessOutputSchema.parse(await this.service.call('work.assess', { ...input, tasks: pending }));
+      this.assertWorkspace(assessmentGeneration);
+      this.assertProfile(this.controller.state, input.profileId);
+      const batch = workAssessOutputSchema.parse(await this.service.call('work.assess', { ...input, tasks: pending, force }));
       const pendingIds = new Set(pending.map(task => task.id));
       if (new Set(batch.assessments.map(value => value.id)).size !== batch.assessments.length
         || new Set(batch.assessments.map(value => value.resultId)).size !== batch.assessments.length
         || batch.assessments.some(value => !pendingIds.has(value.id) || value.profileId !== input.profileId
           || value.fingerprint !== fingerprints.get(value.id) || value.instructionsFingerprint !== instructionsFingerprint
-          || value.model !== input.model || value.assessmentVersion !== ASSESSMENT_VERSION)) {
+          || value.model !== agent.model || value.assessmentVersion !== ASSESSMENT_VERSION
+          || value.agent.id !== agent.id || value.agent.configurationFingerprint !== configurationFingerprint)) {
         throw new Error('Assessment results did not match the submitted tasks and settings. The previous order is retained.');
       }
-      await this.controller.saveAssessments(profileId, batch.assessments, assessmentGeneration);
+      await this.controller.saveAssessments(input.profileId, batch.assessments, assessmentGeneration);
       for (const value of batch.assessments) assessments.set(value.id, value);
       pending = pending.filter(task => !assessments.has(task.id));
-      this.assertProfile(this.controller.state, profileId);
+      this.assertWorkspace(assessmentGeneration);
+      this.assertProfile(this.controller.state, input.profileId);
     }
+    return assessments;
+  }
+
+  private async prioritize(input: WorkRankInput & { profileId: string }, assessmentGeneration: number,
+    assessments?: Map<string, SavedAssessment>, force = false): Promise<string[]> {
+    const profileId = input.profileId;
+    const assessor = taskAgent(input, 'task-assessment');
+    const prioritizer = taskAgent(input, 'task-prioritization');
     const assertSettings = (current: AppState) => {
       this.assertWorkspace(assessmentGeneration);
-      if (current.activeWorkProfile.id !== input.profileId || current.work.settings.instructions !== input.instructions
-        || current.work.settings.model !== input.model) {
+      if (current.activeWorkProfile.id !== profileId
+        || JSON.stringify(agentIdentity(taskAgent(current.work.settings, 'task-assessment'))) !== JSON.stringify(agentIdentity(assessor))
+        || JSON.stringify(agentIdentity(taskAgent(current.work.settings, 'task-prioritization'))) !== JSON.stringify(agentIdentity(prioritizer))) {
         throw new Error('Ranking settings changed during the run. The previous order is retained; run again with the saved settings.');
       }
     };
     assertSettings(this.controller.state);
     const latestInput = rankInput(this.controller.state);
-    const orderTasks = latestInput.tasks.filter(task => submitted.get(task.id) === JSON.stringify(semanticRankTask(task)));
+    const submitted = new Map(latestInput.tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
+    const instructionsFingerprint = await identityDigest(assessor.instructions);
+    const configurationFingerprint = await identityDigest(agentIdentity(assessor));
+    const assessmentIds: string[] = [];
+    for (const task of latestInput.tasks) {
+      const fingerprint = await identityDigest(semanticRankTask(task));
+      const isCurrent = (value: SavedAssessment) => value.id === task.id && assessmentFreshness(value, {
+        profileId, fingerprint, instructionsFingerprint, configurationFingerprint, model: assessor.model,
+      }, Date.now()) === 'Current for saved task content';
+      let value = assessments?.get(task.id);
+      if (!assessments) {
+        const seen = new Set<string>();
+        for (let before: number | null = null; ;) {
+          assertSettings(this.controller.state);
+          const page = await this.controller.platform.assessmentRead(profileId, task.id, before);
+          assertSettings(this.controller.state);
+          let previous: number = before ?? Infinity;
+          for (const entry of page.assessments) {
+            if (entry.sequence >= previous || seen.has(entry.resultId)) {
+              throw new Error('Assessment history returned repeated or unordered results. The previous order is retained; retry history.');
+            }
+            previous = entry.sequence;
+            seen.add(entry.resultId);
+          }
+          if (page.before !== null && (!page.assessments.length || page.before !== previous)) {
+            throw new Error('Assessment history did not advance. The previous order is retained; retry history.');
+          }
+          value = page.assessments.find(isCurrent);
+          if (value || page.before === null) break;
+          before = page.before;
+        }
+      }
+      if (!value || !isCurrent(value)) {
+        throw new Error('Current saved assessments are required for every eligible task. Run assessor first, then run prioritizer. The previous order is retained.');
+      }
+      assessmentIds.push(value.resultId);
+    }
+    assertSettings(this.controller.state);
+    const currentTasks = rankInput(this.controller.state).tasks;
+    if (!exactIds(latestInput.tasks.map(task => task.id), currentTasks.map(task => task.id))
+      || currentTasks.some(task => submitted.get(task.id) !== JSON.stringify(semanticRankTask(task)))) {
+      throw new Error('Tasks changed while preparing prioritization. Run assessor first, then run prioritizer. The previous order is retained.');
+    }
     const orderInput = {
-      ...latestInput, profileId, tasks: orderTasks,
-      assessmentIds: orderTasks.map(task => assessments.get(task.id)!.resultId),
+      ...latestInput, profileId, assessmentIds, force,
     };
     this.publish({ phase: 'ranking' });
     const result = orderInput.tasks.length
@@ -299,7 +358,7 @@ export class WorkQueue {
     return warnings;
   }
 
-  private async execute(now: Date, settings: WorkSettings): Promise<void> {
+  private async execute(now: Date, settings: WorkSettings, kind: RunKind): Promise<void> {
     const profileId = this.controller.state.activeWorkProfile.id;
     const generation = this.controller.assessmentGeneration;
     const errors: string[] = [];
@@ -312,10 +371,25 @@ export class WorkQueue {
     try {
       this.update(current => {
         previousCompletedAt = current.work.lastCompletedAt;
-        return { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } };
+        return kind === 'pipeline' ? { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } } : current;
       });
       await this.controller.flush();
       await this.controller.retryAssessments();
+      if (kind !== 'pipeline') {
+        const input = { ...rankInput(this.controller.state), profileId };
+        if (kind === 'assess') {
+          await this.assess(input, generation, true);
+          if (JSON.stringify(agentIdentity(taskAgent(input, 'task-assessment')))
+            !== JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))) {
+            warnings.push('Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.');
+          }
+        } else warnings.push(...await this.prioritize(input, generation, undefined, true));
+        this.assertWorkspace(generation);
+        this.update(current => { this.assertProfile(current, profileId); return { ...current, work: { ...current.work, lastError: '' } }; });
+        this.publish({ phase: 'saving' });
+        await this.controller.flush();
+        return;
+      }
       const { collectionCursor } = this.controller.state.work;
       scannedSettings = sourceSettings(settings);
       const streams = settings.streams.filter(stream => stream.enabled);
@@ -377,7 +451,11 @@ export class WorkQueue {
         this.sourceProgress(stream.id, { state: failed ? 'failed' : 'done' });
       }
       this.publish({ warnings: [...warnings] });
-      try { warnings.push(...await this.rank(profileId, generation)); }
+      try {
+        const input = { ...rankInput(this.controller.state), profileId };
+        const assessments = await this.assess(input, generation);
+        warnings.push(...await this.prioritize(input, generation, assessments));
+      }
       catch (error) { errors.push(`Ranking: ${message(error)}`); }
       this.publish({ phase: 'saving', error: errors.join('\n'), warnings: [...warnings] });
       this.update(current => {

@@ -1,5 +1,6 @@
-import { describe, expect, test } from 'bun:test';
-import { defaultWorkState, notificationWorkstream, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
+import { describe, expect, spyOn, test } from 'bun:test';
+import { defaultWorkState, notificationWorkstream, workSettingsSchema, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
+import { taskAgents, type TaskAgentJob } from '../../service/src/work-agents.ts';
 import type { Request } from '../../service/src/schema.ts';
 import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { legacyFixture } from '../domain/test-fixtures.ts';
@@ -138,7 +139,7 @@ describe('durable local work', () => {
     });
     await mock.queue.run();
     const version = mock.history.values('manual')[0]!;
-    expect(version).toMatchObject({ id: 'manual', profileId: 'default', model: '', assessmentVersion: 'work-assessment-v2' });
+    expect(version).toMatchObject({ id: 'manual', profileId: 'default', model: '', assessmentVersion: 'work-assessment-v3' });
     expect(mock.saved().work.ranking).toEqual(state.work.ranking);
     expect(mock.queue.getSnapshot().error).toContain('Ordering unavailable');
     const reloaded = new DesktopWorkspace(mock.platform);
@@ -292,7 +293,7 @@ describe('durable local work', () => {
     expect(JSON.parse(await mock.workspace.fullPendingJson()).quarantinedAssessments).toHaveLength(1);
   });
 
-  test('in-flight assessments preserve edits and Done as history, ordering only unchanged active tasks', async () => {
+  test('in-flight assessments preserve edits and Done as history without ordering an incomplete eligible list', async () => {
     const state = initial();
     state.tasks = ['edited', 'done', 'unchanged'].map(id => ({ id, title: id, notes: '', status: 'open', createdAt: before }));
     const entered = deferred<Extract<Request, { op: 'work.assess' }>>();
@@ -310,11 +311,9 @@ describe('durable local work', () => {
     expect(mock.saved().tasks.find(task => task.id === 'edited')).toMatchObject({ title: 'New owner title', notes: 'New owner notes' });
     expect(mock.saved().tasks.find(task => task.id === 'done')!.status).toBe('done');
     expect(mock.history.entries).toHaveLength(3);
-    const rank = mock.requests.find(request => request.op === 'work.rank');
-    if (rank?.op !== 'work.rank') throw new Error('No order request');
-    expect(rank.input.tasks.map(task => task.id)).toEqual(['unchanged']);
-    expect(mock.saved().work.ranking!.orderedIds).toEqual(['unchanged']);
-    expect(mock.queue.getSnapshot().warnings.join(' ')).toContain('2 new or edited tasks');
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+    expect(mock.saved().work.ranking).toBeNull();
+    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
   });
 
   test('in-flight results return to their original profile after external profile replacement', async () => {
@@ -445,7 +444,7 @@ describe('work profiles', () => {
     expect(mock.saved().activeWorkProfile).toEqual({ id: 'default', name: 'Default' });
     expect(mock.saved().inactiveWorkProfiles).toEqual([]);
     expect(mock.saved().tasks).toEqual(current.tasks);
-    expect(mock.saved().work).toEqual(current.work);
+    expect(mock.saved().work).toEqual({ ...current.work, settings: workSettingsSchema.parse(current.work.settings) });
   });
 
   test('switching restores independent tasks, completion, settings, ranking and cursors after relaunch', async () => {
@@ -516,7 +515,7 @@ describe('work profiles', () => {
     const changed = structuredClone(mock.workspace.state.work.settings);
     changed.streams[0]!.query = 'repo:owner/on-call is:pr';
     mock.queue.saveSettings(changed);
-    expect(mock.workspace.state.inactiveWorkProfiles[0]!.work.settings).toEqual(saved.work.settings);
+    expect(mock.workspace.state.inactiveWorkProfiles[0]!.work.settings).toEqual(workSettingsSchema.parse(saved.work.settings));
     mock.queue.createProfile('Empty');
     expect(mock.workspace.state.tasks).toEqual([]);
     expect(mock.workspace.state.work.settings).toMatchObject({ instructions: '', model: '', streams: [], schedule: { enabled: false } });
@@ -640,6 +639,230 @@ describe('work profiles', () => {
     await reloaded.load();
     expect(reloaded.state.tasks[0]!.title).toBe('On-call task');
     expect(reloaded.state.inactiveWorkProfiles[0]!.tasks[0]!.title).toBe('Default task');
+  });
+});
+
+describe('explicit task agents', () => {
+  function configure(mock: Awaited<ReturnType<typeof fixture>>, job: TaskAgentJob, patch: { name?: string; instructions?: string; model?: string }) {
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, agents: taskAgents(mock.workspace.state.work.settings)
+      .map(agent => agent.jobType === job ? { ...agent, ...patch } : agent) });
+  }
+
+  async function historyAcrossConfigurations() {
+    const mock = await fixture();
+    mock.queue.capture('Reuse the original judgment');
+    configure(mock, 'task-assessment', { instructions: 'Configuration A' });
+    await mock.queue.runAssessor();
+    await mock.queue.runAssessor();
+    await mock.queue.runPrioritizer();
+    const originalA = mock.history.entries.at(-1)!;
+    configure(mock, 'task-assessment', { instructions: 'Configuration B' });
+    for (let index = 0; index < 21; index++) await mock.queue.runAssessor();
+    return { mock, originalA };
+  }
+
+  test('prioritizer reuses newest current A after A-to-B-to-A across history pages without assessment', async () => {
+    const { mock, originalA } = await historyAcrossConfigurations();
+    configure(mock, 'task-assessment', { instructions: 'Configuration A' });
+    const history = structuredClone(mock.history.entries);
+    mock.requests.length = 0;
+    const read = spyOn(mock.history, 'read');
+    try {
+      await mock.queue.runPrioritizer();
+      expect(mock.requests.map(request => request.op)).toEqual(['work.rank']);
+      const request = mock.requests[0]!;
+      if (request.op !== 'work.rank') throw new Error('No prioritization request');
+      expect(request.input.assessmentIds).toEqual([originalA.resultId]);
+      expect(read.mock.calls.map(call => call[2])).toEqual([null, 4]);
+      expect(mock.queue.getSnapshot().error).toBe('');
+      expect(mock.history.entries).toEqual(history);
+    } finally { read.mockRestore(); }
+  });
+
+  test('prioritizer exhausts incompatible history pages without assessment or replacing the prior order', async () => {
+    const { mock } = await historyAcrossConfigurations();
+    configure(mock, 'task-assessment', { instructions: 'Configuration C with no saved judgment' });
+    const prior = structuredClone(mock.saved().work.ranking);
+    const history = structuredClone(mock.history.entries);
+    mock.requests.length = 0;
+    const read = spyOn(mock.history, 'read');
+    try {
+      await mock.queue.runPrioritizer();
+      expect(read.mock.calls.map(call => call[2])).toEqual([null, 4]);
+      expect(mock.requests).toEqual([]);
+      expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+      expect(mock.saved().work.ranking).toEqual(prior);
+      expect(mock.history.entries).toEqual(history);
+    } finally { read.mockRestore(); }
+  });
+
+  for (const invalid of ['repeated-page', 'duplicate-result', 'empty-continuation', 'nonadvancing-cursor'] as const) {
+    test(`prioritizer rejects ${invalid} while searching history and preserves old order`, async () => {
+      const { mock } = await historyAcrossConfigurations();
+      configure(mock, 'task-assessment', { instructions: 'Configuration A' });
+      const prior = structuredClone(mock.saved().work.ranking);
+      mock.requests.length = 0;
+      const originalRead = mock.history.read.bind(mock.history);
+      const read = spyOn(mock.history, 'read').mockImplementation((profileId, taskId, before, state) => {
+        const page = originalRead(profileId, taskId, before, state);
+        if (invalid === 'repeated-page' && before !== null) return originalRead(profileId, taskId, null, state);
+        if (invalid === 'duplicate-result') return {
+          ...page, assessments: page.assessments.map((entry, index) => index === 1
+            ? { ...entry, resultId: page.assessments[0]!.resultId } : entry),
+        };
+        if (invalid === 'empty-continuation') return { assessments: [], before: 4 };
+        if (invalid === 'nonadvancing-cursor') return { ...page, before: page.assessments[0]!.sequence };
+        return page;
+      });
+      try {
+        await mock.queue.runPrioritizer();
+        expect(mock.requests).toEqual([]);
+        expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+        expect(mock.queue.getSnapshot().error).toContain('Assessment history');
+        expect(mock.saved().work.ranking).toEqual(prior);
+      } finally { read.mockRestore(); }
+    });
+  }
+
+  test('assessor-only forces versions without collecting, ordering or advancing schedule coverage', async () => {
+    const state = initial();
+    state.tasks = ['first', 'second'].map(id => ({ id, title: id, notes: '', status: 'open', createdAt: before }));
+    state.work.settings.streams = defaultWorkState().settings.streams;
+    state.work.settings.schedule.enabled = true;
+    state.work.ranking = { orderedIds: ['first', 'second'], reasons: [{ id: 'first', reason: 'Original' }], rankedAt: before };
+    state.work.collectionCursor = before;
+    state.work.lastStartedAt = before;
+    state.work.lastCompletedAt = previousCompleted;
+    const mock = await fixture(state);
+    await mock.queue.runAssessor();
+    expect(mock.saved().work.ranking).toEqual(state.work.ranking);
+    const firstIds = mock.history.entries.map(value => value.resultId);
+    await mock.queue.runAssessor();
+    expect(mock.saved().work.ranking).toEqual(state.work.ranking);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess']);
+    expect(mock.requests.every(request => request.op === 'work.assess' && request.input.force === true)).toBe(true);
+    expect(mock.history.entries).toHaveLength(4);
+    expect(new Set(mock.history.entries.map(value => value.resultId)).size).toBe(4);
+    expect(mock.history.entries.slice(0, 2).map(value => value.resultId)).toEqual(firstIds);
+    expect(mock.saved().work).toMatchObject({
+      ranking: state.work.ranking, lastStartedAt: before, lastCompletedAt: previousCompleted, collectionCursor: before,
+      settings: { schedule: { enabled: true } },
+    });
+    expect(mock.queue.getSnapshot()).toMatchObject({ running: false, error: '', progress: { kind: 'assess', sources: [] } });
+  });
+
+  test('prioritizer-only requires saved work, recomputes the whole list and never assesses or collects', async () => {
+    const mock = await fixture();
+    mock.queue.capture('First');
+    mock.queue.capture('Second');
+    const prior = { orderedIds: mock.workspace.state.tasks.map(task => task.id), reasons: [], rankedAt: before };
+    mock.workspace.update(current => ({ ...current, work: { ...current.work, ranking: prior } }));
+    await mock.queue.runPrioritizer();
+    expect(mock.requests).toEqual([]);
+    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    expect(mock.saved().work.ranking).toEqual(prior);
+    await mock.queue.runAssessor();
+    const versions = structuredClone(mock.history.entries);
+    mock.queue.saveSourceFilter({ selectedSources: [], collapsedProviders: [] });
+    await mock.queue.runPrioritizer();
+    await mock.queue.runPrioritizer();
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.rank', 'work.rank']);
+    for (const request of mock.requests) if (request.op === 'work.rank') {
+      expect(request.input.force).toBe(true);
+      expect(request.input.tasks).toHaveLength(2);
+      expect(new Set(request.input.assessmentIds)).toEqual(new Set(versions.map(value => value.resultId)));
+    }
+    expect(mock.history.entries).toEqual(versions);
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.saved().work.lastStartedAt).toBeNull();
+    expect(mock.saved().work.lastCompletedAt).toBeNull();
+  });
+
+  test('prioritizer edits reuse assessor results; assessor edits require new assessment and keep old order', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Independent roles');
+    await mock.queue.runAssessor();
+    const versions = structuredClone(mock.history.entries);
+    configure(mock, 'task-prioritization', { instructions: 'New ordering rules', model: 'priority-model' });
+    configure(mock, 'task-assessment', { name: 'Evidence specialist' });
+    await mock.queue.runPrioritizer();
+    expect(mock.queue.getSnapshot().error).toBe('');
+    expect(mock.history.entries).toEqual(versions);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.rank']);
+    const prior = structuredClone(mock.saved().work.ranking);
+    configure(mock, 'task-assessment', { instructions: 'Changed intrinsic meaning' });
+    await mock.queue.runPrioritizer();
+    expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+    expect(mock.saved().work.ranking).toEqual(prior);
+    expect(mock.history.entries).toEqual(versions);
+    expect(mock.requests).toHaveLength(2);
+  });
+
+  test('agent definitions materialize for both legacy profiles and edits never leak across profiles or reload', async () => {
+    let state = initial();
+    state.work.settings.instructions = 'Original owner rules';
+    state.work.settings.model = 'original-model';
+    state = createWorkProfile(state, 'Other', true);
+    state.work.settings.instructions = 'Other owner rules';
+    const otherId = state.activeWorkProfile.id;
+    state = switchWorkProfile(state, 'default');
+    const mock = await fixture(state);
+    const original = structuredClone(taskAgents(mock.workspace.state.work.settings));
+    expect(original.every(agent => agent.instructions === 'Original owner rules' && agent.model === 'original-model')).toBe(true);
+    expect(mock.workspace.state.inactiveWorkProfiles[0]!.work.settings.agents?.every(agent => agent.instructions === 'Other owner rules')).toBe(true);
+    mock.queue.switchProfile(otherId);
+    configure(mock, 'task-assessment', { instructions: 'Other assessor', model: 'other-model', name: 'Other specialist' });
+    configure(mock, 'task-prioritization', { instructions: 'Other priorities' });
+    await mock.workspace.flush();
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    const queue = new WorkQueue(reloaded, mock.service);
+    expect(taskAgents(reloaded.state.work.settings)[0]!.instructions).toBe('Other assessor');
+    queue.switchProfile('default');
+    expect(taskAgents(reloaded.state.work.settings)).toEqual(original);
+    expect(reloaded.state.work.settings).toMatchObject({ instructions: 'Original owner rules', model: 'original-model' });
+    await reloaded.flush();
+  });
+
+  test('independent runs share the overlap guard and preserve notes and Done during assessment', async () => {
+    const entered = deferred<Extract<Request, { op: 'work.assess' }>>();
+    const released = deferred<unknown>();
+    const mock = await fixture(initial(), request => {
+      if (request.op === 'work.assess') { entered.resolve(request); return released.promise; }
+    });
+    mock.queue.capture('Keep owner edits');
+    const id = mock.workspace.state.tasks[0]!.id;
+    const run = mock.queue.runAssessor();
+    const request = await entered.promise;
+    const duplicate = mock.queue.runAssessor();
+    const prioritize = mock.queue.runPrioritizer();
+    const pipeline = mock.queue.run();
+    mock.queue.edit(id, 'Changed title', 'Changed notes');
+    mock.queue.complete(id);
+    released.resolve(await assessmentBatch(request.input));
+    await Promise.all([run, duplicate, prioritize, pipeline]);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess']);
+    expect(mock.history.entries).toHaveLength(1);
+    expect(mock.saved().tasks[0]).toMatchObject({ title: 'Changed title', notes: 'Changed notes', status: 'done' });
+    expect(mock.saved().work.ranking).toBeNull();
+  });
+
+  test('a failed independent order preserves paid versions and the prior successful order', async () => {
+    let fail = false;
+    const mock = await fixture(initial(), request => {
+      if (fail && request.op === 'work.rank') throw new Error('Independent order unavailable');
+    });
+    mock.queue.capture('Paid assessment');
+    await mock.queue.runAssessor();
+    await mock.queue.runPrioritizer();
+    const versions = structuredClone(mock.history.entries);
+    const prior = structuredClone(mock.saved().work.ranking);
+    fail = true;
+    await mock.queue.runPrioritizer();
+    expect(mock.history.entries).toEqual(versions);
+    expect(mock.saved().work.ranking).toEqual(prior);
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess', 'work.rank', 'work.rank']);
+    expect(mock.queue.getSnapshot().error).toContain('Independent order unavailable');
   });
 });
 
@@ -1499,11 +1722,14 @@ describe('concurrency and exact ranking', () => {
     mock.queue.capture('Task');
     const run = mock.queue.run();
     const request = await entered.promise;
-    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, instructions: 'New priorities', model: 'new-model' });
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings,
+      agents: taskAgents(mock.workspace.state.work.settings).map(agent => agent.jobType === 'task-prioritization'
+        ? { ...agent, instructions: 'New priorities', model: 'new-model' } : agent),
+    });
     result.resolve(ranked(request));
     await run;
-    expect(mock.saved().work.settings.instructions).toBe('New priorities');
-    expect(mock.saved().work.settings.model).toBe('new-model');
+    expect(mock.saved().work.settings.agents?.find(agent => agent.jobType === 'task-prioritization'))
+      .toMatchObject({ instructions: 'New priorities', model: 'new-model' });
     expect(mock.saved().work.ranking).toBeNull();
     expect(mock.queue.getSnapshot().error).toContain('settings changed');
     expect(mock.saved().work.lastCompletedAt).toBeNull();

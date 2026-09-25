@@ -3,6 +3,7 @@ import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
 import type { WorkQueue } from './controller.ts';
 import { Appearance } from '../themes/Appearance.tsx';
+import { taskAgents, taskAgentJobs, type TaskAgent } from '../../service/src/work-agents.ts';
 
 const slackReadTools = ['slack_search_public_and_private', 'slack_read_thread'] as const;
 
@@ -23,6 +24,9 @@ export function Settings({ settings, profileName, queue, close, recover }: {
   const [checking, setChecking] = useState(false);
   const [connectionInfo, setConnectionInfo] = useState('');
   function change(next: WorkSettings) { setDraft(next); setSaved(false); setError(''); }
+  function agentChange(id: string, patch: Partial<Pick<TaskAgent, 'name' | 'instructions' | 'model'>>) {
+    change({ ...draft, agents: taskAgents(draft).map(agent => agent.id === id ? { ...agent, ...patch } : agent) });
+  }
   function streamChange(id: string, patch: Partial<Workstream>) {
     change({ ...draft, streams: draft.streams.map(stream => stream.id === id ? { ...stream, ...patch } : stream) });
   }
@@ -50,7 +54,7 @@ export function Settings({ settings, profileName, queue, close, recover }: {
   }
   return <main id="task-settings" className="task-settings">
     <header className="task-settings-heading"><button className="quiet" onClick={close}><ArrowLeft size={16} />Back to tasks</button><h1>Settings</h1>
-      <p>Choose the sources. Tell Copilot what matters. Every run ranks the whole task list.</p>
+      <p>Choose sources and configure each agent's judgment. Run now collects, assesses and prioritizes; agents can also run separately.</p>
     </header>
     <Appearance />
     <form onSubmit={save}>
@@ -59,17 +63,27 @@ export function Settings({ settings, profileName, queue, close, recover }: {
         <input id="profile-name" value={name} maxLength={80} required onChange={event => {
           setName(event.target.value); setSaved(false); setError('');
         }} />
-        <p>Instructions, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
+        <p>Agents, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
       </section>
-      <section aria-labelledby="instructions-heading"><h2 id="instructions-heading">Priority instructions</h2>
-        <p>Your rules and roadmap guide the order, not which requests you have already completed.</p>
-        <label htmlFor="priority-instructions">What should come first?</label>
-        <textarea id="priority-instructions" rows={8} maxLength={16000} value={draft.instructions}
-          placeholder={'Rank PR reviews in owner/repo first.\nTreat reviews requested through Slack as high priority.\nPrioritize earlier roadmap phases. Paste your roadmap here.'}
-          onChange={event => change({ ...draft, instructions: event.target.value })} />
-        <label className="task-model">Copilot model (optional)<input value={draft.model} maxLength={100}
-          placeholder="Use the SDK default" onChange={event => change({ ...draft, model: event.target.value })} /></label>
-        <p className="field-help">Copilot receives task titles, task notes, source evidence and these instructions. Saved thread notes stay private.</p>
+      <section aria-labelledby="agents-heading"><h2 id="agents-heading">Task agents</h2>
+        <p>One agent assesses tasks; the other orders the whole eligible list. Instructions guide judgment, not permissions.</p>
+        {taskAgents(draft).map(agent => <fieldset className="task-agent" key={agent.id}>
+          <legend>{taskAgentJobs[agent.jobType].name}</legend>
+          <p className="field-help">{taskAgentJobs[agent.jobType].capability} Result: {taskAgentJobs[agent.jobType].resultFormat}.</p>
+          <div className="task-field-pair">
+            <label>Agent name<input value={agent.name} maxLength={100} required
+              onChange={event => agentChange(agent.id, { name: event.target.value })} /></label>
+            <label>Agent model (optional)<input value={agent.model} maxLength={100} placeholder="Use the SDK default"
+              onChange={event => agentChange(agent.id, { model: event.target.value })} /></label>
+          </div>
+          <label htmlFor={agent.jobType === 'task-assessment' ? 'assessment-instructions' : 'priority-instructions'}>
+            {agent.jobType === 'task-assessment' ? 'How should tasks be assessed?' : 'What should come first?'}
+          </label>
+          <textarea id={agent.jobType === 'task-assessment' ? 'assessment-instructions' : 'priority-instructions'}
+            rows={5} maxLength={16000} value={agent.instructions}
+            onChange={event => agentChange(agent.id, { instructions: event.target.value })} />
+        </fieldset>)}
+        <p className="field-help">The assessor receives task titles, task notes and source evidence. The prioritizer receives saved assessments. Saved thread notes stay private. Editing either agent keeps previous results readable.</p>
       </section>
       <section aria-labelledby="sources-heading"><div className="task-section-heading"><h2 id="sources-heading">Sources of work</h2>
         <button type="button" className="secondary" disabled={draft.streams.length >= 30} onClick={() => change({
@@ -79,6 +93,8 @@ export function Settings({ settings, profileName, queue, close, recover }: {
           }],
         })}><Plus size={15} />Add source</button></div>
         <p>Keep backlog searches for assigned work and projects. Notifications find requests those searches miss, including mentions.</p>
+        <label className="task-model">Collection model (optional)<input value={draft.model} maxLength={100}
+          placeholder="Use the SDK default" onChange={event => change({ ...draft, model: event.target.value })} /></label>
         {!draft.streams.some(stream => stream.kind === 'github-notifications') && <button type="button" className="secondary"
           disabled={draft.streams.length >= 30} onClick={() => change({ ...draft, streams: [...draft.streams, notificationWorkstream()] })}>
           <Plus size={15} />Add GitHub notifications</button>}
@@ -129,7 +145,7 @@ export function Settings({ settings, profileName, queue, close, recover }: {
         <label className="task-cadence">Minutes between runs<input type="number" min={5} max={1440} required value={draft.schedule.everyMinutes}
           onChange={event => change({ ...draft, schedule: { ...draft.schedule, everyMinutes: Number(event.target.value) } })} /></label>
         <p>Runs only while this profile is selected and the app is open, including hidden in the menu bar. After sleep, it catches up once. Quitting stops scheduled runs.</p>
-        <p className="field-help">Each run uses Copilot. Run now uses these same sources and instructions.</p>
+        <p className="field-help">Run now and scheduled runs use these sources and both agents, reusing current results. Separate agent runs do not collect sources or change this schedule.</p>
       </section>
       {error && <p className="task-error" role="alert">{error}</p>}
       {saved && <p role="status">Settings applied. The save status below confirms when they reach disk.</p>}

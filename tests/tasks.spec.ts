@@ -6,6 +6,7 @@ import { createWorkProfile, switchWorkProfile } from '../src/work/profiles.ts';
 import { snapshotSchema } from '../src/platform/native.ts';
 import { assessmentBatch } from './assessment-fixture.ts';
 import { rankInput } from '../src/work/engine.ts';
+import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
 
 test.use({ referenceWorkspace: false });
 
@@ -21,6 +22,74 @@ async function run(page: Page) {
   await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
   await persisted(page);
 }
+
+test('configurable agents run independently with named roles, durable ratings and whole-list priority', async ({ page, native }, testInfo) => {
+  await page.goto('/');
+  await add(page, 'First manual task');
+  await add(page, 'Second manual task');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const assessor = page.getByRole('group', { name: 'Task assessor', exact: true });
+  const prioritizer = page.getByRole('group', { name: 'Task prioritizer', exact: true });
+  await assessor.getByLabel('Agent name').fill('Evidence specialist');
+  await assessor.getByLabel('Agent model').fill('assessor-model');
+  await assessor.getByLabel('How should tasks be assessed?').fill('State what is unknown; never estimate missing effort.');
+  await prioritizer.getByLabel('Agent name').fill('Roadmap sorter');
+  await prioritizer.getByLabel('Agent model').fill('priority-model');
+  await prioritizer.getByLabel('What should come first?').fill('Favor explicit commitments.');
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await persisted(page);
+  await page.screenshot({ path: testInfo.outputPath('agent-settings-desktop.png') });
+  await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await expect(page.getByText(/Run assessor first, then run prioritizer/)).toBeAttached();
+  expect(native.requests).toEqual([]);
+  native.holdAssessment = gate();
+  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeDisabled();
+  await expect(page.getByText('Assessor only · Order unchanged')).toBeVisible();
+  native.holdAssessment.release();
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await persisted(page);
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess']);
+  expect(native.state.work.ranking).toBeNull();
+  expect(native.assessments.entries).toHaveLength(2);
+  await page.locator('.task-row').filter({ hasText: 'First manual task' }).click();
+  const history = page.getByRole('region', { name: 'Assessment', exact: true });
+  await expect(history).toContainText('unknown - No implementation evidence is supplied.');
+  await expect(history.getByRole('status')).toHaveText('Current for saved task content');
+  await history.getByText('Assessment provenance', { exact: true }).click();
+  await expect(history).toContainText('Evidence specialist');
+  await expect(history).toContainText('assessor-model');
+  const firstIds = native.assessments.entries.map(value => value.resultId);
+  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await persisted(page);
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess', 'work.rank']);
+  expect(native.state.work.ranking?.orderedIds).toEqual(native.state.tasks.map(task => task.id).reverse());
+  expect(native.assessments.entries.map(value => value.resultId)).toEqual(firstIds);
+  const order = structuredClone(native.state.work.ranking);
+  native.failRank = true;
+  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await persisted(page);
+  expect(native.state.work.ranking).toEqual(order);
+  expect(native.assessments.entries.map(value => value.resultId)).toEqual(firstIds);
+  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await persisted(page);
+  expect(native.assessments.entries).toHaveLength(4);
+  await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
+  await page.screenshot({ path: testInfo.outputPath('agents-history-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeVisible();
+  await expect(history.getByLabel('Assessment version')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('agents-history-narrow.png') });
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(assessor.getByLabel('Agent name')).toHaveValue('Evidence specialist');
+  await expect(prioritizer.getByLabel('Agent model')).toHaveValue('priority-model');
+});
 
 test('assessment history stays readable after order failure, edits, Done and relaunch', async ({ page, native }, testInfo) => {
   await page.goto('/');
@@ -241,7 +310,7 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await run(page);
   const request = native.requests.find(request => request.op === 'work.rank')!;
   if (request.op !== 'work.rank') throw new Error('Ranking request missing');
-  expect(request.input.instructions).toBe('Incidents first');
+  expect(taskAgent(request.input, 'task-prioritization').instructions).toBe('Incidents first');
   expect(request.input.tasks.map(task => task.title)).not.toContain('Regular task');
   await page.screenshot({ path: testInfo.outputPath('work-profiles-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -275,7 +344,7 @@ test('profile creation reports duplicate names and starts empty without copying'
   expect(native.state.inactiveWorkProfiles).toHaveLength(0);
   await modal.getByLabel('Profile name').fill('Release week');
   await modal.getByRole('button', { name: 'Create profile' }).click();
-  await expect(page.getByLabel('What should come first?')).toHaveValue('');
+  await expect(page.getByLabel('What should come first?')).toHaveValue(taskAgentJobs['task-prioritization'].instructions);
   await expect(page.locator('.task-stream')).toHaveCount(0);
   await persisted(page);
   expect(native.state.tasks).toEqual([]);
@@ -329,7 +398,7 @@ test('every run ranks all tasks with saved instructions without reading notifica
   expect(rank?.op).toBe('work.rank');
   if (rank?.op !== 'work.rank') throw new Error('Rank request missing');
   expect(rank.input.tasks).toHaveLength(3);
-  expect(rank.input.instructions).toContain('relay roadmap phase one');
+  expect(taskAgent(rank.input, 'task-prioritization').instructions).toContain('relay roadmap phase one');
   await expect(page.locator('.task-title').first()).toHaveText('Review the relay rollout');
   await expect(page.locator('.task-reason').first()).toHaveText('Priority for Review the relay rollout');
   expect(native.requests.some(request => request.op.startsWith('github.'))).toBe(false);
@@ -724,7 +793,7 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
   native.workCollections.set(sources[3]!.id, { error: 'Authentication expired. Update your connection and run again.' });
   native.workCollections.set(sources[4]!.id, { hold: active });
   native.holdRank = gate();
-  await page.clock.install();
+  await page.clock.install({ time: new Date(native.now) });
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
   const progress = page.getByRole('progressbar', { name: 'Collections processed' });
   const region = page.getByRole('region', { name: 'Run progress' });

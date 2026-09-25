@@ -12,6 +12,8 @@ import type { Runner } from '../src/process.ts';
 import { emptyWorkspace } from '../../src/domain/live.ts';
 import { rankInput, reconcileWork } from '../../src/work/engine.ts';
 import { stateSchema, type AppState } from '../../src/types.ts';
+import { rankWithAssessments } from './work-fixture.ts';
+import { unknownRatings } from '../../tests/assessment-fixture.ts';
 
 test('collection, workspace restart and ranking share cache invalidation without changing request evidence', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'work-cache-integration-'));
@@ -61,6 +63,7 @@ test('collection, workspace restart and ranking share cache invalidation without
         calls.push({ phase, input: structuredClone(data) });
         const result = phase === 'assess' ? {
           assessments: data.tasks.map(task => ({
+            ...unknownRatings,
             id: task.id, importance: 'Assigned issue', urgency: 'No deadline established',
             blockers: 'None established', uncertainty: 'No further context',
             supportingEvidence: [{ reference: '$title', summary: 'Assigned source issue' }],
@@ -85,7 +88,7 @@ test('collection, workspace restart and ranking share cache invalidation without
       token: async () => 'integration-test-token', cli: async () => '/fake/copilot',
       diagnostic: () => {}, client,
     });
-    return { github, service: new WorkService({ github, copilot, now: () => new Date(clock) }) };
+    return { github, copilot, service: new WorkService({ github, copilot, now: () => new Date(clock) }) };
   };
   let runtime = start();
   let workspace: AppState = { ...emptyWorkspace(initial, 'UTC'), work: defaultWorkState() };
@@ -97,7 +100,7 @@ test('collection, workspace restart and ranking share cache invalidation without
     }, new AbortController().signal);
     expect(batch.warnings).toEqual([]);
     workspace = reconcileWork(workspace, batch, at);
-    const ranked = await runtime.service.rank(rankInput(workspace), new AbortController().signal);
+    const ranked = await rankWithAssessments(runtime.copilot, rankInput(workspace), new AbortController().signal);
     workspace.work!.ranking = {
       orderedIds: ranked.orderedIds, reasons: ranked.reasons,
       rankedAt: ranked.evaluatedAt ?? at, expiresAt: ranked.expiresAt,

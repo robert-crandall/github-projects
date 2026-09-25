@@ -8,6 +8,8 @@ A local-first, prioritized todo app. Bring work from GitHub searches, Slack, man
 
 Each work profile owns its priority instructions, sources, model, schedule, tasks, Done history and run history. Only the selected profile collects and ranks work; external-agent intake goes into that profile on its next run. Existing work becomes the Default profile. Thread notes, connections, appearance and backups remain shared.
 
+Each profile has one named Task assessor and one named Task prioritizer with editable instructions and model. Code fixes their capabilities and result formats; prompts cannot grant tools or new actions. Existing settings initialize both roles from the saved owner instructions and model without discarding sources or schedules. The collection model remains separate. Display names do not change semantic identity.
+
 Keep the native Tauri shell, CLI authentication and current SQLite namespace. Preserve existing tasks, completion, annotations, backups and recovery while retiring the separate notification workspace.
 
 ## Ranked tasks
@@ -15,6 +17,10 @@ Keep the native Tauri shell, CLI authentication and current SQLite namespace. Pr
 **To do** is the home screen. Each task shows its rank, concrete action, source and a short explanation of its priority. Details expose notes and the actual requests that created the task. **Done** and **No action now** are separate lists, not inboxes.
 
 **Run now** and the opt-in schedule use one pipeline: collect from enabled sources, reconcile against the latest local tasks, then use the Copilot SDK to rank every actionable task. Owner-authored priority instructions and roadmap text guide ranking. Task notes may inform ranking; unrelated private thread notes never do. Source content remains untrusted data, not instructions to execute.
+
+**Run assessor** explicitly creates fresh assessment versions without collecting or changing order. **Run prioritizer** explicitly recomputes the complete eligible list using current saved assessments and its own instructions, without reassessment. Missing or stale prerequisites give an assess-first message and retain the previous order. Filters never narrow either operation. Separate runs do not advance collection coverage or scheduling timestamps; Run now and scheduled pipelines keep existing reuse policies.
+
+Assessments include impact, visibility and effort, each high/medium/low/unknown with a short rationale, alongside importance, urgency, blockers, evidence and uncertainty. Missing evidence remains unknown, never an invented effort estimate. Prioritizer edits invalidate only order reuse; assessor edits invalidate its judgments and dependent order. Earlier v2 history remains readable without fabricated ratings.
 
 GitHub discovery combines saved backlog queries with an opt-in notification source. Notifications identify conversations to inspect, never obligations by themselves. Inspect actual requests before choosing an action; deduplicate them with requests found through saved searches. Preserve project backlog queries separately from activity discovery. Slack and generic MCP sources use a selected connection with explicitly named read tools. The SDK extracts actionable requests from the source evidence. Do not silently enable broader tools, scrape credentials or pretend an unavailable connection works.
 
