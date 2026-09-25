@@ -17,12 +17,14 @@ Appearance stays separate from tasks and their backups. Desktop preferences use 
 
 Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks visible. **Coverage and run details** holds source warnings and run failures without a duplicate error banner above the task list. Storage and local action failures stay visible separately. Source failures never masquerade as successful empty results.
 
+While a run is active, the summary beside **Run now** shows collections processed, done, failed and remaining, plus the active source and elapsed time. One collection is one enabled source, including its follow-up reads and saves; failed collections count as processed, not successful. These counts are not time estimates. Intake, ranking and saving have separate phase labels, and 100% collected does not mean the run has finished. Expand **Coverage and run details** for a scrollable source checklist and diagnostics, without duplicating source warnings. Sources skipped after a storage failure are labeled **Not run**. Local task edits stay available. The completed checklist remains for the current session until the next run or profile switch; saved run errors and the last successful run time remain available after relaunch.
+
 ### Filters
 
 Choose **Filters** in the left menu to keep a source tree beside your tasks. Toggle an entire GitHub, Slack or MCP group, or individual configured sources. Manual tasks and external-agent intake have separate checkboxes. Tasks matching any checked source appear once, in the same order and with the same ranks as **Ranked Tasks**. Filtering applies to To do, Done and No action now; source counts follow the current tab and can overlap.
 
 Selections and collapsed groups save automatically per work profile, including across relaunch and in backups. New profiles start with all sources selected. **Select all** / **Show all sources** also includes sources added later; a custom selection includes only the sources you checked. Selecting nothing shows an empty view, never deletes tasks. Disabled sources remain available for filtering saved tasks; removed sources use their saved source ID as a label. Tasks without saved provenance appear under **Other saved tasks**.
-
+**Ranked Tasks** always shows the full list. Filters do not change source collection, schedules, ranking, Done or notes.
 **Ranked Tasks** always shows the full list. Filters do not change source collection, schedules, ranking, Done or notes.
 
 ### Work profiles

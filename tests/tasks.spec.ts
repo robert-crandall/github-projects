@@ -395,7 +395,9 @@ test('model failure preserves discoveries and makes unranked work explicit', asy
   native.failRank = false;
   await run(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(details).toHaveCount(0);
+  await expect(details).toContainText('Coverage and run details');
+  await expect(page.getByText('Run complete', { exact: true })).toBeVisible();
+  await expect(details).not.toContainText('Copilot ranking failed');
 });
 
 test('coverage warnings and run errors appear only once in the expandable details', async ({ page, native }) => {
@@ -406,9 +408,10 @@ test('coverage warnings and run errors appear only once in the expandable detail
   await run(page);
   const details = page.locator('.task-run-details');
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(details.locator('summary')).toHaveText('Coverage and run details (5)');
+  await expect(details.locator('summary')).toHaveText('Coverage and run details (5) 2 sources failed');
   await details.locator('summary').click();
-  await expect(details.getByRole('listitem')).toHaveCount(5);
+  await expect(details.getByRole('listitem')).toHaveCount(3);
+  await expect(details.locator('.task-run-diagnostic')).toHaveCount(4);
   for (const stream of native.state.work.settings.streams.filter(stream => stream.enabled)) {
     await expect(page.getByText(`${stream.name}: Search results were capped.`, { exact: true })).toHaveCount(1);
   }
@@ -697,6 +700,121 @@ test('ranked list and details stay readable on desktop and narrow screens', asyn
   await page.screenshot({ path: testInfo.outputPath('task-detail-narrow.png') });
   await page.getByRole('button', { name: 'Close task details' }).click();
   await expect(page.locator('.ranked-list')).toBeVisible();
+});
+
+test('live collection progress shows partial failure, elapsed time and a keyboard-accessible source checklist', async ({ page, native }, testInfo) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  for (const name of ['Project backlog', 'Notifications', 'Team updates', 'Support requests']) {
+    await page.getByRole('button', { name: 'Add source', exact: true }).click();
+    const source = page.locator('.task-stream').last();
+    await source.getByLabel('Name', { exact: true }).fill(name);
+    await source.getByLabel('Source type').selectOption('github');
+    await source.getByLabel('GitHub query').fill('is:issue is:open assignee:@me');
+    await source.getByLabel('Enabled', { exact: true }).check();
+  }
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  const sources = native.state.work.settings.streams.filter(source => source.enabled);
+  expect(sources).toHaveLength(6);
+  const first = gate();
+  const active = gate();
+  native.workCollections.set(sources[0]!.id, { hold: first });
+  native.workCollections.set(sources[3]!.id, { error: 'Authentication expired. Update your connection and run again.' });
+  native.workCollections.set(sources[4]!.id, { hold: active });
+  native.holdRank = gate();
+  await page.clock.install();
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  const progress = page.getByRole('progressbar', { name: 'Collections processed' });
+  const region = page.getByRole('region', { name: 'Run progress' });
+  const details = page.locator('.task-run-details');
+  await expect(progress).toHaveAttribute('aria-valuemax', '6');
+  await expect(progress).toHaveAttribute('aria-valuenow', '0');
+  await expect(region).toContainText(`Now: ${sources[0]!.name}`);
+  await expect(page.getByLabel('Work profile', { exact: true })).toBeDisabled();
+  await expect(details).not.toHaveAttribute('open', '');
+  await details.locator('summary').focus();
+  await page.keyboard.press('Space');
+  await expect(details).toHaveAttribute('open', '');
+  await expect(details.locator('.task-run-source-state')).toHaveText(['Collecting', 'Waiting', 'Waiting', 'Waiting', 'Waiting', 'Waiting']);
+  first.release();
+  await expect(progress).toHaveAttribute('aria-valuenow', '4');
+  await expect(progress).toHaveAttribute('aria-valuetext', '3 done, 1 failed, 2 remaining');
+  await expect(details.locator('.task-run-source-state')).toHaveText(['Done', 'Done', 'Done', 'Failed', 'Collecting', 'Waiting']);
+  await expect(details.locator('summary')).toContainText('1 source failed');
+  await expect(region).toContainText('Now: Team updates');
+  await expect(region).toContainText('Ranking follows');
+  await expect(page.getByText('Notifications: Authentication expired. Update your connection and run again.', { exact: true })).toHaveCount(1);
+  const widths = await progress.evaluate(element => ({
+    track: element.getBoundingClientRect().width,
+    done: element.children[0]!.getBoundingClientRect().width,
+    failed: element.children[1]!.getBoundingClientRect().width,
+  }));
+  expect(widths.done / widths.track).toBeCloseTo(0.5, 2);
+  expect(widths.failed / widths.track).toBeCloseTo(1 / 6, 2);
+  await page.clock.fastForward(108_000);
+  await expect(region).toContainText(/Elapsed 1m 4[89]s/);
+  await page.screenshot({ path: testInfo.outputPath('collection-progress-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const ledger = details.locator('.task-run-ledger');
+  expect(await ledger.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+  await ledger.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await expect(region.getByText('Collections · 4 of 6 processed')).toBeVisible();
+  await expect(page.locator('.task-title').first()).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('collection-progress-narrow.png') });
+  await details.locator('summary').press('Enter');
+  await expect(details).not.toHaveAttribute('open', '');
+  active.release();
+  await expect(progress).toHaveAttribute('aria-valuenow', '6');
+  await expect(region).toContainText('Ranking tasks');
+  await expect(page.getByRole('button', { name: 'Running...', exact: true })).toBeDisabled();
+  native.holdSave = gate();
+  native.holdRank.release();
+  await expect(region).toContainText('Saving results');
+  await expect(page.getByRole('button', { name: 'Running...', exact: true })).toBeDisabled();
+  native.holdSave.release();
+  await expect(page.getByRole('button', { name: 'Run now', exact: true })).toBeEnabled();
+  await expect(region).toContainText('Run incomplete · Partial coverage');
+  const elapsed = await region.locator('.task-run-now > span').last().textContent();
+  await page.clock.fastForward(5000);
+  await expect(region.locator('.task-run-now > span').last()).toHaveText(elapsed!);
+  const retry = gate();
+  native.workCollections.clear();
+  native.workCollections.set(sources[0]!.id, { hold: retry });
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await expect(progress).toHaveAttribute('aria-valuenow', '0');
+  await expect(progress).toHaveAttribute('aria-valuetext', '0 done, 0 failed, 6 remaining');
+  await expect(details).not.toContainText('Authentication expired');
+  retry.release();
+  await expect(region.getByText('Run complete', { exact: true })).toBeVisible();
+  await expect(progress).toHaveAttribute('aria-valuetext', '6 done, 0 failed, 0 remaining');
+});
+
+test('manual-only progress omits the collection bar and stays active through assessment and ranking', async ({ page, native }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  for (const enabled of await page.locator('.task-stream').getByLabel('Enabled', { exact: true }).all()) await enabled.uncheck();
+  await page.getByRole('button', { name: 'Save settings' }).click();
+  await persisted(page);
+  await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await add(page, 'Rank local work');
+  native.holdAssessment = gate();
+  native.holdRank = gate();
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  const region = page.getByRole('region', { name: 'Run progress' });
+  await expect(region).toContainText('No enabled collections');
+  await expect(region).toContainText('Assessing tasks');
+  await expect(page.getByRole('button', { name: 'Running...', exact: true })).toBeDisabled();
+  native.holdAssessment.release();
+  native.holdAssessment = undefined;
+  await expect(region).toContainText('Ranking tasks');
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  await expect(page.locator('.task-run-details')).toHaveCount(0);
+  native.holdRank.release();
+  await expect(region).toContainText('Run complete');
+  expect(native.requests.some(request => request.op === 'work.collect')).toBe(false);
 });
 
 function sourceFilterFixture(native: NativeMock) {

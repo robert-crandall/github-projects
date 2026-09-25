@@ -52,6 +52,7 @@ export class NativeMock {
     observations: [{ url: 'https://github.com/octo/project/pull/123', state: 'open', observedAt: at, reason: '' }],
     warnings: [], collectedAt: at,
   };
+  workCollections = new Map<string, { hold?: ReturnType<typeof gate>; result?: WorkCollection; error?: string }>();
   failRank = false;
   assessments = new AssessmentStoreFixture();
   assessmentBackups = new Map<string, typeof this.assessments.entries>();
@@ -199,9 +200,13 @@ export class NativeMock {
       case 'work.connections':
         result = { servers: [], instructions: 'No shared Slack connection. Configure a selected read-only MCP server.' };
         break;
-      case 'work.collect':
-        result = structuredClone(this.workCollection);
+      case 'work.collect': {
+        const source = this.workCollections.get(request.input.stream.id);
+        if (source?.hold) await source.hold.promise;
+        if (source?.error) throw new ExpectedFailure(source.error);
+        result = structuredClone(source?.result ?? this.workCollection);
         break;
+      }
       case 'work.assess':
         if (this.holdAssessment) await this.holdAssessment.promise;
         result = await assessmentBatch(request.input, this.now);

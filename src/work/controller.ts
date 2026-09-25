@@ -12,8 +12,13 @@ import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profi
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
+export type CollectionProgress = {
+  id: string; name: string; state: 'waiting' | 'collecting' | 'done' | 'failed' | 'not-run'; diagnostics: string[];
+};
+export type RunProgress = { startedAt: number; finishedAt: number | null; sources: CollectionProgress[] };
 export type WorkQueueSnapshot = {
-  running: boolean; phase: string; error: string; warnings: string[]; connections?: WorkConnections;
+  running: boolean; phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'assessing' | 'ranking' | 'saving' | 'error';
+  progress: RunProgress | null; error: string; warnings: string[]; connections?: WorkConnections;
   unsubscribing: string[];
 };
 
@@ -34,7 +39,7 @@ export class WorkQueue {
   constructor(private readonly controller: DesktopWorkspace, private readonly service = new ServiceClient()) {
     this.status = {
       running: false, phase: 'idle', error: controller.getSnapshot().workspace?.state.work?.lastError ?? '', warnings: [],
-      unsubscribing: [],
+      unsubscribing: [], progress: null,
     };
   }
 
@@ -43,6 +48,12 @@ export class WorkQueue {
   private publish(patch: Partial<WorkQueueSnapshot>): void {
     this.status = { ...this.status, ...patch };
     for (const listener of this.listeners) listener();
+  }
+  private sourceProgress(id: string, patch: Partial<CollectionProgress>): void {
+    const progress = this.status.progress;
+    if (progress) this.publish({ progress: {
+      ...progress, sources: progress.sources.map(source => source.id === id ? { ...source, ...patch } : source),
+    } });
   }
   private update(transform: (state: AppState) => AppState): void {
     this.controller.update(current => transform({ ...current, work: current.work ?? defaultWorkState() }));
@@ -69,12 +80,12 @@ export class WorkQueue {
   switchProfile(id: string): void {
     this.assertProfileIdle();
     this.update(current => switchWorkProfile(current, id));
-    this.publish({ error: '', warnings: [], phase: 'idle' });
+    this.publish({ error: '', warnings: [], phase: 'idle', progress: null });
   }
   createProfile(name: string, copySettings = false): void {
     this.assertProfileIdle();
     this.update(current => createWorkProfile(current, name, copySettings));
-    this.publish({ error: '', warnings: [], phase: 'idle' });
+    this.publish({ error: '', warnings: [], phase: 'idle', progress: null });
   }
   capture(title: string, notes = ''): void {
     this.validateText(title, notes);
@@ -167,8 +178,13 @@ export class WorkQueue {
 
   private start(now: Date): Promise<void> {
     if (this.status.running) return this.active ?? Promise.resolve();
-    this.publish({ running: true, phase: 'saving', error: '', warnings: [] });
-    const running = this.execute(now);
+    const settings = structuredClone(this.controller.state.work.settings);
+    this.publish({ running: true, phase: 'preparing', error: '', warnings: [], progress: {
+      startedAt: Date.now(), finishedAt: null,
+      sources: settings.streams.filter(stream => stream.enabled)
+        .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
+    } });
+    const running = this.execute(now, settings);
     this.active = running;
     return running;
   }
@@ -278,11 +294,12 @@ export class WorkQueue {
         },
       };
     });
+    this.publish({ phase: 'saving' });
     await this.controller.flush();
     return warnings;
   }
 
-  private async execute(now: Date): Promise<void> {
+  private async execute(now: Date, settings: WorkSettings): Promise<void> {
     const profileId = this.controller.state.activeWorkProfile.id;
     const generation = this.controller.assessmentGeneration;
     const errors: string[] = [];
@@ -299,20 +316,24 @@ export class WorkQueue {
       });
       await this.controller.flush();
       await this.controller.retryAssessments();
-      const { settings, collectionCursor } = this.controller.state.work;
+      const { collectionCursor } = this.controller.state.work;
       scannedSettings = sourceSettings(settings);
-      const streams = structuredClone(settings.streams.filter(stream => stream.enabled));
+      const streams = settings.streams.filter(stream => stream.enabled);
       this.publish({ phase: 'intake' });
       try { await this.intake(profileId, generation); }
       catch (error) {
         if (this.controller.getSnapshot().persistence.error) throw error;
         errors.push(`Task intake: ${message(error)}`);
+        this.publish({ error: errors.join('\n') });
       }
       const observed = new Set<string>();
       for (const stream of streams) {
         this.assertWorkspace(generation);
         this.assertProfile(this.controller.state, profileId);
-        this.publish({ phase: `collecting: ${stream.name}` });
+        this.publish({ phase: 'collecting' });
+        this.sourceProgress(stream.id, { state: 'collecting' });
+        const diagnostics: string[] = [];
+        let failed = false;
         const knownUrls = [...new Set(this.controller.state.tasks
           .filter(task => task.status === 'open' && task.work && new URL(task.work.url).hostname === 'github.com')
           .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
@@ -335,20 +356,30 @@ export class WorkQueue {
             }
             await this.persist(result, profileId, generation);
             for (const observation of result.observations) observed.add(canonicalSource(observation.url));
-            warnings.push(...(result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`));
+            const coverage = (result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`);
+            warnings.push(...coverage);
+            diagnostics.push(...coverage);
             for (const warning of result.warnings) {
               warnings.push(`${stream.name}: ${warning}`);
               errors.push(`${stream.name}: ${warning}`);
+              diagnostics.push(`${stream.name}: ${warning}`);
+              failed = true;
             }
           } catch (error) {
+            failed = true;
+            diagnostics.push(`${stream.name}: ${message(error)}`);
+            this.sourceProgress(stream.id, { diagnostics: [...new Set(diagnostics)] });
             if (this.controller.getSnapshot().persistence.error) throw error;
             errors.push(`${stream.name}: ${message(error)}`);
           }
+          this.sourceProgress(stream.id, { diagnostics: [...new Set(diagnostics)] });
         }
+        this.sourceProgress(stream.id, { state: failed ? 'failed' : 'done' });
       }
       this.publish({ phase: 'ranking', warnings: [...warnings] });
       try { warnings.push(...await this.rank(profileId, generation)); }
       catch (error) { errors.push(`Ranking: ${message(error)}`); }
+      this.publish({ phase: 'saving', error: errors.join('\n'), warnings: [...warnings] });
       this.update(current => {
         this.assertWorkspace(generation);
         this.assertProfile(current, profileId);
@@ -366,7 +397,8 @@ export class WorkQueue {
       });
       await this.controller.flush();
     } catch (error) {
-      errors.push(message(error));
+      const source = this.status.progress?.sources.find(source => source.state === 'collecting');
+      errors.push(source ? `${source.name}: ${message(error)}` : message(error));
       try {
         this.update(current => generation !== this.controller.assessmentGeneration ? current : current.activeWorkProfile.id !== profileId ? {
           ...current, inactiveWorkProfiles: current.inactiveWorkProfiles.map(profile => profile.id === profileId
@@ -383,7 +415,12 @@ export class WorkQueue {
       } catch { /* The native persistence queue retains the latest state for explicit recovery. */ }
     } finally {
       this.active = undefined;
-      this.publish({ running: false, phase: errors.length ? 'error' : 'idle', error: errors.join('\n'), warnings });
+      const progress = this.status.progress;
+      this.publish({ running: false, phase: errors.length ? 'error' : 'idle', error: errors.join('\n'), warnings,
+        progress: progress && { ...progress, finishedAt: Date.now(), sources: progress.sources.map(source => ({
+          ...source, state: source.state === 'collecting' ? 'failed' : source.state === 'waiting' ? 'not-run' : source.state,
+        })) },
+      });
     }
   }
 }

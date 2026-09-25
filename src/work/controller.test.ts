@@ -711,6 +711,8 @@ describe('runs and persistence barriers', () => {
     await mock.queue.run();
     expect(mock.requests).toEqual([]);
     expect(mock.queue.getSnapshot().error).toContain('Disk unavailable');
+    expect(mock.queue.getSnapshot()).toMatchObject({ phase: 'error', progress: { sources: [] } });
+    expect(mock.queue.getSnapshot().progress?.finishedAt).toBeNumber();
     expect(mock.saved().work.lastStartedAt).toBeNull();
     expect(mock.saved().work.lastCompletedAt).toBe(previousCompleted);
     expect(mock.saved().work.ranking?.rankedAt).toBe(previousCompleted);
@@ -731,6 +733,8 @@ describe('runs and persistence barriers', () => {
     expect(mock.saved().work.ranking).toEqual(saved.work.ranking);
     expect(mock.saved().work.lastCompletedAt).toBe(previousCompleted);
     expect(mock.saved().work.collectionCursor).toBe(before);
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['done']);
+    expect(mock.queue.getSnapshot().phase).toBe('error');
     expect(mock.saved().work.lastError).toContain('SDK unavailable');
     expect(rankedTasks(mock.saved())[0]!.id).toBe('manual');
     const reloaded = new DesktopWorkspace(mock.platform);
@@ -837,6 +841,7 @@ describe('runs and persistence barriers', () => {
     const checked: string[][] = [];
     const mock = await fixture(saved, request => {
       if (request.op !== 'work.collect') return;
+      expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['collecting']);
       checked.push(request.input.knownUrls);
       return {
         candidates: [], warnings: [], collectedAt: new Date().toISOString(),
@@ -1549,4 +1554,142 @@ describe('concurrency and exact ranking', () => {
     await queue.tick(new Date(now.getTime() + 5 * 24 * 60 * 60_000));
     expect(mock.requests).toHaveLength(2);
   });
+});
+
+
+describe('collection progress', () => {
+  test('tracks a frozen enabled-source checklist through intake, failures, ranking and saving', async () => {
+    const saved = initial();
+    const template = defaultWorkState().settings.streams[0]!;
+    saved.work.settings.streams = ['First', 'Limited', 'Failed', 'Last', 'Disabled']
+      .map((name, index) => ({ ...template, id: `source-${index}`, name, enabled: name !== 'Disabled' }));
+    const intake = deferred<void>();
+    const intakeEntered = deferred<void>();
+    const gates = Array.from({ length: 4 }, () => deferred<void>());
+    const entered = Array.from({ length: 4 }, () => deferred<void>());
+    const ranking = deferred<void>();
+    const rankingEntered = deferred<void>();
+    let retry = false;
+    const mock = await fixture(saved, async request => {
+      if (retry) return;
+      if (request.op === 'work.intake') { intakeEntered.resolve(); await intake.promise; }
+      if (request.op === 'work.collect') {
+        const index = Number(request.input.stream.id.split('-')[1]);
+        entered[index]!.resolve();
+        await gates[index]!.promise;
+        if (index === 2) throw new Error('Authentication expired');
+        if (index === 1) return { ...collection(), warnings: ['A page failed', 'A page failed'] };
+        return { ...collection(), coverageInfo: ['Older history remains'] };
+      }
+      if (request.op === 'work.rank') { rankingEntered.resolve(); await ranking.promise; }
+    });
+    const run = mock.queue.run();
+    const start = mock.queue.getSnapshot();
+    expect(start).toMatchObject({ running: true, phase: 'preparing', progress: { finishedAt: null } });
+    expect(start.progress?.sources.map(source => source.state)).toEqual(['waiting', 'waiting', 'waiting', 'waiting']);
+    await intakeEntered.promise;
+    expect(mock.queue.getSnapshot().phase).toBe('intake');
+    intake.resolve();
+    await entered[0]!.promise;
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['collecting', 'waiting', 'waiting', 'waiting']);
+    gates[0]!.resolve();
+    await entered[1]!.promise;
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['done', 'collecting', 'waiting', 'waiting']);
+    gates[1]!.resolve();
+    await entered[2]!.promise;
+    expect(mock.queue.getSnapshot().progress?.sources[1]).toMatchObject({ state: 'failed', diagnostics: ['Limited: A page failed'] });
+    gates[2]!.resolve();
+    await entered[3]!.promise;
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['done', 'failed', 'failed', 'collecting']);
+    gates[3]!.resolve();
+    await rankingEntered.promise;
+    expect(mock.queue.getSnapshot()).toMatchObject({ running: true, phase: 'ranking', progress: { finishedAt: null } });
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['done', 'failed', 'failed', 'done']);
+    expect(start.progress?.sources.every(source => source.state === 'waiting')).toBe(true);
+    const saving = deferred<void>();
+    const savingEntered = deferred<void>();
+    mock.onSave(async () => { savingEntered.resolve(); await saving.promise; });
+    ranking.resolve();
+    await savingEntered.promise;
+    expect(mock.queue.getSnapshot()).toMatchObject({ running: true, phase: 'saving', progress: { finishedAt: null } });
+    saving.resolve();
+    await run;
+    expect(mock.queue.getSnapshot()).toMatchObject({ running: false, phase: 'error' });
+    expect(mock.queue.getSnapshot().progress?.finishedAt).toBeNumber();
+    expect(mock.queue.getSnapshot().progress?.sources[2]?.diagnostics).toEqual(['Failed: Authentication expired']);
+    mock.onSave();
+    retry = true;
+    const rerun = mock.queue.run();
+    expect(mock.queue.getSnapshot().progress?.sources.every(source => source.state === 'waiting' && !source.diagnostics.length)).toBe(true);
+    expect(mock.queue.getSnapshot().error).toBe('');
+    await rerun;
+    expect(mock.queue.getSnapshot().phase).toBe('idle');
+    mock.queue.createProfile('Separate');
+    expect(mock.queue.getSnapshot().progress).toBeNull();
+    mock.queue.switchProfile('default');
+    expect(mock.queue.getSnapshot().progress).toBeNull();
+    await mock.workspace.flush();
+  });
+
+  test('collection storage failure leaves the active source failed and untouched sources not run', async () => {
+    const saved = initial();
+    saved.work.settings.streams = defaultWorkState().settings.streams;
+    const mock = await fixture(saved);
+    const saving = deferred<void>();
+    const entered = deferred<void>();
+    mock.onSave(async state => {
+      if (state.tasks.length) { entered.resolve(); await saving.promise; }
+    });
+    mock.fail(state => state.tasks.length > 0);
+    const run = mock.queue.run();
+    await entered.promise;
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['collecting', 'waiting']);
+    saving.resolve();
+    await run;
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['failed', 'not-run']);
+    expect(mock.queue.getSnapshot().progress?.sources[0]?.diagnostics.join()).toContain('Disk unavailable');
+    expect(mock.queue.getSnapshot().progress?.sources[0]?.diagnostics).toEqual([mock.queue.getSnapshot().error]);
+    expect(mock.requests.filter(request => request.op === 'work.collect')).toHaveLength(1);
+    expect(mock.requests.some(request => request.op === 'work.rank')).toBe(false);
+  });
+
+  test('scheduled runs snapshot sources before the initial save and keep the denominator fixed', async () => {
+    const saved = initial();
+    saved.work.settings.streams = defaultWorkState().settings.streams;
+    saved.work.settings.schedule.enabled = true;
+    const mock = await fixture(saved);
+    const saving = deferred<void>();
+    const entered = deferred<void>();
+    mock.onSave(async () => { entered.resolve(); await saving.promise; });
+    const run = mock.queue.tick(new Date());
+    await entered.promise;
+    expect(mock.queue.getSnapshot().progress?.sources).toHaveLength(2);
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, streams: [] });
+    saving.resolve();
+    await run;
+    expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['done', 'done']);
+    expect(mock.requests.filter(request => request.op === 'work.collect')).toHaveLength(2);
+    expect(mock.queue.getSnapshot().error).toContain('Source settings changed');
+    expect(mock.saved().work.collectionCursor).toBeNull();
+  });
+});
+
+
+test('start and final save failures never imply a completed run', async () => {
+  const saved = initial();
+  saved.work.settings.streams = defaultWorkState().settings.streams.slice(0, 1);
+  const mock = await fixture(saved);
+  mock.fail(() => true);
+  await mock.queue.run();
+  expect(mock.queue.getSnapshot()).toMatchObject({ running: false, phase: 'error' });
+  expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['not-run']);
+  expect(mock.requests).toEqual([]);
+  mock.fail(() => false);
+  await mock.workspace.retryStorage();
+  mock.fail(state => state.work.lastCompletedAt !== null);
+  await mock.queue.run();
+  expect(mock.queue.getSnapshot()).toMatchObject({ running: false, phase: 'error' });
+  expect(mock.queue.getSnapshot().progress?.sources.map(source => source.state)).toEqual(['done']);
+  expect(mock.saved().work.lastCompletedAt).toBeNull();
+  expect(mock.queue.getSnapshot().error).toContain('Disk unavailable');
 });
