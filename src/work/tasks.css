@@ -104,6 +104,7 @@
 .task-run-now { font-size: 12px; margin-top: 6px; }
 .task-run-now > span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .task-run-warning { color: var(--warning); }
+.task-run-assessment, .task-run-cancel { margin-top: 10px; }
 .task-run-track { display: flex; height: 6px; border-radius: 4px; background: var(--button); overflow: hidden; margin: 9px 0; }
 .task-run-done { background: var(--accent); }
 .task-run-failed { background: var(--warning); }
@@ -136,6 +137,7 @@
 .task-settings-heading > p { margin-top: 12px; color: var(--secondary); }
 .task-settings section { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--border); }
 .task-settings .code-batch { margin: 24px 0; padding-top: 16px; }
+.task-settings .task-run { margin: 24px 0; padding: 0; border: 0; }
 .task-settings h2 { margin-bottom: 12px; }
 .task-settings p { color: var(--secondary); margin: 12px 0; }
 .task-settings label { margin-top: 18px; }

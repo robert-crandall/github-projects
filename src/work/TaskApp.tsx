@@ -261,6 +261,8 @@ export function TaskApp({ controller, queue, remote }: {
   const prCount = checkedTasks.filter(task => codeJob(task, state) === 'pr-review').length;
   const batchProgress = code.batch && <CodeBatchProgress batch={code.batch} sessions={queue.code} controller={controller}
     inspect={id => { setSettings(false); setFilters(false); setView('tasks'); setSelection(id); }} />;
+  const runProgress = <RunProgress key={state.activeWorkProfile.id} run={run} details={runDetails}
+    cancelAssessor={() => invoke(() => queue.cancelAssessor())} />;
   return <div className={`task-app ${filters && !settings ? 'task-filter-view' : ''}`}>
     <a className="skip-link" href={settings ? '#task-settings' : '#ranked-tasks'}>Skip to {settings ? 'settings' : 'tasks'}</a>
     <aside className="task-sidebar" aria-label="Workspace navigation">
@@ -302,7 +304,7 @@ export function TaskApp({ controller, queue, remote }: {
         <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
         <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
       </div>
-      <p className="field-help">Assessor saves new judgments without changing order. Prioritizer orders all eligible tasks from current saved assessments. Neither collects sources.</p>
+      <p className="field-help">Assessor only assesses tasks with no saved assessment. Use Assess task or Assess selected to reassess. Prioritizer orders all eligible tasks from current assessments. Neither collects sources.</p>
     </div>}
     {!settings && <div className="task-profile-bar">
       <label htmlFor="work-profile">Work profile</label>
@@ -332,13 +334,13 @@ export function TaskApp({ controller, queue, remote }: {
     </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
       settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
-      batchProgress={batchProgress} /> : <>
+      batchProgress={<>{run.running && runProgress}{batchProgress}</>} /> : <>
       {!run.progress && <div className="task-context"><p>{state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
         <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>}
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
         && Date.parse(state.work.collectionCursor) < Date.parse(state.work.lastStartedAt)
         && <p className="task-detail-notice" role="status">More notification history remains. The next run continues after {date(state.work.collectionCursor)}.</p>}
-      <RunProgress key={state.activeWorkProfile.id} run={run} details={runDetails} />
+      {runProgress}
       {filters && <div className="task-filter-summary">
         <span role="status"><strong>{visible.length} of {unfiltered.length} {view === 'tasks' ? 'to dos' : view === 'done' ? 'completed tasks' : 'tasks with no action now'}</strong>
           <span>From {selectedSourceCount} selected {selectedSourceCount === 1 ? 'source' : 'sources'}</span></span>

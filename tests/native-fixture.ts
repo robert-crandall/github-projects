@@ -65,6 +65,8 @@ export class NativeMock {
   assessmentBackups = new Map<string, typeof this.assessments.entries>();
   holdRank?: ReturnType<typeof gate>;
   holdAssessment?: ReturnType<typeof gate>;
+  assessmentHolds: ReturnType<typeof gate>[] = [];
+  cancelledAssessments = new Set<string>();
   conversationApi = new ConversationApi();
   conversations = new Map<string, ConversationCache>();
   corruptCache = false;
@@ -220,6 +222,9 @@ export class NativeMock {
         result = codeResult(request.input, this.codeInspected);
         break;
       case 'cancel':
+        if (this.requests.some(target => target.id === request.input.requestId && target.op === 'work.assess')) {
+          this.cancelledAssessments.add(request.input.requestId);
+        }
         result = { requestId: request.input.requestId, cancelled: true };
         break;
       case 'work.connections':
@@ -232,10 +237,15 @@ export class NativeMock {
         result = structuredClone(source?.result ?? this.workCollection);
         break;
       }
-      case 'work.assess':
-        if (this.holdAssessment) await this.holdAssessment.promise;
+      case 'work.assess': {
+        const hold = this.assessmentHolds.shift() ?? this.holdAssessment;
+        if (hold) await hold.promise;
+        if (this.cancelledAssessments.has(request.id)) return {
+          v: 1, id: request.id, ok: false, error: { code: 'cancelled', message: 'Assessment cancelled.', retryable: false },
+        };
         result = await assessmentBatch(request.input, this.now);
         break;
+      }
       case 'work.rank':
         if (this.holdRank) await this.holdRank.promise;
         if (this.failRank) throw new ExpectedFailure('Copilot ranking failed. Your tasks and previous order are retained.');

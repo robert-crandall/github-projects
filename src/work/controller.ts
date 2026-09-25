@@ -3,7 +3,7 @@ import {
   defaultWorkState, workRankOutputSchema, workSettingsSchema, workStateSchema,
   type workConnectionsSchema, type WorkCollection, type WorkMetadata, type WorkRankInput, type WorkSettings,
 } from '../../service/src/work-schema.ts';
-import { ServiceClient } from '../platform/service.ts';
+import { ServiceCallError, ServiceClient } from '../platform/service.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
 import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
@@ -19,12 +19,18 @@ export type CollectionProgress = {
   id: string; name: string; state: 'waiting' | 'collecting' | 'done' | 'failed' | 'not-run'; diagnostics: string[];
 };
 export type RunKind = 'pipeline' | 'assess' | 'prioritize';
-export type RunProgress = { startedAt: number; finishedAt: number | null; sources: CollectionProgress[]; kind?: RunKind };
+export type RunProgress = {
+  startedAt: number; finishedAt: number | null; sources: CollectionProgress[]; kind?: RunKind;
+  assessment?: { total: number; saved: number; batches: number };
+};
 export type WorkQueueSnapshot = {
-  running: boolean; phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'assessing' | 'ranking' | 'saving' | 'error';
+  running: boolean; cancelRequested: boolean;
+  phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'checking-assessments' | 'assessing' | 'cancelling' | 'cancelled' | 'ranking' | 'saving' | 'error';
   progress: RunProgress | null; error: string; warnings: string[]; connections?: WorkConnections;
   unsubscribing: string[];
 };
+
+class AssessmentCancelled extends Error {}
 
 const message = (error: unknown) => error instanceof Error ? error.message : 'The work run failed without usable results.';
 function exactIds(expected: string[], actual: string[]): boolean {
@@ -39,11 +45,15 @@ export class WorkQueue {
   readonly code: CodeSessions;
   private listeners = new Set<() => void>();
   private active?: Promise<void>;
+  private assessmentRequestId?: string;
+  private cancellation?: Promise<void>;
+  private cancellationError?: unknown;
+  private targetCancelled = false;
   private status: WorkQueueSnapshot;
 
   constructor(private readonly controller: DesktopWorkspace, private readonly service = new ServiceClient()) {
     this.status = {
-      running: false, phase: 'idle', error: controller.getSnapshot().workspace?.state.work?.lastError ?? '', warnings: [],
+      running: false, cancelRequested: false, phase: 'idle', error: controller.getSnapshot().workspace?.state.work?.lastError ?? '', warnings: [],
       unsubscribing: [], progress: null,
     };
     this.code = new CodeSessions(controller, service, () => this.status.running);
@@ -60,6 +70,13 @@ export class WorkQueue {
     if (progress) this.publish({ progress: {
       ...progress, sources: progress.sources.map(source => source.id === id ? { ...source, ...patch } : source),
     } });
+  }
+  private assessmentProgress(assessment: NonNullable<RunProgress['assessment']>): void {
+    const progress = this.status.progress;
+    if (progress) this.publish({ progress: { ...progress, assessment } });
+  }
+  private assertAssessmentNotCancelled(): void {
+    if (this.status.cancelRequested) throw new AssessmentCancelled();
   }
   private update(transform: (state: AppState) => AppState): void {
     this.controller.update(current => transform({ ...current, work: current.work ?? defaultWorkState() }));
@@ -172,6 +189,20 @@ export class WorkQueue {
   run(): Promise<void> { return this.start(new Date()); }
   runAssessor(taskIds?: readonly string[]): Promise<void> { return this.start(new Date(), 'assess', taskIds); }
   runPrioritizer(): Promise<void> { return this.start(new Date(), 'prioritize'); }
+  cancelAssessor(): Promise<void> {
+    if (this.status.cancelRequested) return this.cancellation ?? Promise.resolve();
+    if (!this.status.running || !(this.status.phase === 'assessing' || this.status.phase === 'checking-assessments'
+      || this.status.phase === 'preparing' && this.status.progress?.kind === 'assess')) return Promise.resolve();
+    const requestId = this.assessmentRequestId;
+    this.publish({ cancelRequested: true, phase: 'cancelling' });
+    this.cancellation = requestId ? this.service.call('cancel', { requestId }).then(ack => {
+      if (ack.requestId !== requestId) throw new Error('Cancellation did not acknowledge the matching assessment request.');
+    }).catch(error => {
+      this.cancellationError = error;
+      this.publish({ warnings: [...this.status.warnings, `Cancellation is not confirmed. ${message(error)} Waiting for the assessment request to stop.`] });
+    }) : Promise.resolve();
+    return this.cancellation;
+  }
   async tick(now = new Date()): Promise<void> {
     if (this.status.running || this.code.busy) return;
     const work = this.controller.state.work ?? defaultWorkState();
@@ -192,7 +223,10 @@ export class WorkQueue {
       return Promise.reject(new Error('Select at least one eligible To do task to assess.'));
     }
     const settings = structuredClone(this.controller.state.work.settings);
-    this.publish({ running: true, phase: 'preparing', error: '', warnings: [], progress: {
+    this.cancellation = undefined;
+    this.cancellationError = undefined;
+    this.targetCancelled = false;
+    this.publish({ running: true, cancelRequested: false, phase: 'preparing', error: '', warnings: [], progress: {
       startedAt: Date.now(), finishedAt: null, kind,
       sources: settings.streams.filter(stream => kind === 'pipeline' && stream.enabled)
         .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
@@ -240,8 +274,11 @@ export class WorkQueue {
   }
 
   private async assess(input: WorkRankInput & { profileId: string }, assessmentGeneration: number, force = false, selected = false) {
+    this.assertAssessmentNotCancelled();
     this.assertWorkspace(assessmentGeneration);
     this.assertProfile(this.controller.state, input.profileId);
+    let progress = { total: input.tasks.length, saved: 0, batches: 0 };
+    this.assessmentProgress(progress);
     const agent = taskAgent(input, 'task-assessment');
     const fingerprints = new Map(await Promise.all(input.tasks.map(async task =>
       [task.id, await identityDigest(semanticRankTask(task))] as const)));
@@ -250,6 +287,7 @@ export class WorkQueue {
     const assessments = new Map<string, SavedAssessment>();
     let pending = input.tasks;
     while (pending.length) {
+      this.assertAssessmentNotCancelled();
       this.publish({ phase: 'assessing' });
       this.assertWorkspace(assessmentGeneration);
       this.assertProfile(this.controller.state, input.profileId);
@@ -262,7 +300,23 @@ export class WorkQueue {
         pending = pending.filter(task => current.get(task.id) === JSON.stringify(semanticRankTask(task)));
         if (!pending.length) break;
       }
-      const batch = workAssessOutputSchema.parse(await this.service.call('work.assess', { ...input, tasks: pending, force }));
+      this.assertAssessmentNotCancelled();
+      const requestId = crypto.randomUUID();
+      this.assessmentRequestId = requestId;
+      let batch: z.infer<typeof workAssessOutputSchema>;
+      try {
+        batch = workAssessOutputSchema.parse(await this.service.call('work.assess', { ...input, tasks: pending, force }, requestId));
+      } catch (error) {
+        if (this.status.cancelRequested && error instanceof ServiceCallError
+          && ['cancelled', 'service-interrupted'].includes(error.code)) {
+          this.targetCancelled = error.code === 'cancelled';
+          throw new AssessmentCancelled();
+        }
+        throw error;
+      } finally {
+        this.assessmentRequestId = undefined;
+      }
+      this.assertAssessmentNotCancelled();
       const pendingIds = new Set(pending.map(task => task.id));
       if (new Set(batch.assessments.map(value => value.id)).size !== batch.assessments.length
         || new Set(batch.assessments.map(value => value.resultId)).size !== batch.assessments.length
@@ -274,7 +328,10 @@ export class WorkQueue {
       }
       await this.controller.saveAssessments(input.profileId, batch.assessments, assessmentGeneration);
       for (const value of batch.assessments) assessments.set(value.id, value);
+      progress = { ...progress, saved: assessments.size, batches: progress.batches + 1 };
+      this.assessmentProgress(progress);
       pending = pending.filter(task => !assessments.has(task.id));
+      this.assertAssessmentNotCancelled();
       this.assertWorkspace(assessmentGeneration);
       this.assertProfile(this.controller.state, input.profileId);
     }
@@ -283,6 +340,7 @@ export class WorkQueue {
 
   private async prioritize(input: WorkRankInput & { profileId: string }, assessmentGeneration: number,
     assessments?: Map<string, SavedAssessment>, force = false): Promise<string[]> {
+    this.assertAssessmentNotCancelled();
     const profileId = input.profileId;
     const assessor = taskAgent(input, 'task-assessment');
     const prioritizer = taskAgent(input, 'task-prioritization');
@@ -329,7 +387,7 @@ export class WorkQueue {
         }
       }
       if (!value || !isCurrent(value)) {
-        throw new Error('Current saved assessments are required for every eligible task. Run assessor first, then run prioritizer. The previous order is retained.');
+        throw new Error('Current saved assessments are required for every eligible task. Use Run assessor for unassessed tasks or Assess selected to refresh saved assessments. The previous order is retained.');
       }
       assessmentIds.push(value.resultId);
     }
@@ -337,11 +395,12 @@ export class WorkQueue {
     const currentTasks = rankInput(this.controller.state).tasks;
     if (!exactIds(latestInput.tasks.map(task => task.id), currentTasks.map(task => task.id))
       || currentTasks.some(task => submitted.get(task.id) !== JSON.stringify(semanticRankTask(task)))) {
-      throw new Error('Tasks changed while preparing prioritization. Run assessor first, then run prioritizer. The previous order is retained.');
+      throw new Error('Tasks changed while preparing prioritization. Use Run assessor for unassessed tasks or Assess selected to refresh saved assessments. The previous order is retained.');
     }
     const orderInput = {
       ...latestInput, profileId, assessmentIds, force,
     };
+    this.assertAssessmentNotCancelled();
     this.publish({ phase: 'ranking' });
     const result = orderInput.tasks.length
       ? workRankOutputSchema.parse(await this.service.call('work.rank', orderInput))
@@ -396,6 +455,22 @@ export class WorkQueue {
         const input = { ...rankInput(this.controller.state), profileId };
         if (kind === 'assess') {
           if (selectedIds) input.tasks = input.tasks.filter(task => selectedIds.has(task.id));
+          else {
+            this.assertAssessmentNotCancelled();
+            this.publish({ phase: 'checking-assessments' });
+            const unassessed: typeof input.tasks = [];
+            for (const task of input.tasks) {
+              this.assertAssessmentNotCancelled();
+              this.assertWorkspace(generation);
+              this.assertProfile(this.controller.state, profileId);
+              const page = await this.controller.platform.assessmentRead(profileId, task.id);
+              if (!page.assessments.length) {
+                if (page.before !== null) throw new Error('Assessment history returned an empty continuation. No assessment request was sent; retry history.');
+                unassessed.push(task);
+              }
+            }
+            input.tasks = unassessed;
+          }
           const assessed = await this.assess(input, generation, true, !!selectedIds);
           if (selectedIds && assessed.size < selectedIds.size) {
             warnings.push(`${selectedIds.size - assessed.size} selected tasks were not assessed because they changed or are no longer eligible.`);
@@ -404,7 +479,7 @@ export class WorkQueue {
             !== JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))) {
             warnings.push(selectedIds
               ? 'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.'
-              : 'Assessor settings changed during the run. Results are saved as history; run assessor with the saved settings.');
+              : 'Assessor settings changed during the run. Results are saved as history; use Assess selected to refresh them with the saved settings.');
           }
         } else warnings.push(...await this.prioritize(input, generation, undefined, true));
         this.assertWorkspace(generation);
@@ -479,7 +554,10 @@ export class WorkQueue {
         const assessments = await this.assess(input, generation);
         warnings.push(...await this.prioritize(input, generation, assessments));
       }
-      catch (error) { errors.push(`Ranking: ${message(error)}`); }
+      catch (error) {
+        if (error instanceof AssessmentCancelled) throw error;
+        errors.push(`Ranking: ${message(error)}`);
+      }
       this.publish({ phase: 'saving', error: errors.join('\n'), warnings: [...warnings] });
       this.update(current => {
         this.assertWorkspace(generation);
@@ -499,7 +577,7 @@ export class WorkQueue {
       await this.controller.flush();
     } catch (error) {
       const source = this.status.progress?.sources.find(source => source.state === 'collecting');
-      errors.push(source ? `${source.name}: ${message(error)}` : message(error));
+      if (!(error instanceof AssessmentCancelled)) errors.push(source ? `${source.name}: ${message(error)}` : message(error));
       try {
         this.update(current => generation !== this.controller.assessmentGeneration ? current : current.activeWorkProfile.id !== profileId ? {
           ...current, inactiveWorkProfiles: current.inactiveWorkProfiles.map(profile => profile.id === profileId
@@ -515,9 +593,14 @@ export class WorkQueue {
         await this.controller.flush();
       } catch { /* The native persistence queue retains the latest state for explicit recovery. */ }
     } finally {
+      await this.cancellation;
+      if (this.cancellationError && !(this.targetCancelled && this.cancellationError instanceof ServiceCallError
+        && this.cancellationError.code === 'service-interrupted')) {
+        warnings.push(`Cancellation is not confirmed. ${message(this.cancellationError)} No further batches were started.`);
+      }
       this.active = undefined;
       const progress = this.status.progress;
-      this.publish({ running: false, phase: errors.length ? 'error' : 'idle', error: errors.join('\n'), warnings,
+      this.publish({ running: false, phase: errors.length ? 'error' : this.status.cancelRequested ? 'cancelled' : 'idle', error: errors.join('\n'), warnings,
         progress: progress && { ...progress, finishedAt: Date.now(), sources: progress.sources.map(source => ({
           ...source, state: source.state === 'collecting' ? 'failed' : source.state === 'waiting' ? 'not-run' : source.state,
         })) },
