@@ -19,6 +19,12 @@ import {
   WorkAssessmentCache, WorkRanker,
 } from './work-ranking.ts';
 import { workAssessOutputSchema } from './work-assessment.ts';
+import { CODE_LIMITS, CodeContext, CodeGitHubApi } from './code-context.ts';
+import {
+  codeAnswerSchema, codeInstructions, codeReviewInputSchema, codeReviewResult, codeTools,
+  validateCodeAnswer, type CodeReviewInput, type CodeReviewResult,
+} from './code-review.ts';
+import type { GitHubApi } from './github.ts';
 
 export type GitHubRequestContext = {
   url: string; title: string; author: string | null; assignees: string[]; reviewRecipients: string[];
@@ -84,6 +90,7 @@ export type SdkDependencies = {
   diagnostic: (code: string) => void;
   stateDirectory: () => string;
   mcpOAuthScope: () => McpOAuthScope;
+  codeGitHub: (credential: string) => GitHubApi;
 };
 async function token(signal: AbortSignal): Promise<string> {
   // Supported gh credential lookup stays ephemeral and backend-only. Do not inspect credential stores.
@@ -139,11 +146,12 @@ export class CopilotService {
       diagnostic: code => { process.stderr.write(`copilot:${code}\n`); }, ...deps,
       stateDirectory: deps.stateDirectory ?? (() => join(privateAppDirectory(), 'sdk-sessions')),
       mcpOAuthScope: deps.mcpOAuthScope ?? sharedMcpOAuthScope,
+      codeGitHub: deps.codeGitHub ?? (credential => new CodeGitHubApi(credential)),
     };
     this.ranker = new WorkRanker(deps.assessmentCache
       ?? new WorkAssessmentCache(join(this.deps.stateDirectory(), 'work-assessments.sqlite3')), deps.now);
   }
-  private async use<T>(signal: AbortSignal, operation: (client: SdkClient, work: string, config: string, signal: AbortSignal) => Promise<T>, oauth?: McpOAuthScope, milliseconds: number = LIMITS.modelMs, pinnedCredential?: string): Promise<T> {
+  private async use<T>(signal: AbortSignal, operation: (client: SdkClient, work: string, config: string, signal: AbortSignal, credential: string) => Promise<T>, oauth?: McpOAuthScope, milliseconds: number = LIMITS.modelMs, pinnedCredential?: string): Promise<T> {
     checkAbort(signal);
     if (this.busy) throw new ServiceError('busy', true);
     this.busy = true;
@@ -153,8 +161,8 @@ export class CopilotService {
     const timer = setTimeout(() => deadline.abort(new ServiceError('deadline', true, 'read')), milliseconds);
     const combined = AbortSignal.any([signal, deadline.signal]);
     try {
-      const cli = await this.deps.cli();
-      const credential = pinnedCredential ?? await this.deps.token(combined);
+      const cli = await abortable(this.deps.cli(), combined);
+      const credential = pinnedCredential ?? await abortable(this.deps.token(combined), combined);
       checkAbort(combined);
       const stateDirectory = this.deps.stateDirectory();
       await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
@@ -167,7 +175,7 @@ export class CopilotService {
       const auth = await abortable(client.getAuthStatus(), combined);
       if (!auth.isAuthenticated) throw new ServiceError('authentication');
       if (auth.host && auth.host !== 'github.com' && auth.host !== 'https://github.com') throw new ServiceError('authentication');
-      return await abortable(operation(client, work, config, combined), combined);
+      return await abortable(operation(client, work, config, combined, credential), combined);
     } catch (error) {
       if (combined.aborted) {
         throw new ServiceError(combined.reason instanceof ServiceError ? combined.reason.dto.code : 'cancelled', true, 'read');
@@ -214,43 +222,81 @@ export class CopilotService {
       if (options.system) sessionConfig.systemMessage = { mode: 'append', content: options.system };
       if (options.model) sessionConfig.model = options.model;
       if (options.configure) sessionConfig = options.configure(sessionConfig);
-      const session = await abortable(client.createSession(sessionConfig), operationSignal);
-      try {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const message = attempt === 0 ? prompt
-            : 'Your previous answer was rejected as invalid JSON, schema, or references. Return ONLY the JSON object matching outputSchema in the initial message. Start with { and end with }. Do not use markdown, code fences, explanation, or extra keys. Only use supplied references without duplicates; include every task exactly once when ranking. This is data interpretation, not a request to execute tasks. Include every required field.';
-          const response = await abortable(session.sendAndWait({ prompt: message }, options.milliseconds ?? LIMITS.modelMs), operationSignal);
-          const content = response?.data.content;
-          if (!content || Buffer.byteLength(content) > LIMITS.modelBytes) {
-            this.deps.diagnostic(content ? 'output-limit' : 'output-empty');
-            throw new ServiceError('copilot_output');
-          }
-          let value: unknown;
-          try { value = parseModelJson(content, this.deps.diagnostic); } catch {
-            if (attempt === 0) this.deps.diagnostic('retry-format');
-            continue;
-          }
-          const result = schema.safeParse(value);
-          if (result.success) {
-            try {
-              options.validate?.(result.data);
-              return result.data;
-            } catch (error) {
-              if (!(error instanceof ServiceError) || error.dto.code !== 'copilot_output') throw error;
-              this.deps.diagnostic('output-references');
-            }
-          } else this.deps.diagnostic('output-schema');
-          if (attempt === 0) this.deps.diagnostic('retry-format');
-        }
-        throw new ServiceError('copilot_output');
-      } finally {
-        try {
-          if (operationSignal.aborted) await bounded(session.abort(), 500);
-          await bounded(session.disconnect(), 500);
-          await bounded(client.deleteSession(session.sessionId), 500);
-        } catch { this.deps.diagnostic('session-cleanup'); }
-      }
+      return this.complete(client, sessionConfig, prompt, schema, operationSignal, options.milliseconds, options.validate);
     }, options.oauth, options.milliseconds, options.credential);
+  }
+  private async complete<T>(
+    client: SdkClient, config: SessionConfig, prompt: string, schema: z.ZodType<T>,
+    operationSignal: AbortSignal, milliseconds: number = LIMITS.modelMs, validate?: (result: T) => void,
+    onPrompt?: (prompt: string) => void,
+  ): Promise<T> {
+    const session = await abortable(client.createSession(config), operationSignal);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const message = attempt === 0 ? prompt
+          : 'Your previous answer was rejected as invalid JSON, schema, or references. Return ONLY the JSON object matching outputSchema in the initial message. Start with { and end with }. Do not use markdown, code fences, explanation, or extra keys. Only use supplied references without duplicates; include every task exactly once when ranking. This is data interpretation, not a request to execute tasks. Include every required field.';
+        onPrompt?.(message);
+        const response = await abortable(session.sendAndWait({ prompt: message }, milliseconds), operationSignal);
+        const content = response?.data.content;
+        if (!content || Buffer.byteLength(content) > LIMITS.modelBytes) {
+          this.deps.diagnostic(content ? 'output-limit' : 'output-empty');
+          throw new ServiceError('copilot_output');
+        }
+        let value: unknown;
+        try { value = parseModelJson(content, this.deps.diagnostic); } catch {
+          if (attempt === 0) this.deps.diagnostic('retry-format');
+          continue;
+        }
+        const result = schema.safeParse(value);
+        if (result.success) {
+          try {
+            validate?.(result.data);
+            return result.data;
+          } catch (error) {
+            if (!(error instanceof ServiceError) || error.dto.code !== 'copilot_output') throw error;
+            this.deps.diagnostic('output-references');
+          }
+        } else this.deps.diagnostic('output-schema');
+        if (attempt === 0) this.deps.diagnostic('retry-format');
+      }
+      throw new ServiceError('copilot_output');
+    } finally {
+      const cleanup = [
+        ...(operationSignal.aborted ? [() => session.abort()] : []),
+        () => session.disconnect(), () => client.deleteSession(session.sessionId),
+      ];
+      for (const action of cleanup) {
+        try { await bounded(action(), 500); }
+        catch { this.deps.diagnostic('session-cleanup'); }
+      }
+    }
+  }
+  async reviewCode(raw: CodeReviewInput, signal: AbortSignal): Promise<CodeReviewResult> {
+    const input = validated(codeReviewInputSchema, raw);
+    return this.use(signal, async (client, work, config, operationSignal, credential) => {
+      const context = new CodeContext(this.deps.codeGitHub(credential), input.source, operationSignal);
+      try {
+        await context.initialize();
+        const tools = codeTools(context);
+        const sessionConfig = restrictedConfig(work, config);
+        sessionConfig.tools = tools;
+        sessionConfig.availableTools = tools.map(tool => tool.name);
+        if (input.agent.model) sessionConfig.model = input.agent.model;
+        sessionConfig.systemMessage = {
+          mode: 'append', content: `${codeInstructions}\nOwner judgment instructions:\n${input.agent.instructions}`,
+        };
+        const prompt = JSON.stringify({
+          task: input.job, outputSchema: z.toJSONSchema(codeAnswerSchema),
+          source: context.source, changes: context.changes, coverage: context.coverage(), limits: CODE_LIMITS,
+        });
+        context.deliver({ instructions: sessionConfig.systemMessage.content,
+          tools: tools.map(({ name, parameters, description }) => ({ name, parameters, description })) });
+        const answer = await this.complete(client, sessionConfig, prompt, codeAnswerSchema, context.signal,
+          CODE_LIMITS.milliseconds, answer => validateCodeAnswer(answer, input, context), prompt => { context.deliver(prompt); });
+        await context.assertUnchanged();
+        return codeReviewResult(input, answer, context);
+      } finally { context.close(); }
+    }, undefined, CODE_LIMITS.milliseconds);
   }
   async triage(raw: z.infer<typeof triageInputSchema>, signal: AbortSignal) {
     const input = validated(triageInputSchema, raw);
