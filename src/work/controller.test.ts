@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { defaultWorkState, notificationWorkstream, workSettingsSchema, type WorkCandidate, type WorkCollection } from '../../service/src/work-schema.ts';
 import { taskAgents, type TaskAgentJob } from '../../service/src/work-agents.ts';
 import type { Request } from '../../service/src/schema.ts';
@@ -646,6 +646,82 @@ describe('explicit task agents', () => {
   function configure(mock: Awaited<ReturnType<typeof fixture>>, job: TaskAgentJob, patch: { name?: string; instructions?: string; model?: string }) {
     mock.queue.saveSettings({ ...mock.workspace.state.work.settings, agents: taskAgents(mock.workspace.state.work.settings)
       .map(agent => agent.jobType === job ? { ...agent, ...patch } : agent) });
+  }
+
+  async function historyAcrossConfigurations() {
+    const mock = await fixture();
+    mock.queue.capture('Reuse the original judgment');
+    configure(mock, 'task-assessment', { instructions: 'Configuration A' });
+    await mock.queue.runAssessor();
+    await mock.queue.runAssessor();
+    await mock.queue.runPrioritizer();
+    const originalA = mock.history.entries.at(-1)!;
+    configure(mock, 'task-assessment', { instructions: 'Configuration B' });
+    for (let index = 0; index < 21; index++) await mock.queue.runAssessor();
+    return { mock, originalA };
+  }
+
+  test('prioritizer reuses newest current A after A-to-B-to-A across history pages without assessment', async () => {
+    const { mock, originalA } = await historyAcrossConfigurations();
+    configure(mock, 'task-assessment', { instructions: 'Configuration A' });
+    const history = structuredClone(mock.history.entries);
+    mock.requests.length = 0;
+    const read = spyOn(mock.history, 'read');
+    try {
+      await mock.queue.runPrioritizer();
+      expect(mock.requests.map(request => request.op)).toEqual(['work.rank']);
+      const request = mock.requests[0]!;
+      if (request.op !== 'work.rank') throw new Error('No prioritization request');
+      expect(request.input.assessmentIds).toEqual([originalA.resultId]);
+      expect(read.mock.calls.map(call => call[2])).toEqual([null, 4]);
+      expect(mock.queue.getSnapshot().error).toBe('');
+      expect(mock.history.entries).toEqual(history);
+    } finally { read.mockRestore(); }
+  });
+
+  test('prioritizer exhausts incompatible history pages without assessment or replacing the prior order', async () => {
+    const { mock } = await historyAcrossConfigurations();
+    configure(mock, 'task-assessment', { instructions: 'Configuration C with no saved judgment' });
+    const prior = structuredClone(mock.saved().work.ranking);
+    const history = structuredClone(mock.history.entries);
+    mock.requests.length = 0;
+    const read = spyOn(mock.history, 'read');
+    try {
+      await mock.queue.runPrioritizer();
+      expect(read.mock.calls.map(call => call[2])).toEqual([null, 4]);
+      expect(mock.requests).toEqual([]);
+      expect(mock.queue.getSnapshot().error).toContain('Run assessor first');
+      expect(mock.saved().work.ranking).toEqual(prior);
+      expect(mock.history.entries).toEqual(history);
+    } finally { read.mockRestore(); }
+  });
+
+  for (const invalid of ['repeated-page', 'duplicate-result', 'empty-continuation', 'nonadvancing-cursor'] as const) {
+    test(`prioritizer rejects ${invalid} while searching history and preserves old order`, async () => {
+      const { mock } = await historyAcrossConfigurations();
+      configure(mock, 'task-assessment', { instructions: 'Configuration A' });
+      const prior = structuredClone(mock.saved().work.ranking);
+      mock.requests.length = 0;
+      const originalRead = mock.history.read.bind(mock.history);
+      const read = spyOn(mock.history, 'read').mockImplementation((profileId, taskId, before, state) => {
+        const page = originalRead(profileId, taskId, before, state);
+        if (invalid === 'repeated-page' && before !== null) return originalRead(profileId, taskId, null, state);
+        if (invalid === 'duplicate-result') return {
+          ...page, assessments: page.assessments.map((entry, index) => index === 1
+            ? { ...entry, resultId: page.assessments[0]!.resultId } : entry),
+        };
+        if (invalid === 'empty-continuation') return { assessments: [], before: 4 };
+        if (invalid === 'nonadvancing-cursor') return { ...page, before: page.assessments[0]!.sequence };
+        return page;
+      });
+      try {
+        await mock.queue.runPrioritizer();
+        expect(mock.requests).toEqual([]);
+        expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+        expect(mock.queue.getSnapshot().error).toContain('Assessment history');
+        expect(mock.saved().work.ranking).toEqual(prior);
+      } finally { read.mockRestore(); }
+    });
   }
 
   test('assessor-only forces versions without collecting, ordering or advancing schedule coverage', async () => {

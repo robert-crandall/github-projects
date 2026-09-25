@@ -284,12 +284,34 @@ export class WorkQueue {
     const configurationFingerprint = await identityDigest(agentIdentity(assessor));
     const assessmentIds: string[] = [];
     for (const task of latestInput.tasks) {
-      const value = assessments ? assessments.get(task.id)
-        : (await this.controller.platform.assessmentRead(profileId, task.id)).assessments[0];
       const fingerprint = await identityDigest(semanticRankTask(task));
-      if (!value || value.id !== task.id || assessmentFreshness(value, {
+      const isCurrent = (value: SavedAssessment) => value.id === task.id && assessmentFreshness(value, {
         profileId, fingerprint, instructionsFingerprint, configurationFingerprint, model: assessor.model,
-      }, Date.now()) !== 'Current for saved task content') {
+      }, Date.now()) === 'Current for saved task content';
+      let value = assessments?.get(task.id);
+      if (!assessments) {
+        const seen = new Set<string>();
+        for (let before: number | null = null; ;) {
+          assertSettings(this.controller.state);
+          const page = await this.controller.platform.assessmentRead(profileId, task.id, before);
+          assertSettings(this.controller.state);
+          let previous: number = before ?? Infinity;
+          for (const entry of page.assessments) {
+            if (entry.sequence >= previous || seen.has(entry.resultId)) {
+              throw new Error('Assessment history returned repeated or unordered results. The previous order is retained; retry history.');
+            }
+            previous = entry.sequence;
+            seen.add(entry.resultId);
+          }
+          if (page.before !== null && (!page.assessments.length || page.before !== previous)) {
+            throw new Error('Assessment history did not advance. The previous order is retained; retry history.');
+          }
+          value = page.assessments.find(isCurrent);
+          if (value || page.before === null) break;
+          before = page.before;
+        }
+      }
+      if (!value || !isCurrent(value)) {
         throw new Error('Current saved assessments are required for every eligible task. Run assessor first, then run prioritizer. The previous order is retained.');
       }
       assessmentIds.push(value.resultId);
