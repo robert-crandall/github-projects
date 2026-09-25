@@ -185,11 +185,6 @@ async fn workspace_export_json(
 }
 
 #[tauri::command]
-async fn workspace_import_json(state: State<'_, NativeState>, expected_revision: String, json: String) -> Result<WorkspaceRead> {
-    with_store(state, move |store| store.import_json(&expected_revision, &json)).await
-}
-
-#[tauri::command]
 async fn assessment_append(state: State<'_, NativeState>, profile_id: String, assessments: Vec<assessments::SavedAssessment>) -> Result<Vec<assessments::HistoryEntry>> {
     with_store(state, move |store| store.assessment_append(&profile_id, assessments)).await
 }
@@ -209,9 +204,10 @@ async fn workspace_recover(
     state: State<'_, NativeState>,
     backup_id: String,
     expected_recovery_token: String,
+    expected_revision: Option<String>,
 ) -> Result<WorkspaceRead> {
     with_store(state, move |store| {
-        store.recover(&backup_id, &expected_recovery_token)
+        store.recover_at_revision(&backup_id, &expected_recovery_token, expected_revision.as_deref())
     })
     .await
 }
@@ -496,7 +492,6 @@ pub fn run() {
             workspace_list_backups,
             workspace_read_backup,
             workspace_export_json,
-            workspace_import_json,
             assessment_append,
             assessment_read,
             workspace_export_raw,

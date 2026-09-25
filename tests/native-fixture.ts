@@ -56,6 +56,7 @@ export class NativeMock {
   assessments = new AssessmentStoreFixture();
   assessmentBackups = new Map<string, typeof this.assessments.entries>();
   holdRank?: ReturnType<typeof gate>;
+  holdAssessment?: ReturnType<typeof gate>;
   conversationApi = new ConversationApi();
   conversations = new Map<string, ConversationCache>();
   corruptCache = false;
@@ -169,6 +170,7 @@ export class NativeMock {
     };
     if (command === 'workspace_recover') {
       expect(args.expectedRecoveryToken).toBe(this.recoveryToken);
+      expect(args.expectedRevision).toBe(this.corrupt ? null : this.saved.revision);
       const backup = this.backups.get(String(args.backupId));
       expect(backup).toBeDefined();
       this.saved = { ...structuredClone(backup!), revision: crypto.randomUUID() };
@@ -183,13 +185,6 @@ export class NativeMock {
     if (command === 'workspace_export_json') {
       expect(args.expectedRevision).toBe(this.saved.revision);
       return JSON.stringify({ ...this.saved, assessments: this.assessments.entries });
-    }
-    if (command === 'workspace_import_json') {
-      expect(args.expectedRevision).toBe(this.saved.revision);
-      const exported = JSON.parse(String(args.json));
-      this.saved = { revision: crypto.randomUUID(), savedAt: this.now, snapshot: snapshotSchema.parse(exported.snapshot) };
-      this.assessments.entries = exported.assessments;
-      return structuredClone(this.saved);
     }
     if (command === 'launch_github' || command === 'launch_copilot' || command === 'launch_web_url') {
       this.launches.push({ command, args: structuredClone(args) });
@@ -208,6 +203,7 @@ export class NativeMock {
         result = structuredClone(this.workCollection);
         break;
       case 'work.assess':
+        if (this.holdAssessment) await this.holdAssessment.promise;
         result = await assessmentBatch(request.input, this.now);
         break;
       case 'work.rank':

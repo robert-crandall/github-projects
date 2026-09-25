@@ -6,11 +6,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { assessmentBatch } from '../../tests/assessment-fixture.ts';
 import { AssessmentStoreFixture } from '../../tests/assessment-store-fixture.ts';
 import { assessmentScope, WorkAssessmentCache, WorkRanker, type RankingModels } from '../../service/src/work-ranking.ts';
-import { identityDigest } from '../../service/src/work-assessment.ts';
+import { identityDigest, type TaskAssessment } from '../../service/src/work-assessment.ts';
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
-import { stateSchema } from '../types.ts';
-import { assessmentFreshness, mergeAssessments } from './assessments.ts';
+import { type Task } from '../types.ts';
+import { assessmentFreshness } from './assessments.ts';
 import { completeWorkTask, consolidateWorkTasks, rankInput, rankTask, reconcileWork, restoreWorkTask } from './engine.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
 import { AssessmentHistory } from './AssessmentHistory.tsx';
@@ -20,31 +20,34 @@ async function manual() {
   const state = emptyWorkspace(at, 'UTC');
   state.tasks = [{ id: 'manual', title: 'Write the proposal', notes: 'Owner notes', createdAt: at, status: 'open' }];
   const { assessments } = await assessmentBatch(rankInput(state), at);
-  state.tasks[0]!.assessments = assessments.map((value, index) => ({ ...value, sequence: index + 1 }));
-  return state;
+  const history = new AssessmentStoreFixture();
+  history.append('default', assessments, state);
+  return { state, history };
 }
 
 test('task history survives Done, restore, profile switches and snapshot round trips without source metadata', async () => {
-  let state = await manual();
+  let { state, history } = await manual();
   const original = structuredClone(state.tasks[0]!);
+  const versions = [...history.entries];
   state = completeWorkTask(state, original.id, at);
   state = restoreDesktop(JSON.parse(JSON.stringify(state)), at);
-  expect(state.tasks[0]!.assessments).toEqual(original.assessments);
+  expect(history.read('default', original.id, null, state).assessments).toEqual(versions);
   expect(state.tasks[0]!.status).toBe('done');
   state = createWorkProfile(state, 'Second profile');
   expect(state.tasks).toEqual([]);
   state = restoreDesktop(JSON.parse(JSON.stringify(state)), at);
-  expect(state.inactiveWorkProfiles[0]!.tasks[0]!.assessments).toEqual(original.assessments);
+  expect(history.read('default', original.id, null, state).assessments).toEqual(versions);
   state = switchWorkProfile(state, 'default');
   state = restoreWorkTask(state, original.id);
-  expect(state.tasks[0]).toMatchObject({ notes: original.notes, status: 'open', assessments: original.assessments });
+  expect(state.tasks[0]).toMatchObject({ notes: original.notes, status: 'open' });
+  expect(history.read('default', original.id, null, state).assessments).toEqual(versions);
   expect(state.tasks[0]!.work).toBeUndefined();
 });
 
 test('freshness distinguishes changed content, settings, expiry and a backwards clock without removing history', async () => {
-  const state = await manual();
+  const { state, history } = await manual();
   const task = state.tasks[0]!;
-  const version = task.assessments![0]!;
+  const version = history.entries[0]!;
   const current = {
     fingerprint: await identityDigest(semanticRankTask(rankTask(task))),
     instructionsFingerprint: await identityDigest(state.work.settings.instructions),
@@ -57,16 +60,16 @@ test('freshness distinguishes changed content, settings, expiry and a backwards 
   expect(assessmentFreshness(version, { ...current, model: 'changed' }, Date.parse(at))).toContain('settings changed');
   expect(assessmentFreshness(version, { ...current, instructionsFingerprint: '0'.repeat(64) }, Date.parse(at))).toContain('settings changed');
   expect(assessmentFreshness(version, current, Date.parse(at) - 1)).toContain('clock moved backwards');
-  expect(task.assessments).toEqual([version]);
+  expect(history.entries).toEqual([version]);
 });
 
 test('new successful versions append; reuse deduplicates and conflicting immutable IDs fail explicitly', async () => {
-  const state = await manual();
-  const first = state.tasks[0]!.assessments![0]!;
-  const next = { ...structuredClone(first), resultId: crypto.randomUUID(), sequence: 2, evaluatedAt: '2026-09-23T12:00:00.000Z' };
-  expect(mergeAssessments([first], [next, first, next])).toEqual([first, next]);
-  expect(mergeAssessments([next], [first, next])).toEqual([first, next]);
-  expect(() => mergeAssessments([first], [{ ...first, fingerprint: '0'.repeat(64) }])).toThrow('changed unexpectedly');
+  const { state, history } = await manual();
+  const { sequence: _, ...first } = history.entries[0]!;
+  const next = { ...first, resultId: crypto.randomUUID(), evaluatedAt: '2026-09-23T12:00:00.000Z' };
+  history.append('default', [next, first, next], state);
+  expect(history.entries.map(value => value.resultId)).toEqual([first.resultId, next.resultId]);
+  expect(() => history.append('default', [{ ...first, fingerprint: '0'.repeat(64) }], state)).toThrow('Conflicting assessment');
 });
 
 test('service backwards-clock reassessment persists as latest and remains latest when histories merge', async () => {
@@ -109,14 +112,11 @@ test('service backwards-clock reassessment persists as latest and remains latest
     const versions = reloadedHistory.read('default', 'original', null, restored).assessments.reverse();
     expect(versions.map(value => value.sequence)).toEqual([1, 2]);
     expect(versions.at(-1)!.resultId).toBe(second.assessments[0]!.resultId);
-    const render = (task: typeof restored.tasks[number]) => renderToStaticMarkup(createElement(AssessmentHistory, {
+    const render = (task: Task & { assessments: TaskAssessment[] }) => renderToStaticMarkup(createElement(AssessmentHistory, {
       task, profileId: 'default', settings: restored.work.settings,
     }));
     expect(render({ ...restored.tasks[0]!, assessments: versions })).toContain('Judgment 2');
     expect(render({ ...restored.tasks[0]!, assessments: versions })).not.toContain('Judgment 1');
-    const merged = mergeAssessments([versions[1]!], [versions[0]!, versions[1]!]);
-    expect(merged).toEqual(versions);
-    expect(render({ ...restored.tasks[0]!, assessments: merged })).toContain('Judgment 2');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -134,27 +134,26 @@ test('source reconciliation and duplicate consolidation retain both histories an
   let current = reconcileWork(state, batch, at);
   current.tasks.push({ ...structuredClone(current.tasks[0]!), id: 'duplicate', title: 'Second request' });
   const history = new AssessmentStoreFixture();
-  const values = history.append('default', (await assessmentBatch(rankInput(current))).assessments, current);
-  current.tasks = current.tasks.map(task => ({ ...task, assessments: values.filter(value => value.id === task.id) }));
-  const versions = current.tasks.flatMap(task => task.assessments!);
+  const versions = history.append('default', (await assessmentBatch(rankInput(current))).assessments, current);
   current.tasks.reverse();
   const consolidated = consolidateWorkTasks(current);
   expect(consolidated.tasks).toHaveLength(1);
-  expect(consolidated.tasks[0]!.assessments).toHaveLength(2);
-  for (const value of versions) expect(consolidated.tasks[0]!.assessments).toContainEqual(value);
-  expect(consolidated.tasks[0]!.assessments!.at(-1)).toEqual(versions.at(-1));
+  expect(history.read('default', consolidated.tasks[0]!.id, null, consolidated).assessments).toEqual([...versions].reverse());
   const reconciled = reconcileWork(consolidated, batch, at);
-  expect(reconciled.tasks[0]!.assessments).toEqual(consolidated.tasks[0]!.assessments);
   const restored = restoreDesktop(JSON.parse(JSON.stringify(reconciled)), at);
-  expect(restored.tasks[0]!.assessments).toEqual(consolidated.tasks[0]!.assessments);
+  expect(history.read('default', restored.tasks[0]!.id, null, restored).assessments).toEqual([...versions].reverse());
 });
 
-test('old saves gain no invented history and malformed saved history fails rather than disappearing', async () => {
+test('old saves gain no invented history', () => {
   const state = emptyWorkspace(at, 'UTC');
   state.tasks = [{ id: 'old', title: 'Unassessed', notes: '', status: 'open', createdAt: at }];
-  expect(restoreDesktop(state, at).tasks[0]!.assessments).toBeUndefined();
-  const assessed = await manual();
-  expect(stateSchema.safeParse({ ...assessed, tasks: [{ ...assessed.tasks[0], assessments: [{ old: 'cache record' }] }] }).success).toBe(false);
-  assessed.tasks[0]!.assessments![0]!.profileId = 'wrong-profile';
-  expect(() => restoreDesktop(assessed, at)).toThrow('inconsistent profile');
+  expect(restoreDesktop(state, at).tasks[0]).not.toHaveProperty('assessments');
+});
+
+for (const shape of ['live-task', 'shared-alias'] as const) test(`rejects ambiguous ${shape} assessment ownership`, async () => {
+  const { state } = await manual();
+  state.tasks.push({ ...state.tasks[0]!, id: 'other' });
+  if (shape === 'live-task') state.tasks[0]!.assessmentTaskIds = ['other'];
+  else for (const task of state.tasks) task.assessmentTaskIds = ['shared'];
+  expect(() => restoreDesktop(state, at)).toThrow('exactly one task');
 });

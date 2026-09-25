@@ -6,7 +6,7 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -54,15 +54,6 @@ pub struct HistoryEntry {
 pub struct HistoryPage {
     pub assessments: Vec<HistoryEntry>,
     pub before: Option<i64>,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceExport {
-    #[serde(flatten)]
-    pub workspace: WorkspaceRead,
-    #[serde(default)]
-    pub assessments: Vec<HistoryEntry>,
 }
 
 fn bounded(value: &str, min: usize, max: usize) -> bool {
@@ -141,7 +132,8 @@ fn decode(sequence: i64, payload: String, checksum: String) -> Result<HistoryEnt
     Ok(HistoryEntry { result, sequence })
 }
 
-pub(crate) fn all(connection: &Connection) -> Result<Vec<HistoryEntry>> {
+#[cfg(test)]
+fn all(connection: &Connection) -> Result<Vec<HistoryEntry>> {
     if !exists(connection)? {
         return Ok(vec![]);
     }
@@ -158,68 +150,35 @@ pub(crate) fn all(connection: &Connection) -> Result<Vec<HistoryEntry>> {
 const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) fn export_json(connection: &Connection, workspace: WorkspaceRead) -> Result<String> {
-    let bytes: i64 = if exists(connection)? {
-        connection.query_row(
-            "SELECT coalesce(sum(length(CAST(payload AS BLOB))+100),0) FROM task_assessments",
-            [],
-            |row| row.get(0),
-        )?
-    } else {
-        0
+    let limit = || {
+        NativeError::new("export-too-large", "JSON export exceeds 64 MiB. Preserve database files or use a database backup; all history remains saved.")
     };
-    if bytes as usize + crate::model::MAX_SNAPSHOT_BYTES > MAX_EXPORT_BYTES {
-        return Err(NativeError::new("export-too-large", "JSON export exceeds 64 MiB. Preserve database files or create a database backup; all history remains saved."));
-    }
-    let export = serde_json::to_string(&WorkspaceExport {
-        workspace,
-        assessments: all(connection)?,
-    })
-    .map_err(|_| NativeError::corrupt())?;
-    if export.len() > MAX_EXPORT_BYTES {
-        return Err(NativeError::new(
-            "export-too-large",
-            "JSON export exceeds 64 MiB. Use a database backup instead.",
-        ));
-    }
-    Ok(export)
-}
-
-pub(crate) fn parse_export(json: &str) -> Result<WorkspaceExport> {
-    if json.len() > MAX_EXPORT_BYTES {
-        return Err(NativeError::new(
-            "import-too-large",
-            "JSON import exceeds 64 MiB. Restore a database backup instead.",
-        ));
-    }
-    let mut document: WorkspaceExport =
-        serde_json::from_str(json).map_err(|_| NativeError::invalid())?;
-    let snapshot = document
-        .workspace
-        .snapshot
-        .as_ref()
-        .ok_or_else(NativeError::invalid)?;
-    let mut ids = HashSet::new();
-    let mut sequences = HashSet::new();
-    for entry in &document.assessments {
-        entry.result.validate()?;
-        if entry.sequence <= 0
-            || entry.sequence > 9_007_199_254_740_991
-            || !ids.insert(&entry.result.result_id)
-            || !sequences.insert(entry.sequence)
-            || !profile_tasks(snapshot, &entry.result.profile_id)?
-                .iter()
-                .any(|task| {
-                    task["id"] == entry.result.id
-                        || task["assessmentTaskIds"].as_array().is_some_and(|ids| {
-                            ids.contains(&Value::String(entry.result.id.clone()))
-                        })
-                })
-        {
-            return Err(NativeError::invalid());
+    let mut output = serde_json::to_string(&workspace).map_err(|_| NativeError::corrupt())?;
+    output.pop();
+    output.push_str(",\"assessments\":[");
+    if exists(connection)? {
+        let mut query = connection
+            .prepare("SELECT sequence,payload,checksum FROM task_assessments ORDER BY sequence")?;
+        let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        for (index, row) in rows.enumerate() {
+            let (sequence, payload, checksum) = row?;
+            let entry = serde_json::to_string(&decode(sequence, payload, checksum)?)
+                .map_err(|_| NativeError::corrupt())?;
+            let comma = usize::from(index > 0);
+            if output.len() + comma + entry.len() + 2 > MAX_EXPORT_BYTES {
+                return Err(limit());
+            }
+            if comma != 0 {
+                output.push(',');
+            }
+            output.push_str(&entry);
         }
     }
-    document.assessments.sort_by_key(|entry| entry.sequence);
-    Ok(document)
+    output.push_str("]}");
+    if output.len() > MAX_EXPORT_BYTES {
+        return Err(limit());
+    }
+    Ok(output)
 }
 
 fn insert(connection: &Connection, result: &SavedAssessment) -> Result<HistoryEntry> {
@@ -272,126 +231,59 @@ fn profile_tasks<'a>(snapshot: &'a Snapshot, profile_id: &str) -> Result<&'a Vec
     tasks.as_array().ok_or_else(NativeError::invalid)
 }
 
-fn task_ids(snapshot: &Snapshot, profile_id: &str, task_id: &str) -> Result<Vec<String>> {
-    let task = profile_tasks(snapshot, profile_id)?
-        .iter()
-        .find(|task| task["id"] == task_id)
-        .ok_or_else(NativeError::invalid)?;
-    let mut ids = vec![task_id.to_owned()];
-    if let Some(aliases) = task.get("assessmentTaskIds") {
-        for alias in aliases.as_array().ok_or_else(NativeError::invalid)? {
-            let alias = alias
-                .as_str()
-                .filter(|id| bounded(id, 1, 500))
-                .ok_or_else(NativeError::invalid)?;
-            if !ids.iter().any(|id| id == alias) {
-                ids.push(alias.to_owned());
-            }
+fn ownership(tasks: &[Value]) -> Result<HashMap<&str, &str>> {
+    let mut owners = HashMap::new();
+    for task in tasks {
+        let id = task["id"].as_str().ok_or_else(NativeError::invalid)?;
+        if owners.insert(id, id).is_some() {
+            return Err(NativeError::invalid());
         }
     }
-    Ok(ids)
-}
-
-pub(crate) fn extract(snapshot: &mut Snapshot) -> Result<Vec<HistoryEntry>> {
-    fn task(task: &mut Value, profile_id: &str, results: &mut Vec<HistoryEntry>) -> Result<()> {
-        let Some(values) = task.get("assessments") else {
-            return Ok(());
-        };
-        let mut aliases = task
-            .get("assessmentTaskIds")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        for value in values.as_array().ok_or_else(NativeError::invalid)? {
-            let mut value = value.clone();
-            let sequence = value
-                .as_object_mut()
-                .ok_or_else(NativeError::invalid)?
-                .remove("sequence")
-                .map(|value| {
-                    value
-                        .as_i64()
-                        .filter(|n| *n >= 0)
-                        .ok_or_else(NativeError::invalid)
-                })
-                .transpose()?
-                .unwrap_or(0);
-            let result: SavedAssessment =
-                serde_json::from_value(value).map_err(|_| NativeError::invalid())?;
-            result.validate()?;
-            if result.profile_id != profile_id {
-                return Err(NativeError::invalid());
-            }
-            if result.id != task["id"] && !aliases.contains(&Value::String(result.id.clone())) {
-                aliases.push(Value::String(result.id.clone()));
-            }
-            results.push(HistoryEntry { result, sequence });
-        }
-        let object = task.as_object_mut().ok_or_else(NativeError::invalid)?;
-        object.remove("assessments");
-        if !aliases.is_empty() {
-            object.insert("assessmentTaskIds".into(), Value::Array(aliases));
-        }
-        Ok(())
-    }
-    fn profile(value: &mut Value, profile_id: &str, results: &mut Vec<HistoryEntry>) -> Result<()> {
-        if let Some(tasks) = value.get_mut("tasks").and_then(Value::as_array_mut) {
-            for item in tasks {
-                task(item, profile_id, results)?;
-            }
-        }
-        if let Some(undo) = value.get_mut("undo").and_then(Value::as_array_mut) {
-            for entry in undo {
-                for side in ["before", "after"] {
-                    if let Some(item) = entry.get_mut(side) {
-                        task(item, profile_id, results)?;
-                    }
+    for task in tasks {
+        let id = task["id"].as_str().ok_or_else(NativeError::invalid)?;
+        if let Some(aliases) = task.get("assessmentTaskIds") {
+            for alias in aliases.as_array().ok_or_else(NativeError::invalid)? {
+                let alias = alias
+                    .as_str()
+                    .filter(|id| bounded(id, 1, 500))
+                    .ok_or_else(NativeError::invalid)?;
+                if owners.get(alias).is_some_and(|owner| *owner != id) {
+                    return Err(NativeError::new("assessment-owner-conflict", "Assessment history aliases must belong to exactly one task in each profile."));
                 }
+                owners.insert(alias, id);
             }
         }
-        Ok(())
     }
-    let mut results = vec![];
-    let Some(state) = snapshot.workspace.get_mut("state") else {
-        return Ok(results);
-    };
-    let id = state["activeWorkProfile"]["id"]
-        .as_str()
-        .unwrap_or("default")
-        .to_owned();
-    profile(state, &id, &mut results)?;
-    if let Some(profiles) = state
-        .get_mut("inactiveWorkProfiles")
-        .and_then(Value::as_array_mut)
-    {
-        for value in profiles {
-            let id = value["id"]
-                .as_str()
-                .ok_or_else(NativeError::invalid)?
-                .to_owned();
-            profile(value, &id, &mut results)?;
+    Ok(owners)
+}
+
+pub(crate) fn validate_ownership(snapshot: &Snapshot) -> Result<()> {
+    let state = &snapshot.workspace["state"];
+    if let Some(tasks) = state.get("tasks").and_then(Value::as_array) {
+        ownership(tasks)?;
+    }
+    if let Some(profiles) = state.get("inactiveWorkProfiles") {
+        for profile in profiles.as_array().ok_or_else(NativeError::invalid)? {
+            ownership(
+                profile["tasks"]
+                    .as_array()
+                    .ok_or_else(NativeError::invalid)?,
+            )?;
         }
     }
-    results.sort_by_key(|entry| entry.sequence);
-    Ok(results)
-}
-
-pub(crate) fn save_entries(connection: &Connection, entries: &[HistoryEntry]) -> Result<()> {
-    for entry in entries {
-        insert(connection, &entry.result)?;
-    }
     Ok(())
 }
 
-pub(crate) fn import_entries(connection: &Connection, entries: &[HistoryEntry]) -> Result<()> {
-    for entry in entries {
-        let payload = serde_json::to_string(&entry.result).map_err(|_| NativeError::invalid())?;
-        connection.execute(
-            "INSERT INTO task_assessments(sequence,result_id,profile_id,task_id,payload,checksum) VALUES (?,?,?,?,?,?)",
-            params![entry.sequence, entry.result.result_id, entry.result.profile_id, entry.result.id, payload, digest(payload.as_bytes())],
-        )?;
+fn task_ids(snapshot: &Snapshot, profile_id: &str, task_id: &str) -> Result<Vec<String>> {
+    let owners = ownership(profile_tasks(snapshot, profile_id)?)?;
+    if owners.get(task_id) != Some(&task_id) {
+        return Err(NativeError::invalid());
     }
-    Ok(())
+    Ok(owners
+        .into_iter()
+        .filter(|(_, owner)| *owner == task_id)
+        .map(|(id, _)| id.to_owned())
+        .collect())
 }
 
 impl Store {
@@ -405,19 +297,16 @@ impl Store {
         }
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        initialize(&transaction)?;
         let snapshot = read_connection(&transaction)?
             .snapshot
             .ok_or_else(NativeError::invalid)?;
         let mut ids = HashSet::new();
+        let owners = ownership(profile_tasks(&snapshot, profile_id)?)?;
         for value in &values {
             if value.profile_id != profile_id
                 || !ids.insert(&value.result_id)
-                || !profile_tasks(&snapshot, profile_id)?.iter().any(|task| {
-                    task["id"] == value.id
-                        || task["assessmentTaskIds"]
-                            .as_array()
-                            .is_some_and(|ids| ids.contains(&Value::String(value.id.clone())))
-                })
+                || !owners.contains_key(value.id.as_str())
             {
                 return Err(NativeError::invalid());
             }
@@ -511,8 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn history_above_eight_mib_pages_relaunches_and_keeps_normal_saves_backup_export_import_restore(
-    ) {
+    fn history_above_eight_mib_pages_relaunches_and_keeps_normal_saves_backup_export_restore() {
         let (dir, mut store) = setup();
         for _ in 0..115 {
             store
@@ -578,89 +466,42 @@ mod tests {
             restored.snapshot.unwrap().workspace["state"]["tasks"][0]["status"],
             "open"
         );
-        let imported = store
-            .import_json(&store.read().unwrap().revision, &export)
-            .unwrap();
+        let original: Value = serde_json::from_str(&export).unwrap();
         assert_eq!(
-            store
-                .export_json(&imported.revision)
-                .unwrap()
-                .matches("\"resultId\"")
-                .count(),
-            2300
-        );
-        let original: WorkspaceExport = serde_json::from_str(&export).unwrap();
-        assert_eq!(
-            all(&store.connection().unwrap()).unwrap(),
-            original.assessments
+            serde_json::to_value(all(&store.connection().unwrap()).unwrap()).unwrap(),
+            original["assessments"]
         );
     }
 
     #[test]
-    fn embedded_migration_is_backed_up_atomic_idempotent_and_preserves_aliases_and_sequence() {
+    fn consolidated_aliases_preserve_sequence_and_reads_do_not_mutate_saved_state() {
         let (_dir, mut store) = setup();
         let first = result("manual");
         let mut newest = result("old-duplicate");
         newest.evaluated_at = "2026-09-24T11:00:00Z".into();
-        let mut old = snapshot();
-        old.workspace["state"]["tasks"][0]["assessments"] = json!([
-            HistoryEntry {
-                result: first.clone(),
-                sequence: 4
-            },
-            HistoryEntry {
-                result: newest.clone(),
-                sequence: 5
-            }
-        ]);
-        let json = old.encode().unwrap();
-        let conn = store.connection().unwrap();
-        conn.execute(
-            "UPDATE workspace SET snapshot=?,checksum=?",
-            params![json, digest(json.as_bytes())],
-        )
-        .unwrap();
-        conn.execute_batch("CREATE TRIGGER fail_migration BEFORE INSERT ON task_assessments BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;").unwrap();
-        assert!(store.read().is_err());
-        assert_eq!(
-            read_connection(&conn).unwrap().snapshot.unwrap().workspace,
-            old.workspace
-        );
-        assert_eq!(all(&conn).unwrap().len(), 0);
-        conn.execute_batch("DROP TRIGGER fail_migration").unwrap();
-        let migrated = store.read().unwrap();
-        assert!(
-            migrated.snapshot.as_ref().unwrap().workspace["state"]["tasks"][0]
-                .get("assessments")
-                .is_none()
-        );
-        assert_eq!(
-            migrated.snapshot.as_ref().unwrap().workspace["state"]["tasks"][0]["assessmentTaskIds"],
-            json!(["old-duplicate"])
-        );
+        let mut consolidated = snapshot();
+        consolidated.workspace["state"]["tasks"][0]["assessmentTaskIds"] =
+            json!(["manual", "old-duplicate"]);
+        let saved = store
+            .save(&store.read().unwrap().revision, consolidated)
+            .unwrap();
+        store
+            .assessment_append("default", vec![first.clone(), newest.clone()])
+            .unwrap();
         let page = store.assessment_read("default", "manual", None).unwrap();
         assert_eq!(page.assessments[0].result, newest);
         assert_eq!(page.assessments[1].result, first);
-        assert_eq!(store.read().unwrap().revision, migrated.revision);
-        assert_eq!(all(&conn).unwrap().len(), 2);
-        assert!(store.list_backups().unwrap().iter().any(|b| store
-            .read_backup(&b.id)
-            .unwrap()
-            .snapshot
-            .is_some_and(|s| s.workspace == old.workspace)));
-        let imported = store.export_json(&migrated.revision).unwrap();
-        store.import_json(&migrated.revision, &imported).unwrap();
+        let backups = store.list_backups().unwrap().len();
+        assert_eq!(store.read().unwrap().revision, saved.revision);
         assert_eq!(
-            store
-                .assessment_read("default", "manual", None)
-                .unwrap()
-                .assessments,
-            page.assessments
+            store.read().unwrap().snapshot.unwrap().workspace,
+            saved.snapshot.unwrap().workspace
         );
+        assert_eq!(store.list_backups().unwrap().len(), backups);
     }
 
     #[test]
-    fn failed_history_append_does_not_block_task_saves_and_import_cannot_mix_workspaces() {
+    fn failed_history_append_does_not_block_task_saves() {
         let (_dir, mut store) = setup();
         let saved = store.read().unwrap();
         let connection = store.connection().unwrap();
@@ -681,54 +522,164 @@ mod tests {
         store
             .assessment_append("default", vec![result("manual")])
             .unwrap();
-        let mut export: Value =
-            serde_json::from_str(&store.export_json(&saved.revision).unwrap()).unwrap();
-        export["snapshot"]["workspace"]["state"]["tasks"][0]["id"] = json!("unrelated");
-        assert!(store
-            .import_json(&saved.revision, &export.to_string())
-            .is_err());
-        export["assessments"] = json!([]);
+        assert_eq!(
+            store
+                .assessment_read("default", "manual", None)
+                .unwrap()
+                .assessments
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovery_rejects_concurrent_append_or_snapshot_change_before_restoring() {
+        let (_dir, mut store) = setup();
+        let before = store.status();
+        let backup = store
+            .create_backup(before.revision.as_deref().unwrap())
+            .unwrap();
+        let appended = store
+            .assessment_append("default", vec![result("manual")])
+            .unwrap();
+        assert_eq!(
+            store
+                .recover_at_revision(
+                    &backup.id,
+                    &before.recovery_token,
+                    before.revision.as_deref()
+                )
+                .unwrap_err()
+                .code,
+            "revision-conflict"
+        );
+        assert_eq!(
+            store
+                .assessment_read("default", "manual", None)
+                .unwrap()
+                .assessments,
+            appended
+        );
         store
-            .import_json(&saved.revision, &export.to_string())
+            .save(before.revision.as_deref().unwrap(), snapshot())
+            .unwrap();
+        let latest = store.status();
+        assert_eq!(
+            store
+                .recover_at_revision(
+                    &backup.id,
+                    &latest.recovery_token,
+                    before.revision.as_deref()
+                )
+                .unwrap_err()
+                .code,
+            "revision-conflict"
+        );
+        store
+            .recover_at_revision(
+                &backup.id,
+                &latest.recovery_token,
+                latest.revision.as_deref(),
+            )
             .unwrap();
         assert!(store
-            .assessment_read("default", "unrelated", None)
+            .assessment_read("default", "manual", None)
             .unwrap()
             .assessments
             .is_empty());
     }
 
     #[test]
-    fn json_import_bounds_transport_and_rejects_duplicate_versions_without_mutation() {
+    fn ambiguous_aliases_fail_save_read_and_append_but_profiles_are_independent() {
+        for shared in [false, true] {
+            let (_dir, mut store) = setup();
+            let revision = store.read().unwrap().revision;
+            let mut invalid = snapshot();
+            invalid.workspace["state"]["tasks"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"B"}));
+            invalid.workspace["state"]["tasks"][0]["assessmentTaskIds"] =
+                json!([if shared { "former" } else { "B" }]);
+            if shared {
+                invalid.workspace["state"]["tasks"][1]["assessmentTaskIds"] = json!(["former"]);
+            }
+            assert_eq!(
+                store.save(&revision, invalid.clone()).unwrap_err().code,
+                "assessment-owner-conflict"
+            );
+            assert_eq!(store.read().unwrap().revision, revision);
+            let json = invalid.encode().unwrap();
+            store
+                .connection()
+                .unwrap()
+                .execute(
+                    "UPDATE workspace SET snapshot=?,checksum=?",
+                    params![json, digest(json.as_bytes())],
+                )
+                .unwrap();
+            assert_eq!(store.read().unwrap_err().code, "storage-corrupt");
+            assert!(store
+                .assessment_append("default", vec![result("manual")])
+                .is_err());
+            assert!(store.assessment_read("default", "manual", None).is_err());
+        }
         let (_dir, mut store) = setup();
-        store
-            .assessment_append("default", vec![result("manual")])
-            .unwrap();
-        let revision = store.read().unwrap().revision;
-        let original = store.export_json(&revision).unwrap();
-        let mut malformed: Value = serde_json::from_str(&original).unwrap();
-        let value = malformed["assessments"][0].clone();
-        malformed["assessments"].as_array_mut().unwrap().push(value);
-        assert!(store
-            .import_json(&revision, &malformed.to_string())
-            .is_err());
-        assert_eq!(store.export_json(&revision).unwrap(), original);
-        store.connection().unwrap().execute_batch(
-            "CREATE TRIGGER fail_import BEFORE INSERT ON task_assessments BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;"
-        ).unwrap();
-        assert!(store.import_json(&revision, &original).is_err());
-        assert_eq!(store.export_json(&revision).unwrap(), original);
-        store
-            .connection()
-            .unwrap()
-            .execute_batch("DROP TRIGGER fail_import")
-            .unwrap();
-        let oversized = " ".repeat(MAX_EXPORT_BYTES + 1);
+        let mut valid = snapshot();
+        valid.workspace["state"]["tasks"][0]["assessmentTaskIds"] = json!(["former"]);
+        valid.workspace["state"]["inactiveWorkProfiles"][0]["tasks"][0]["assessmentTaskIds"] =
+            json!(["former"]);
+        store.save(&store.read().unwrap().revision, valid).unwrap();
+    }
+
+    #[test]
+    fn export_cap_measures_actual_serialized_history_and_small_workspace() {
+        let (_dir, store) = setup();
+        let mut connection = store.connection().unwrap();
+        let mut count = 0;
+        let mut serialized_rows = 0;
+        {
+            let transaction = connection.transaction().unwrap();
+            while serialized_rows < 57 * 1024 * 1024 {
+                let entry = insert(&transaction, &result("manual")).unwrap();
+                serialized_rows +=
+                    serde_json::to_string(&entry).unwrap().len() + usize::from(count > 0);
+                count += 1;
+            }
+            transaction.commit().unwrap();
+        }
+        let saved = store.read().unwrap();
+        let envelope = serde_json::to_string(&saved).unwrap();
+        let actual_bytes = envelope.len() - 1 + ",\"assessments\":[".len() + serialized_rows + 2;
+        let exported = store.export_json(&saved.revision).unwrap();
+        assert_eq!(exported.len(), actual_bytes);
+        assert!(actual_bytes > 57 * 1024 * 1024 && actual_bytes < MAX_EXPORT_BYTES);
         assert_eq!(
-            store.import_json(&revision, &oversized).unwrap_err().code,
-            "import-too-large"
+            serde_json::from_str::<Value>(&exported).unwrap()["assessments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            count
         );
-        assert_eq!(store.export_json(&revision).unwrap(), original);
+        drop(exported);
+        {
+            let transaction = connection.transaction().unwrap();
+            while envelope.len() - 1 + ",\"assessments\":[".len() + serialized_rows + 2
+                <= MAX_EXPORT_BYTES
+            {
+                let entry = insert(&transaction, &result("manual")).unwrap();
+                serialized_rows += serde_json::to_string(&entry).unwrap().len() + 1;
+            }
+            transaction.commit().unwrap();
+        }
+        let exact_oversized = serde_json::to_string(&json!({
+            "revision":saved.revision, "snapshot":saved.snapshot, "savedAt":saved.saved_at, "assessments":all(&connection).unwrap()
+        })).unwrap();
+        assert!(exact_oversized.len() > MAX_EXPORT_BYTES);
+        assert_eq!(
+            store.export_json(&saved.revision).unwrap_err().code,
+            "export-too-large"
+        );
     }
 }
 impl Store {
@@ -746,6 +697,12 @@ impl Store {
             .snapshot
             .ok_or_else(NativeError::invalid)?;
         let ids = task_ids(&snapshot, profile_id, task_id)?;
+        if !exists(&connection)? {
+            return Ok(HistoryPage {
+                assessments: vec![],
+                before: None,
+            });
+        }
         let mut query = connection.prepare(
             "SELECT sequence,payload,checksum FROM task_assessments
              WHERE profile_id=? AND task_id IN (SELECT value FROM json_each(?)) AND sequence < ?

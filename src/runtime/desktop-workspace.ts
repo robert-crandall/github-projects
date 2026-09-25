@@ -5,16 +5,19 @@ import { stateSchema, type AppState, type Command } from '../types.ts';
 import { nativePlatform, snapshotSchema } from '../platform/native.ts';
 import { PersistenceQueue, type PersistenceStatus } from './persistence.ts';
 import { savedAssessmentSchema, type SavedAssessment, type TaskAssessment } from '../../service/src/work-assessment.ts';
+import { validateWorkProfiles } from '../work/profiles.ts';
 
 export const desktopEnvelopeSchema = z.object({
   version: z.literal(1), state: stateSchema, scroll: z.record(z.string(), z.number().nonnegative()),
 }).strict();
 export type DesktopEnvelope = z.infer<typeof desktopEnvelopeSchema>;
 export type Platform = typeof nativePlatform;
+export type QuarantinedAssessment = { workspaceGeneration: number; sourceRevision: string; assessment: SavedAssessment };
 export type DesktopStatus = {
   workspace: DesktopEnvelope | null; loading: boolean; loadError: string; operationError: string;
   persistence: PersistenceStatus; feedback: string;
   assessmentPending: SavedAssessment[]; assessmentError: string; assessmentSaving: boolean; assessmentRevision: number;
+  assessmentQuarantined: QuarantinedAssessment[];
 };
 const message = (error: unknown) => error instanceof Error ? error.message : 'The operation failed without a recognized response.';
 const assessmentResult = ({ sequence: _, ...value }: TaskAssessment) => savedAssessmentSchema.parse(value);
@@ -25,12 +28,14 @@ export class DesktopWorkspace {
   private revision?: string;
   private loadPromise?: Promise<void>;
   private workspaceGeneration = 0;
-  private pendingAssessmentGeneration = 0;
+  private workspaceOrigins = new Map<number, string>();
+  private recovering = false;
   get assessmentGeneration(): number { return this.workspaceGeneration; }
   private status: DesktopStatus = {
     workspace: null, loading: true, loadError: '', operationError: '', feedback: '',
     persistence: { saving: false, pending: false, error: '' },
     assessmentPending: [], assessmentError: '', assessmentSaving: false, assessmentRevision: 0,
+    assessmentQuarantined: [],
   };
 
   constructor(readonly platform: Platform = nativePlatform) {}
@@ -73,6 +78,7 @@ export class DesktopWorkspace {
       }
       const workspace: DesktopEnvelope = { version: 1, state, scroll: envelope?.scroll ?? {} };
       this.revision = saved.revision;
+      this.workspaceOrigins.set(this.workspaceGeneration, saved.revision);
       this.queue = new PersistenceQueue(saved.revision, async (revision, value) => {
         const snapshot = snapshotSchema.parse(JSON.parse(JSON.stringify({
           formatVersion: 1, workspace: value, reminders: [],
@@ -93,6 +99,7 @@ export class DesktopWorkspace {
     if (!workspace || !this.queue) throw new Error('The desktop workspace is not ready for edits.');
     const current = transition(workspace.state, { type: 'clock', now: new Date().toISOString() });
     const next = { ...workspace, state: transform(current) };
+    validateWorkProfiles(next.state);
     this.publish({ workspace: next, operationError: '', feedback: '' });
     this.queue.enqueue(next);
   }
@@ -109,8 +116,11 @@ export class DesktopWorkspace {
   }
   async saveAssessments(profileId: string, values: SavedAssessment[], generation = this.workspaceGeneration): Promise<void> {
     if (values.some(value => value.profileId !== profileId)) throw new Error('Assessment profile does not match its result.');
+    if (generation !== this.workspaceGeneration) {
+      this.quarantine(generation, values);
+      throw new Error('Results from the previous workspace are preserved separately for export. Current workspace runs can continue.');
+    }
     const pending = new Map(this.status.assessmentPending.map(value => [value.resultId, value]));
-    if (!pending.size) this.pendingAssessmentGeneration = generation;
     for (const value of values) {
       const existing = pending.get(value.resultId);
       if (existing && JSON.stringify(existing) !== JSON.stringify(value)) throw new Error('An immutable pending assessment changed.');
@@ -119,14 +129,24 @@ export class DesktopWorkspace {
     this.publish({ assessmentPending: [...pending.values()], assessmentRevision: this.status.assessmentRevision + 1 });
     await this.retryAssessments();
   }
+  private quarantine(generation: number, values: SavedAssessment[]): void {
+    const sourceRevision = this.workspaceOrigins.get(generation);
+    if (!sourceRevision) throw new Error('The original workspace revision for these results is unavailable.');
+    const saved = new Map(this.status.assessmentQuarantined.map(value => [`${value.workspaceGeneration}:${value.assessment.resultId}`, value]));
+    for (const assessment of values) {
+      const key = `${generation}:${assessment.resultId}`;
+      const existing = saved.get(key);
+      if (existing && JSON.stringify(existing.assessment) !== JSON.stringify(assessment)) throw new Error('A quarantined assessment changed unexpectedly.');
+      saved.set(key, { workspaceGeneration: generation, sourceRevision, assessment });
+    }
+    this.publish({ assessmentQuarantined: [...saved.values()] });
+  }
   async retryAssessments(): Promise<void> {
     if (this.status.assessmentSaving) throw new Error('An assessment save is already in progress.');
     if (!this.status.assessmentPending.length) return;
     this.publish({ assessmentSaving: true, assessmentError: '' });
     try {
-      if (this.pendingAssessmentGeneration !== this.workspaceGeneration) {
-        throw new Error('These results belong to the workspace before recovery. Export pending assessments separately; they cannot be attached to this workspace.');
-      }
+      if (this.recovering) throw new Error('Wait for workspace recovery before retrying assessment saves.');
       await this.flush();
       while (this.status.assessmentPending.length) {
         const profileId = this.status.assessmentPending[0]!.profileId;
@@ -172,40 +192,37 @@ export class DesktopWorkspace {
     return this.platform.exportJson(saved.revision);
   }
   async fullPendingJson(): Promise<string> {
-    if (this.status.assessmentPending.length && this.pendingAssessmentGeneration !== this.workspaceGeneration) {
-      throw new Error('Pending assessments belong to the workspace before recovery. Export them separately to avoid mixing workspaces.');
-    }
+    const generation = this.workspaceGeneration;
     const pendingAtStart = this.status.assessmentPending;
     const saved: { assessments?: TaskAssessment[] } = JSON.parse(await this.savedJson());
+    if (generation !== this.workspaceGeneration) throw new Error('The workspace changed during export. Retry the export from the restored workspace.');
     const values = new Map((saved.assessments ?? []).map(value => [value.resultId, value]));
-    let sequence = [...values.values()].reduce((max, value) => Math.max(max, value.sequence ?? 0), 0);
+    const pending = new Map<string, SavedAssessment>();
     for (const value of [...pendingAtStart, ...this.status.assessmentPending]) {
       const existing = values.get(value.resultId);
       if (existing && JSON.stringify(assessmentResult(existing)) !== JSON.stringify(value)) {
         throw new Error('A pending assessment conflicts with saved history. Preserve database files before recovery.');
       }
-      if (!existing) values.set(value.resultId, { ...value, sequence: ++sequence });
+      if (!existing) pending.set(value.resultId, value);
     }
     const result = JSON.stringify({
-      ...saved, snapshot: JSON.parse(this.pendingJson()), assessments: [...values.values()],
+      ...saved, snapshot: JSON.parse(this.pendingJson()),
+      pendingAssessments: {
+        workspaceGeneration: generation, sourceRevision: this.workspaceOrigins.get(generation), assessments: [...pending.values()],
+      },
+      quarantinedAssessments: this.status.assessmentQuarantined,
     });
     if (new TextEncoder().encode(result).length > 64 * 1024 * 1024) throw new Error('Combined JSON export exceeds 64 MiB. Preserve database files and export pending results separately.');
     return result;
   }
   pendingAssessmentsJson(): string {
-    return JSON.stringify({ assessments: this.status.assessmentPending }, null, 2);
-  }
-  async importJson(json: string): Promise<void> {
-    if (this.status.persistence.saving || this.status.assessmentSaving) throw new Error('Wait for current saves before importing.');
-    const parsed: unknown = JSON.parse(json);
-    const document = z.object({ snapshot: snapshotSchema }).parse(parsed);
-    const envelope = desktopEnvelopeSchema.extend({ state: z.unknown() }).parse(document.snapshot.workspace);
-    restoreDesktop(envelope.state, (await this.platform.clockNow()).now);
-    const saved = await this.platform.workspaceRead();
-    await this.platform.importJson(saved.revision, json);
-    await this.replaceLoadedWorkspace();
+    return JSON.stringify({
+      workspaceGeneration: this.workspaceGeneration, sourceRevision: this.workspaceOrigins.get(this.workspaceGeneration),
+      assessments: this.status.assessmentPending, quarantinedAssessments: this.status.assessmentQuarantined,
+    }, null, 2);
   }
   private async replaceLoadedWorkspace(): Promise<void> {
+    if (this.status.assessmentPending.length) this.quarantine(this.workspaceGeneration, this.status.assessmentPending);
     this.workspaceGeneration += 1;
     this.queue = undefined;
     this.revision = undefined;
@@ -217,14 +234,19 @@ export class DesktopWorkspace {
     await this.load();
   }
   async recoverBackup(id: string): Promise<void> {
-    if (this.status.persistence.saving || this.status.assessmentSaving) throw new Error('Wait for the current save before recovering a backup.');
-    const backup = await this.platform.readBackup(id);
-    if (backup.snapshot) {
-      const envelope = desktopEnvelopeSchema.extend({ state: z.unknown() }).parse(backup.snapshot.workspace);
-      restoreDesktop(envelope.state, (await this.platform.clockNow()).now);
+    if (this.recovering || this.status.persistence.saving || this.status.assessmentSaving) throw new Error('Wait for the current save before recovering a backup.');
+    this.recovering = true;
+    try {
+      const backup = await this.platform.readBackup(id);
+      if (backup.snapshot) {
+        const envelope = desktopEnvelopeSchema.extend({ state: z.unknown() }).parse(backup.snapshot.workspace);
+        restoreDesktop(envelope.state, (await this.platform.clockNow()).now);
+      }
+      const status = await this.platform.storageStatus();
+      await this.platform.recoverBackup(id, status.recoveryToken, status.revision);
+      await this.replaceLoadedWorkspace();
+    } finally {
+      this.recovering = false;
     }
-    const status = await this.platform.storageStatus();
-    await this.platform.recoverBackup(id, status.recoveryToken);
-    await this.replaceLoadedWorkspace();
   }
 }

@@ -106,6 +106,8 @@ pub(crate) fn read_connection(connection: &Connection) -> Result<WorkspaceRead> 
             let snapshot: Snapshot =
                 serde_json::from_str(&json).map_err(|_| NativeError::corrupt())?;
             snapshot.encode().map_err(|_| NativeError::corrupt())?;
+            crate::assessments::validate_ownership(&snapshot)
+                .map_err(|_| NativeError::corrupt())?;
             if saved_at
                 .as_deref()
                 .map(crate::model::timestamp)
@@ -205,6 +207,7 @@ impl Store {
             "INSERT INTO workspace (id, revision) VALUES (1, ?)",
             [Uuid::new_v4().to_string()],
         )?;
+        crate::assessments::initialize(&transaction)?;
         transaction.commit()?;
         File::open(&self.directory)?.sync_all()?;
         Ok(())
@@ -216,35 +219,11 @@ impl Store {
         configure(&connection)?;
         validate(&connection)?;
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA fullfsync=ON;")?;
-        crate::assessments::initialize(&connection)?;
         Ok(connection)
     }
 
     pub fn read(&self) -> Result<WorkspaceRead> {
-        let mut connection = self.connection()?;
-        let saved = read_connection(&connection)?;
-        if let Some(mut snapshot) = saved.snapshot.clone() {
-            let original = snapshot.encode()?;
-            let entries = crate::assessments::extract(&mut snapshot)?;
-            let json = snapshot.encode()?;
-            if json != original {
-                // The immutable original includes every embedded result before normalization.
-                self.backup_connection(&connection, &Uuid::new_v4().to_string())?;
-                let transaction =
-                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                crate::assessments::save_entries(&transaction, &entries)?;
-                let rows = transaction.execute(
-                    "UPDATE workspace SET revision=?,snapshot=?,checksum=? WHERE id=1 AND revision=?",
-                    params![Uuid::new_v4().to_string(), json, digest(json.as_bytes()), saved.revision],
-                )?;
-                if rows != 1 {
-                    return Err(NativeError::conflict());
-                }
-                transaction.commit()?;
-                return read_connection(&connection);
-            }
-        }
-        Ok(saved)
+        read_connection(&self.connection()?)
     }
 
     pub fn status(&self) -> StorageStatus {
@@ -262,25 +241,20 @@ impl Store {
         }
     }
 
-    pub fn save(
-        &mut self,
-        expected_revision: &str,
-        mut snapshot: Snapshot,
-    ) -> Result<WorkspaceRead> {
-        let embedded = crate::assessments::extract(&mut snapshot)?;
+    pub fn save(&mut self, expected_revision: &str, snapshot: Snapshot) -> Result<WorkspaceRead> {
+        crate::assessments::validate_ownership(&snapshot)?;
         let json = snapshot.encode()?;
         let mut connection = self.connection()?;
         let previous = read_connection(&connection)?;
         if previous.revision != expected_revision {
             return Err(NativeError::conflict());
         }
-        if !embedded.is_empty()
-            || previous
-                .snapshot
-                .as_ref()
-                .and_then(Snapshot::state_version)
-                .is_some_and(|version| matches!(version, 1 | 2))
-                && snapshot.state_version() == Some(3)
+        if previous
+            .snapshot
+            .as_ref()
+            .and_then(Snapshot::state_version)
+            .is_some_and(|version| matches!(version, 1 | 2))
+            && snapshot.state_version() == Some(3)
         {
             // Reuse the renderer's validated immutable backup, never the rotating "latest".
             let already_preserved = self.list_backups()?.iter().any(|backup| {
@@ -295,7 +269,6 @@ impl Store {
         }
         self.backup_connection(&connection, "latest")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::assessments::save_entries(&transaction, &embedded)?;
         let revision = Uuid::new_v4().to_string();
         let saved_at = Utc::now().to_rfc3339();
         let rows = transaction.execute(
@@ -397,33 +370,6 @@ impl Store {
         self.recovery_token = Uuid::new_v4().to_string();
     }
 
-    pub fn import_json(&mut self, expected_revision: &str, json: &str) -> Result<WorkspaceRead> {
-        let document = crate::assessments::parse_export(json)?;
-        let mut snapshot = document
-            .workspace
-            .snapshot
-            .ok_or_else(NativeError::invalid)?;
-        let embedded = crate::assessments::extract(&mut snapshot)?;
-        let encoded = snapshot.encode()?;
-        let mut connection = self.connection()?;
-        if read_connection(&connection)?.revision != expected_revision {
-            return Err(NativeError::conflict());
-        }
-        self.backup_connection(&connection, &Uuid::new_v4().to_string())?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute("DELETE FROM task_assessments", [])?;
-        crate::assessments::import_entries(&transaction, &document.assessments)?;
-        crate::assessments::save_entries(&transaction, &embedded)?;
-        let revision = Uuid::new_v4().to_string();
-        transaction.execute(
-            "UPDATE workspace SET revision=?,snapshot=?,checksum=?,saved_at=? WHERE id=1 AND revision=?",
-            params![revision, encoded, digest(encoded.as_bytes()), Utc::now().to_rfc3339(), expected_revision],
-        )?;
-        transaction.commit()?;
-        self.rotate_recovery_token();
-        self.read()
-    }
-
     pub fn export_raw(&self) -> Result<RawExport> {
         let id = Uuid::new_v4().to_string();
         let directory = self.directory.join("exports").join(&id);
@@ -448,6 +394,18 @@ impl Store {
             id,
             directory: directory.to_string_lossy().into_owned(),
         })
+    }
+
+    pub fn recover_at_revision(
+        &mut self,
+        backup_id: &str,
+        expected_token: &str,
+        expected_revision: Option<&str>,
+    ) -> Result<WorkspaceRead> {
+        if self.status().revision.as_deref() != expected_revision {
+            return Err(NativeError::conflict());
+        }
+        self.recover(backup_id, expected_token)
     }
 
     pub fn recover(&mut self, backup_id: &str, expected_token: &str) -> Result<WorkspaceRead> {

@@ -105,7 +105,7 @@ test('latest assessment selection follows saved logical order after the clock mo
   await expect(history).toContainText('Historical result.');
 });
 
-test('paged history remains readable and can export and import without embedding results in task saves', async ({ page, native }) => {
+test('paged history remains readable and exportable without embedding results in task saves', async ({ page, native }) => {
   await page.goto('/');
   await add(page, 'Paged history');
   const id = native.state.tasks[0]!.id;
@@ -124,17 +124,14 @@ test('paged history remains readable and can export and import without embedding
   await expect(history).toContainText('Latest saved result.');
   await page.getByLabel('Task notes', { exact: true }).fill('Notes after long history');
   await persisted(page);
-  expect(native.state.tasks[0]!.assessments).toBeUndefined();
+  expect(native.state.tasks[0]).not.toHaveProperty('assessments');
   expect(native.assessments.values(id)).toHaveLength(45);
-  const exported = JSON.stringify({ ...native.saved, assessments: native.assessments.entries });
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Backups & recovery' }).click();
-  await page.getByLabel('Import a workspace JSON export').setInputFiles({
-    name: 'history.json', mimeType: 'application/json', buffer: Buffer.from(exported),
-  });
-  await page.getByLabel('I exported pending edits and assessments.', { exact: false }).check();
-  await page.getByRole('button', { name: 'Import workspace', exact: true }).click();
-  await expect(page.getByRole('dialog')).toHaveCount(0);
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export pending copy', exact: true }).click();
+  expect((await download).suggestedFilename()).toBe('github-projects-pending.json');
+  await expect(page.getByLabel('Import a workspace JSON export')).toHaveCount(0);
   expect(native.assessments.values(id)).toHaveLength(45);
   expect(native.state.tasks[0]!.notes).toBe('Notes after long history');
 });
@@ -161,6 +158,33 @@ test('failed history append leaves editable tasks and visible retryable exportab
   await page.getByRole('button', { name: 'Retry assessment save', exact: true }).first().click();
   await persisted(page);
   expect(native.assessments.entries.length).toBeGreaterThan(0);
+});
+
+test('late pre-recovery results are export-only and do not block the next run', async ({ page, native }) => {
+  await page.goto('/');
+  await add(page, 'Original task');
+  const backupId = crypto.randomUUID();
+  native.backups.set(backupId, structuredClone(native.saved));
+  native.assessmentBackups.set(backupId, []);
+  native.holdAssessment = gate();
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await expect.poll(() => native.requests.some(request => request.op === 'work.assess')).toBe(true);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page.getByRole('button', { name: 'Backups & recovery', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Saved backup', exact: true }).selectOption(backupId);
+  await page.getByLabel('I exported pending edits and assessments.', { exact: false }).check();
+  await page.getByRole('button', { name: 'Restore selected backup', exact: true }).click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  native.holdAssessment.release();
+  native.holdAssessment = undefined;
+  await expect(page.getByRole('button', { name: 'Export previous workspace results', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+  await run(page);
+  expect(native.assessments.entries.length).toBeGreaterThan(0);
+  await page.getByRole('button', { name: 'Export previous workspace results', exact: true }).click();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'Export pending assessments', exact: true }).click();
+  expect((await download).suggestedFilename()).toBe('github-projects-pending-assessments.json');
 });
 test('saved team searches survive relaunch and collect through configured sources', async ({ page, native }) => {
   const query = 'is:pr is:open team-review-requested:sample/provider-maintainers';

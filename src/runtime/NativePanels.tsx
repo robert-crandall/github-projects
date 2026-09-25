@@ -11,7 +11,6 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
   const [notice, setNotice] = useState('');
   const [pending, setPending] = useState(false);
   const [confirm, setConfirm] = useState(false);
-  const [imported, setImported] = useState('');
   async function run(operation: () => Promise<void>) {
     setPending(true); setError('');
     try { await operation(); }
@@ -25,7 +24,7 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
       <button className="secondary" disabled={pending || !controller.getSnapshot().workspace} onClick={() => void run(async () => {
         downloadBackup(await controller.fullPendingJson(), 'github-projects-pending.json');
       })}><Download size={15} />Export pending copy</button>
-      {controller.getSnapshot().assessmentPending.length > 0 && <button className="secondary" onClick={() => {
+      {(controller.getSnapshot().assessmentPending.length > 0 || controller.getSnapshot().assessmentQuarantined.length > 0) && <button className="secondary" onClick={() => {
         downloadBackup(controller.pendingAssessmentsJson(), 'github-projects-pending-assessments.json');
       }}>Export pending assessments</button>}
       <button className="secondary" disabled={pending} onClick={() => void run(async () => {
@@ -33,28 +32,18 @@ export function RecoveryPanel({ controller, close }: { controller: DesktopWorksp
         setNotice(`Original database files preserved locally: ${result.directory}`);
       })}>Preserve database files</button>
     </div>
-    <label>Saved backup<select value={selected} onChange={event => { setSelected(event.target.value); setImported(''); setConfirm(false); }}>
+    <label>Saved backup<select value={selected} onChange={event => { setSelected(event.target.value); setConfirm(false); }}>
       <option value="">Choose a backup</option>{backups.map(backup => <option key={backup.id} value={backup.id}>{backup.createdAt} · {backup.id === 'latest' ? 'Previous save' : backup.id}</option>)}
     </select></label>
-    <label>Import a workspace JSON export<input type="file" accept=".json,application/json" disabled={pending}
-      onChange={event => {
-        const file = event.target.files?.[0];
-        setImported(''); setConfirm(false);
-        if (file) void run(async () => {
-          if (file.size > 64 * 1024 * 1024) throw new Error('JSON import exceeds 64 MiB. Restore a database backup instead.');
-          setImported(await file.text()); setSelected('');
-        });
-      }} /></label>
     {!backups.length && <p className="muted">No backup is available. Preserve the original database files before further repair.</p>}
-    <label className="checkbox-label"><input type="checkbox" checked={confirm} onChange={event => setConfirm(event.target.checked)} />I exported pending edits and assessments. Replace this workspace and its assessment history with the selected backup or import.</label>
+    <label className="checkbox-label"><input type="checkbox" checked={confirm} onChange={event => setConfirm(event.target.checked)} />I exported pending edits and assessments. Replace this workspace and its assessment history with the selected backup.</label>
     {notice && <p className="notice-inline" role="status">{notice}</p>}
     {error && <p className="inline-error" role="alert">{error}</p>}
-    <footer className="modal-footer"><button className="secondary" onClick={close}>Cancel</button><button className="primary" disabled={pending || (!selected && !imported) || !confirm} onClick={() => void run(async () => {
-      if (imported) await controller.importJson(imported);
-      else await controller.recoverBackup(selected);
+    <footer className="modal-footer"><button className="secondary" onClick={close}>Cancel</button><button className="primary" disabled={pending || !selected || !confirm} onClick={() => void run(async () => {
+      await controller.recoverBackup(selected);
       if (controller.getSnapshot().loadError) throw new Error(controller.getSnapshot().loadError);
       close();
-    })}>{imported ? 'Import workspace' : 'Restore selected backup'}</button></footer>
+    })}>Restore selected backup</button></footer>
   </Modal>;
 }
 

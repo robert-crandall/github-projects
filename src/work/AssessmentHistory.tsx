@@ -57,7 +57,7 @@ export function TaskAssessmentHistory({ task, controller }: { task: Task; contro
 }
 
 export function AssessmentHistory({ task, profileId, settings, latestResultId }: {
-  task: Task; profileId: string; settings: WorkSettings; latestResultId?: string;
+  task: Task & { assessments: TaskAssessment[] }; profileId: string; settings: WorkSettings; latestResultId?: string;
 }) {
   const [selected, setSelected] = useState('');
   const [, updateClock] = useState(0);

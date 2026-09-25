@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { sourceStateSchema } from '../service/src/schema.ts';
 import { defaultWorkState, workMetadataSchema, workStateSchema } from '../service/src/work-schema.ts';
-import { assessmentHistorySchema } from '../service/src/work-assessment.ts';
 
 const time = z.iso.datetime();
 const boundarySchema = z.object({ at: time, notificationUpdatedAt: time.optional(), evidenceAt: time.optional() });
@@ -95,7 +94,6 @@ export const taskSchema = z.object({
   id: z.string(), title: z.string(), notes: z.string(), status: z.enum(['open', 'done']),
   createdAt: time, completedAt: time.optional(), history: historySchema.optional(), threadId: z.string().optional(),
   work: workMetadataSchema.optional(),
-  assessments: assessmentHistorySchema.optional(),
   assessmentTaskIds: z.array(z.string().min(1).max(500)).optional(),
 });
 export const noteSchema = z.object({

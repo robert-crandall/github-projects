@@ -276,6 +276,10 @@ export function TaskApp({ controller, queue, remote }: {
         <button className="secondary" onClick={() => setRecovery(true)}>Export pending results</button>
       </div>}
     </div>}
+    {saved.assessmentQuarantined.length > 0 && <div className="task-run-details" role="status">
+      <p>{saved.assessmentQuarantined.length} results from a previous workspace are kept separately in this session. Export before quitting. Current runs and saves are unaffected.</p>
+      <button className="secondary" onClick={() => setRecovery(true)}>Export previous workspace results</button>
+    </div>}
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
       settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)} /> : <>
       <div className="task-context"><p>{run.running ? run.phase : state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>

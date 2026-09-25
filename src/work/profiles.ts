@@ -19,9 +19,14 @@ export function validateWorkProfiles(state: AppState): void {
     throw new Error('Saved work profiles have inconsistent task references. Export them before explicit recovery.');
   }
   for (const profile of [{ ...state.activeWorkProfile, tasks: state.tasks }, ...state.inactiveWorkProfiles]) {
-    if (profile.tasks.some(task => task.assessments?.some(value => value.profileId !== profile.id)
-      || new Set(task.assessments?.map(value => value.resultId)).size !== (task.assessments?.length ?? 0))) {
-      throw new Error('Saved assessments have inconsistent profile or version identities. Export them before explicit recovery.');
+    const owners = new Map(profile.tasks.map(task => [task.id, task.id]));
+    for (const task of profile.tasks) {
+      for (const id of task.assessmentTaskIds ?? []) {
+        if (owners.has(id) && owners.get(id) !== task.id) {
+          throw new Error('Assessment history aliases must belong to exactly one task in each profile.');
+        }
+        owners.set(id, task.id);
+      }
     }
   }
 }

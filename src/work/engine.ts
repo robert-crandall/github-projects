@@ -3,7 +3,6 @@ import {
   type WorkAction, type WorkCollection, type WorkEvidence, type WorkMetadata, type WorkObservation, type WorkRankInput,
 } from '../../service/src/work-schema.ts';
 import type { AppState, Task } from '../types.ts';
-import { mergeAssessments } from './assessments.ts';
 
 /** Issues and pull requests share GitHub's repository-local number space. */
 export function canonicalSource(value: string): string {
@@ -112,8 +111,6 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
   return {
     ...first, status, completedAt,
     assessmentTaskIds: [...new Set([first.id, second.id, ...first.assessmentTaskIds ?? [], ...second.assessmentTaskIds ?? []])],
-    ...((first.assessments || second.assessments)
-      ? { assessments: mergeAssessments(first.assessments ?? [], second.assessments ?? []) } : {}),
     createdAt: Date.parse(first.createdAt) <= Date.parse(second.createdAt) ? first.createdAt : second.createdAt,
     notes: [...new Set([first.notes, additionalNotes].filter(Boolean))].join('\n\n'),
     work: workMetadataSchema.parse({

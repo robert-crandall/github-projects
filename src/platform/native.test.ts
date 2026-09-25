@@ -68,8 +68,9 @@ describe('typed native boundary', () => {
 
   test('backup recovery requires opaque token, paths cannot enter API', () => {
     const native = createNativePlatform(async () => saved);
-    expect(() => native.recoverBackup('../old-app', revision)).toThrow();
-    expect(() => native.recoverBackup('latest', '1')).toThrow();
+    expect(() => native.recoverBackup('../old-app', revision, revision)).toThrow();
+    expect(() => native.recoverBackup('latest', '1', revision)).toThrow();
+    expect(() => native.recoverBackup('latest', revision, 'stale-shaped')).toThrow();
   });
 
   test('clock reads retain explicit errors without inventing a timezone', () => {

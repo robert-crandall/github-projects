@@ -1,4 +1,4 @@
-import { savedAssessmentSchema, type SavedAssessment, type TaskAssessment } from '../service/src/work-assessment.ts';
+import { type SavedAssessment, type TaskAssessment } from '../service/src/work-assessment.ts';
 import type { AppState } from '../src/types.ts';
 
 export class AssessmentStoreFixture {
@@ -35,16 +35,5 @@ export class AssessmentStoreFixture {
       && (value.id === taskId || task.assessmentTaskIds?.includes(value.id)) && (!before || value.sequence < before)).reverse();
     const assessments = entries.slice(0, 20);
     return { assessments, before: entries.length > 20 ? assessments.at(-1)!.sequence : null };
-  }
-  migrate(state: AppState) {
-    for (const profile of [{ ...state.activeWorkProfile, tasks: state.tasks }, ...state.inactiveWorkProfiles]) {
-      for (const task of profile.tasks) {
-        const values = [...task.assessments ?? []].sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
-        const aliases = values.map(value => value.id).filter(id => id !== task.id);
-        if (aliases.length) task.assessmentTaskIds = [...new Set([...task.assessmentTaskIds ?? [], ...aliases])];
-        if (values.length) this.append(profile.id, values.map(({ sequence: _, ...value }) => savedAssessmentSchema.parse(value)), state);
-        delete task.assessments;
-      }
-    }
   }
 }
