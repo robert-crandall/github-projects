@@ -24,7 +24,7 @@ The SDK is `@github/copilot-sdk@1.0.13`, which speaks protocol 3 and was release
 
 ## Code review backend and saved task sessions
 
-The desktop exposes this capability only through explicit single-task actions and `work.reviewCode`. Its durable lifecycle is separate from task assessment/ranking history. Existing assessors and prioritizers still have no tools.
+The desktop exposes this capability only through explicit single-task actions and `work.reviewCode`. Its durable lifecycle is separate from task assessment/ranking history. Existing assessors and prioritizers still have no tools. Browser-safe run DTOs live in `src/code-runs.ts`; the [native storage boundary](../src/platform/README.md#code-run-lifecycle) persists their lifecycle independently of task snapshots, without starting SDK work.
 
 Call the existing `CopilotService` instance's `reviewCode(input, signal)` method; do not create another service instance for each task. [`src/code-review-schema.ts`](src/code-review-schema.ts) contains the browser-safe schemas/types, re-exported by [`src/code-review.ts`](src/code-review.ts). The strict input contains only:
 
@@ -66,7 +66,7 @@ Results always have `coverage.status: 'partial'`: bounded, selective inspection 
 
 Missing/truncated patches, capped trees/files/source bodies, binary or non-UTF-8 files, symlinks, submodules, oversized files and inaccessible paths are explicit coverage warnings. Comments/reviews/checks and private task notes are not collected. Tools support listing and reading, not repository-wide text search or execution. Budget exhaustion, malformed output, cancellation and deadlines return `ServiceError`; fatal tool budgets abort inference even if the SDK swallows the tool error. Cancellation reaches HTTP and SDK abort/disconnect/delete/force-stop cleanup. No local repository checkout or repository code is executed.
 
-`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers. `test/protocol.test.ts` covers the public RPC. Separately authorized, isolated live SDK 1.0.13 smokes exercised an implementation assessment of #46 and review of merged PR #48: actual read tools, grounded result persistence, partial notices and natural host exit succeeded. The implementation smoke required one format correction; these checks do not imply general model reliability.
+`test/code-review.test.ts` uses stubbed GitHub/SDK dependencies, including real host-tool handlers. `test/protocol.test.ts` covers the public RPC. The preserved #47 source passed separately authorized, isolated live SDK 1.0.13 smokes for an implementation assessment of #46 and review of merged PR #48: actual read tools, grounded result persistence, partial notices and natural host exit succeeded. The implementation smoke required one format correction; these checks do not imply general model reliability. Final integration reuses that evidence without repeating paid calls.
 
 An earlier authorized attempt rejected grounding and timed out; its model payload was not retained, so its grounding cause is unknown. It exposed an SDK 1.0.13 `sendAndWait` idle timer that survives disconnect/forceStop. `src/sdk-client.ts` now waits using public `send`/`on`, with a shared abort signal, final-assistant semantics, and deterministic timer/subscription cleanup. Installed-SDK tests use a synthetic stdio runtime (no model) for send rejection, error/idle-before-ack races, deadline and cancellation. Source/model text never enters diagnostics; grounding diagnostics identify fixed reason categories only.
 
@@ -98,7 +98,7 @@ Malformed input has `id: null`. The host should treat protocol failures as servi
 | In-flight requests | 4; additional operations receive `busy` |
 | Output backlog | 64 frames / 4 MiB; a stalled write fails after 2 seconds |
 | Request IDs | Unique per process; 1-180 ASCII identity characters; 4,096 requests per process |
-| Overall deadline | 120 seconds; `work.collect`, `work.assess` and `work.rank` get 300 seconds; cancellation propagates into gh/SDK cleanup |
+| Overall deadline | 120 seconds; `work.collect`, `work.assess` and `work.rank` get 300 seconds; `work.reviewCode` gets 210 seconds; cancellation propagates into gh/SDK cleanup |
 | GitHub collection | 90-second budget; three concurrent enrichment workers, one refresh at a time |
 | gh process | 20 seconds, 4 MiB combined stdout/stderr |
 | Copilot concurrency/deadline | One SDK operation, 90 seconds including setup/inference; each assessment/order pass and GitHub reply batch gets 180 seconds, with assessment plus ordering bounded to 300 seconds total |
