@@ -23,7 +23,7 @@ The header contains Run now, work profiles, ranking time and cadence. To do, Don
 
 Settings is a full settings page, not a large modal. Separate appearance, instructions, source queries, the opt-in schedule, connection guidance and recovery. Appearance applies and saves immediately, independently of the work-settings form. Manual capture uses a small focused dialog and Command/Ctrl+K. Local edits stay available during collection and ranking.
 
-Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings, each with a name, model and instructions. Put their separate run actions near Run now with the role distinction visible. Assessment ratings stay in the compact task-details definition list and history selector, not a dashboard or card grid.
+Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings, each with a name, model and instructions. Run now is the default split-button action; its dropdown contains Run assessor and Run prioritizer with brief role descriptions. Assessment ratings stay in the compact task-details definition list and history selector, not a dashboard or card grid.
 
 Implementation assessor and PR reviewer use the same Settings fieldset language. Their actions live in task details and the selected-task toolbar beside compact progress/cancel/result/history controls. Show the service-owned PR conclusion and partial coverage even with no findings. Keep revision/configuration detail in a disclosure and code evidence behind explicit links. Results never displace editing, Done or navigation.
 

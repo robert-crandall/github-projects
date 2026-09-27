@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Check, ExternalLink, Github, ListFilter, ListOrdered, Plus, RefreshCw, Settings2, SlidersHorizontal, X } from 'lucide-react';
+import { Check, ChevronDown, ExternalLink, Github, ListFilter, ListOrdered, Plus, RefreshCw, Settings2, SlidersHorizontal, X } from 'lucide-react';
 import { Modal } from '../Modal.tsx';
 import { ConnectionsPanel, RecoveryPanel } from '../runtime/NativePanels.tsx';
 import { DestinationPanel } from '../runtime/DestinationPanel.tsx';
@@ -31,6 +31,49 @@ function source(task: Task) {
   if (!task.work) return 'Manual task';
   const url = new URL(task.work.url);
   return `${[...new Set(task.work.evidence.map(item => item.source))].join(' + ')} · ${url.hostname === 'github.com' ? url.pathname.slice(1).replace(/\/(?:pull|issues)\//, '#') : url.hostname}`;
+}
+function RunActions({ running, disabled, invoke, queue }: {
+  running: boolean; disabled: boolean; invoke: (operation: () => Promise<unknown>) => void; queue: WorkQueue;
+}) {
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (event.target instanceof Node && !container.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', dismiss);
+    return () => document.removeEventListener('pointerdown', dismiss);
+  }, [open]);
+  const choose = (operation: () => Promise<unknown>) => {
+    setOpen(false);
+    trigger.current?.focus();
+    invoke(operation);
+  };
+  return <div className="task-run-actions" ref={container} onBlur={event => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+  }} onKeyDown={event => {
+    if (open && event.key === 'Escape') {
+      event.stopPropagation();
+      setOpen(false);
+      trigger.current?.focus();
+    }
+  }}>
+    <button className="primary" disabled={disabled} onClick={() => { setOpen(false); invoke(() => queue.run()); }}>
+      <RefreshCw size={15} />{running ? 'Running...' : 'Run now'}
+    </button>
+    <button ref={trigger} className="primary task-run-toggle" disabled={disabled}
+      aria-label="More run actions" aria-expanded={open} aria-controls="task-run-options"
+      onClick={() => setOpen(value => !value)}><ChevronDown size={15} /></button>
+    <div id="task-run-options" className="task-run-options" hidden={!open}>
+      <button disabled={disabled} onClick={() => choose(() => queue.runAssessor())} aria-describedby="run-assessor-help">Run assessor</button>
+      <p id="run-assessor-help">Fill missing judgments without changing the order.</p>
+      <button disabled={disabled} onClick={() => choose(() => queue.runPrioritizer())} aria-describedby="run-prioritizer-help">Run prioritizer</button>
+      <p id="run-prioritizer-help">Refresh GitHub status and order saved judgments.</p>
+    </div>
+  </div>;
 }
 function Capture({ queue, close }: { queue: WorkQueue; close: () => void }) {
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -305,15 +348,8 @@ export function TaskApp({ controller, queue, remote }: {
     </aside>
     <div className="task-workspace">
     {!settings && <header className="task-top"><h1>{filters ? 'Filters' : 'Ranked Tasks'}</h1>
-      <button className="primary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.run())}><RefreshCw size={15} />{run.running ? 'Running...' : 'Run now'}</button>
+      <RunActions running={run.running} disabled={run.running || code.busy} invoke={invoke} queue={queue} />
     </header>}
-    {!settings && <div className="task-agent-actions">
-      <div className="button-row">
-        <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>
-        <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runPrioritizer())}>Run prioritizer</button>
-      </div>
-      <p className="field-help">Run assessor fills missing judgments. Use Assess task or Assess selected to reassess. Prioritizer refreshes GitHub status and orders saved judgments.</p>
-    </div>}
     {!settings && <div className="task-profile-bar">
       <label htmlFor="work-profile">Work profile</label>
       <select id="work-profile" value={state.activeWorkProfile.id} disabled={profileBusy}
