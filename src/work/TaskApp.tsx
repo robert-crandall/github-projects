@@ -15,6 +15,7 @@ import { WorkQueue } from './controller.ts';
 import { canonicalSource, rankedTasks } from './engine.ts';
 import { Settings } from './Settings.tsx';
 import { RunProgress } from './RunProgress.tsx';
+import { RunProgressPopover } from './RunProgressPopover.tsx';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
@@ -394,7 +395,11 @@ export function TaskApp({ controller, queue, remote }: {
     </aside>
     <div className="task-workspace">
     {!settings && <header className="task-top"><h1>{filters ? 'Filters' : 'Ranked Tasks'}</h1>
-      <RunActions running={run.running} disabled={run.running || code.busy} invoke={invoke} queue={queue} />
+      <div className="task-top-actions">
+        <RunActions running={run.running} disabled={run.running || code.busy} invoke={invoke} queue={queue} />
+        <RunProgressPopover key={state.activeWorkProfile.id} run={run} details={runDetails} error={runError}
+          profileName={state.activeWorkProfile.name} cancelAssessor={() => invoke(() => queue.cancelAssessor())} />
+      </div>
     </header>}
     {!settings && <div className="task-profile-bar">
       <label htmlFor="work-profile">Work profile</label>
@@ -429,12 +434,11 @@ export function TaskApp({ controller, queue, remote }: {
     {settings ? <Settings key={state.activeWorkProfile.id} profileName={state.activeWorkProfile.name}
       settings={state.work.settings} queue={queue} close={() => setSettings(false)} recover={() => setRecovery(true)}
       batchProgress={<>{run.running && runProgress}{batchProgress}</>} /> : <>
-      {!run.progress && <div className="task-context"><p>{state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
-        <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>}
+      <div className="task-context"><p>{state.work.ranking ? `Ranked ${date(state.work.ranking.rankedAt)}` : 'Your tasks, in one place. Run Copilot to put them in order.'}</p>
+        <span>{state.work.settings.schedule.enabled ? `Runs every ${state.work.settings.schedule.everyMinutes} min while open` : 'Manual runs'}</span></div>
       {!run.running && !state.work.lastError && state.work.collectionCursor && state.work.lastStartedAt
         && Date.parse(state.work.collectionCursor) < Date.parse(state.work.lastStartedAt)
         && <p className="task-detail-notice" role="status">More notification history remains. The next run continues after {date(state.work.collectionCursor)}.</p>}
-      {runProgress}
       {filters && <div className="task-filter-summary">
         <span role="status"><strong>{visible.length} of {unfiltered.length} {view === 'tasks' ? 'to dos' : view === 'done' ? 'completed tasks' : 'tasks with no action now'}</strong>
           <span>From {selectedSourceCount} selected {selectedSourceCount === 1 ? 'source' : 'sources'}</span></span>

@@ -105,6 +105,107 @@ async function runAction(page: Page, name: 'Run assessor' | 'Run prioritizer') {
   await page.getByRole('button', { name, exact: true }).click();
 }
 
+async function openRunDetails(page: Page) {
+  const trigger = page.getByRole('button', { name: /^Run details:/ });
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await trigger.click();
+}
+
+test('run popover keeps layout and selection stable, dismisses without trapping focus and fits small windows', async ({ page, native }, testInfo) => {
+  assessmentTasks(native, 1);
+  native.holdAssessment = gate();
+  await page.goto('/');
+  const trigger = page.getByRole('button', { name: /^Run details:/ });
+  const panel = page.locator('.task-run-popover');
+  const task = page.getByRole('complementary', { name: 'Task details' });
+  await expect(trigger).toHaveCount(0);
+  await page.locator('.task-row').first().click();
+  await runAction(page, 'Run assessor');
+  await expect(trigger).toHaveAccessibleName('Run details: Assessing');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByRole('progressbar')).toHaveCount(0);
+  const layout = await page.locator('.task-body').boundingBox();
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveAccessibleName('Current run');
+  await expect(panel).toHaveAttribute('id', (await trigger.getAttribute('aria-controls'))!);
+  await expect(panel).toContainText('Default · Assessor only · Order unchanged');
+  expect(await page.locator('.task-body').boundingBox()).toEqual(layout);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'Close run details' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(panel.getByRole('button', { name: 'Cancel assessment' })).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(trigger).toBeFocused();
+  await expect(panel).toHaveCount(0);
+  await expect(task).toBeVisible();
+  expect(await page.locator('.task-body').boundingBox()).toEqual(layout);
+  await trigger.press('Space');
+  await panel.getByRole('button', { name: 'Cancel assessment' }).focus();
+  await task.getByRole('textbox', { name: 'Task notes' }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(task.getByRole('textbox', { name: 'Task notes' })).toBeFocused();
+  await task.getByRole('textbox', { name: 'Task notes' }).fill('Keep working during the run');
+  await persisted(page);
+  await openRunDetails(page);
+  await expect(trigger.locator('.task-run-spinner')).toHaveCSS('animation-name', 'task-run-spin');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect(trigger.locator('.task-run-spinner')).toHaveCSS('animation-name', 'none');
+  for (const viewport of [{ width: 390, height: 844 }, { width: 320, height: 568 }, { width: 640, height: 360 }]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(async () => {
+      const bounds = await panel.boundingBox();
+      return !!bounds && bounds.x >= 12 && bounds.y >= 12
+        && bounds.x + bounds.width <= viewport.width - 12 && bounds.y + bounds.height <= viewport.height - 12;
+    }).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect(panel.getByRole('button', { name: 'Cancel assessment' })).toBeInViewport();
+  }
+  await page.screenshot({ path: testInfo.outputPath('run-popover-short.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  native.holdAssessment.release();
+  await expect(trigger).toHaveAccessibleName('Run details: Run complete');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  await expect(trigger.locator('.task-run-spinner')).toHaveCount(0);
+  await expect(panel.getByRole('progressbar', { name: 'Assessments saved' })).toHaveAttribute('aria-valuenow', '1');
+  await expect(task.getByRole('textbox', { name: 'Task notes' })).toHaveValue('Keep working during the run');
+  await page.getByRole('button', { name: 'Close run details' }).click();
+  await expect(trigger).toBeFocused();
+  await expect(panel).toHaveCount(0);
+  await openRunDetails(page);
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Work profile', { exact: true })).toBeFocused();
+  await expect(panel).toHaveCount(0);
+  for (const control of [trigger, page.getByRole('button', { name: 'Close run details' })]) {
+    await openRunDetails(page);
+    await control.focus();
+    const relatedTarget = await control.evaluate(element => {
+      let target: EventTarget | null | undefined;
+      element.addEventListener('blur', event => {
+        if (event instanceof FocusEvent) target = event.relatedTarget;
+      }, { once: true });
+      element.blur();
+      return target;
+    });
+    expect(relatedTarget).toBeNull();
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(trigger).not.toBeFocused();
+  }
+  await openRunDetails(page);
+  await trigger.click();
+  await expect(panel).toHaveCount(0);
+  await openRunDetails(page);
+  await page.getByRole('heading', { name: 'Ranked Tasks', exact: true }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(task).toBeVisible();
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess']);
+});
+
 test('run dropdown keeps the pipeline default and supports keyboard and outside dismissal', async ({ page, native }, testInfo) => {
   assessmentTasks(native, 1);
   await page.goto('/');
@@ -465,6 +566,7 @@ test('assessment progress counts saved batches through the final remainder', asy
   native.assessmentHolds = [first, second, third];
   await page.goto('/');
   await runAction(page, 'Run assessor');
+  await openRunDetails(page);
   const progress = page.getByRole('progressbar', { name: 'Assessments saved' });
   const region = page.getByRole('region', { name: 'Run progress' });
   await expect(progress).toHaveAttribute('aria-valuemax', '45');
@@ -499,6 +601,7 @@ test('assessment cancellation stays accessible in Settings and keeps only saved 
   native.assessmentHolds = [first, second];
   await page.goto('/');
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await openRunDetails(page);
   const region = page.getByRole('region', { name: 'Run progress' });
   const progress = region.getByRole('progressbar', { name: 'Assessments saved' });
   await expect(progress).toHaveAttribute('aria-valuenow', '0');
@@ -508,15 +611,19 @@ test('assessment cancellation stays accessible in Settings and keeps only saved 
   const target = native.requests.filter(request => request.op === 'work.assess')[1]!;
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(progress).toHaveAttribute('aria-valuenow', '20');
+  await expect(region.getByRole('status').filter({ hasText: 'Assessing tasks' })).toHaveCount(1);
+  await expect(page.locator('.task-run-announcement')).toHaveCount(0);
   const cancel = region.getByRole('button', { name: 'Cancel assessment' });
   await cancel.focus();
   await expect(cancel).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(region.getByRole('button', { name: 'Cancelling...' })).toBeDisabled();
+  await expect(region.getByRole('status').filter({ hasText: 'Cancelling assessment' })).toHaveCount(1);
   await expect.poll(() => native.requests.filter(request => request.op === 'cancel').length).toBe(1);
   expect(native.requests.find(request => request.op === 'cancel')?.input).toEqual({ requestId: target.id });
   await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
   await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeDisabled();
+  await openRunDetails(page);
   await expect(progress).toHaveAttribute('aria-valuenow', '20');
   second.release();
   await expect(region).toContainText('Assessment cancelled');
@@ -533,6 +640,7 @@ test('assessment cancellation stays accessible in Settings and keeps only saved 
   expect(native.assessments.entries).toHaveLength(20);
   await runAction(page, 'Run assessor');
   await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
+  await openRunDetails(page);
   await expect(progress).toHaveAttribute('aria-valuemax', '25');
   await expect(progress).toHaveAttribute('aria-valuenow', '25');
   expect(native.assessments.entries).toHaveLength(45);
@@ -556,12 +664,15 @@ test('configurable agents run independently with named roles, durable ratings an
   await page.screenshot({ path: testInfo.outputPath('agent-settings-desktop.png') });
   await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
   await runAction(page, 'Run prioritizer');
-  await expect(page.getByText(/Use Run assessor for unassessed tasks\./)).toBeAttached();
+  await openRunDetails(page);
+  await page.locator('.task-run-details > summary').click();
+  await expect(page.locator('.task-run-popover')).toContainText('Saved assessments are required for every eligible task. Use Run assessor for unassessed tasks.');
   expect(native.requests).toEqual([]);
   native.holdAssessment = gate();
   await runAction(page, 'Run assessor');
   await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeDisabled();
-  await expect(page.getByText('Assessor only · Order unchanged')).toBeVisible();
+  await openRunDetails(page);
+  await expect(page.getByRole('region', { name: 'Run progress' }).getByText('Assessor only · Order unchanged')).toBeVisible();
   native.holdAssessment.release();
   await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await persisted(page);
@@ -593,6 +704,7 @@ test('configurable agents run independently with named roles, durable ratings an
   await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await persisted(page);
   expect(native.assessments.entries).toHaveLength(2);
+  await openRunDetails(page);
   await expect(page.getByRole('region', { name: 'Run progress' })).toContainText('No tasks to assess in this run');
   await page.getByRole('button', { name: 'Assess task', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
@@ -842,7 +954,11 @@ test('work profiles preserve separate tasks and priorities across switching and 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('work-profiles-narrow.png') });
 
+  await openRunDetails(page);
+  await expect(page.locator('.task-run-popover')).toContainText('Incident response · Collect, assess, prioritize');
   await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await expect(page.getByRole('button', { name: /^Run details:/ })).toHaveCount(0);
+  await expect(page.locator('.task-run-popover')).toHaveCount(0);
   await persisted(page);
   await expect(page.locator('.task-title')).toHaveCount(0);
   await page.getByRole('button', { name: /^Done/ }).click();
@@ -970,6 +1086,8 @@ test('model failure preserves discoveries and makes unranked work explicit', asy
   await add(page, 'Existing local task');
   native.failRank = true;
   await run(page);
+  await expect(page.getByRole('button', { name: 'Run details: Run incomplete' })).toBeVisible();
+  await openRunDetails(page);
   const details = page.locator('.task-run-details');
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(details.locator('summary')).toHaveText('Coverage and run details (1)');
@@ -981,13 +1099,16 @@ test('model failure preserves discoveries and makes unranked work explicit', asy
   expect(native.state.work.lastCompletedAt).toBeNull();
   await page.reload();
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run details: Run incomplete' })).toBeVisible();
+  await openRunDetails(page);
   await details.locator('summary').click();
   await expect(details).toContainText('Copilot ranking failed');
   native.failRank = false;
   await run(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await openRunDetails(page);
   await expect(details).toContainText('Coverage and run details');
-  await expect(page.getByText('Run complete', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Run progress' }).getByText('Run complete', { exact: true })).toBeVisible();
   await expect(details).not.toContainText('Copilot ranking failed');
 });
 
@@ -997,6 +1118,8 @@ test('coverage warnings and run errors appear only once in the expandable detail
   native.failRank = true;
   await page.goto('/');
   await run(page);
+  await expect(page.getByRole('button', { name: 'Run details: Run incomplete · 2 failed' })).toBeVisible();
+  await openRunDetails(page);
   const details = page.locator('.task-run-details');
   await expect(page.getByRole('alert')).toHaveCount(0);
   await expect(details.locator('summary')).toHaveText('Coverage and run details (5) 2 sources failed');
@@ -1040,10 +1163,22 @@ test('unknown source state stays visible instead of silently removing work', asy
   await run(page);
   await expect(page.locator('.task-title')).toHaveText('Review the relay rollout');
   await expect(page.locator('.task-uncertain')).toContainText('GitHub state could not be checked');
+  expect(native.state.tasks[0]?.notes).toBe('Check the rollout plan before reviewing.');
   const rank = native.requests.filter(request => request.op === 'work.rank').at(-1);
   if (rank?.op !== 'work.rank') throw new Error('Rank request missing');
   expect(rank.input.tasks).toHaveLength(1);
   expect(rank.input.tasks[0]).toMatchObject({
+    availability: 'unknown',
+    availabilityReason: 'GitHub state could not be checked. Retry the source.',
+    notes: '',
+  });
+  await page.locator('.task-row').first().click();
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  const assessment = native.requests.filter(request => request.op === 'work.assess').at(-1);
+  if (assessment?.op !== 'work.assess') throw new Error('Assessment request missing');
+  expect(assessment.input.tasks).toHaveLength(1);
+  expect(assessment.input.tasks[0]).toMatchObject({
     availability: 'unknown',
     availabilityReason: 'GitHub state could not be checked. Retry the source.',
     notes: 'Check the rollout plan before reviewing.',
@@ -1194,6 +1329,10 @@ test('partial notification coverage persists through relaunch and continues with
   await page.goto('/');
   await run(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Run details: Coverage notes' })).toBeVisible();
+  await openRunDetails(page);
+  await page.locator('.task-run-details > summary').click();
+  await expect(page.locator('.task-run-ledger')).toContainText(native.workCollection.coverageInfo[0]!);
   await expect(page.getByText('More notification history remains. The next run continues after', { exact: false })).toBeVisible();
   expect(native.state.work.collectionCursor).toBe('2026-09-10T00:00:00.000Z');
   await page.reload();
@@ -1309,6 +1448,7 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
   native.holdRank = gate();
   await page.clock.install({ time: new Date(native.now) });
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await openRunDetails(page);
   const progress = page.getByRole('progressbar', { name: 'Collections processed' });
   const region = page.getByRole('region', { name: 'Run progress' });
   const details = page.locator('.task-run-details');
@@ -1326,6 +1466,7 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
   await expect(progress).toHaveAttribute('aria-valuetext', '3 done, 1 failed, 2 remaining');
   await expect(details.locator('.task-run-source-state')).toHaveText(['Done', 'Done', 'Done', 'Failed', 'Collecting', 'Waiting']);
   await expect(details.locator('summary')).toContainText('1 source failed');
+  await expect(page.getByRole('button', { name: 'Run details: Collecting · 1 failed' })).toBeVisible();
   await expect(region).toContainText('Now: Team updates');
   await expect(region).toContainText('Ranking follows');
   await expect(page.getByText('Notifications: Authentication expired. Update your connection and run again.', { exact: true })).toHaveCount(1);
@@ -1343,7 +1484,17 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const ledger = details.locator('.task-run-ledger');
   expect(await ledger.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
-  await ledger.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  await ledger.focus();
+  await ledger.press('End');
+  await expect.poll(() => ledger.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  const popover = page.locator('.task-run-popover');
+  const bounds = await popover.boundingBox();
+  expect(bounds!.x).toBeGreaterThanOrEqual(12);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(378);
+  expect(bounds!.y).toBeGreaterThanOrEqual(12);
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(832);
+  expect(await popover.evaluate(element => element.scrollHeight <= element.clientHeight)).toBe(true);
+  await expect(region.getByText('Collections · 4 of 6 processed')).toBeInViewport();
   await expect(region.getByText('Collections · 4 of 6 processed')).toBeVisible();
   await expect(page.locator('.task-title').first()).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath('collection-progress-narrow.png') });
@@ -1367,6 +1518,7 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
   native.workCollections.clear();
   native.workCollections.set(sources[0]!.id, { hold: retry });
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await openRunDetails(page);
   await expect(progress).toHaveAttribute('aria-valuenow', '0');
   await expect(progress).toHaveAttribute('aria-valuetext', '0 done, 0 failed, 6 remaining');
   await expect(details).not.toContainText('Authentication expired');
@@ -1385,19 +1537,37 @@ test('manual-only progress omits the collection bar and stays active through ass
   native.holdAssessment = gate();
   native.holdRank = gate();
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  const activity = page.locator('.task-run-activity');
+  const phaseStatus = activity.getByRole('status').filter({ hasText: /^(Assessing|Ranking|Run complete)$/ });
+  await expect(phaseStatus).toHaveCount(1);
+  await expect(phaseStatus).toHaveText('Assessing');
+  await openRunDetails(page);
   const region = page.getByRole('region', { name: 'Run progress' });
   await expect(region).toContainText('No enabled collections');
   await expect(region).toContainText('Assessing tasks');
+  await expect(phaseStatus).toHaveCount(1);
+  await expect(region.locator('.task-run-now [role="status"]')).toHaveCount(0);
+  await expect(region.getByRole('status')).toHaveCount(2);
   await expect(page.getByRole('button', { name: 'Running...', exact: true })).toBeDisabled();
   native.holdAssessment.release();
   native.holdAssessment = undefined;
   await expect(region).toContainText('Ranking tasks');
+  await expect(phaseStatus).toHaveCount(1);
+  await expect(phaseStatus).toHaveText('Ranking');
+  await expect(region.getByRole('status').filter({ hasText: 'Ranking tasks' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Close run details' }).click();
+  await expect(phaseStatus).toHaveCount(1);
+  await expect(phaseStatus).toHaveText('Ranking');
+  await openRunDetails(page);
   await expect(page.getByRole('progressbar', { name: 'Collections processed' })).toHaveCount(0);
   await expect(page.getByRole('progressbar', { name: 'Assessments saved' })).toHaveAttribute('aria-valuenow', '1');
   await expect(region.getByRole('button', { name: 'Cancel assessment' })).toHaveCount(0);
   await expect(page.locator('.task-run-details')).toHaveCount(0);
   native.holdRank.release();
   await expect(region).toContainText('Run complete');
+  await expect(phaseStatus).toHaveCount(1);
+  await expect(phaseStatus).toHaveText('Run complete');
+  await expect(region.getByRole('status').filter({ hasText: 'Run complete' })).toHaveCount(0);
   expect(native.requests.some(request => request.op === 'work.collect')).toBe(false);
 });
 
