@@ -8,6 +8,23 @@ The desktop keeps the native Mac shell, CLI authentication and revisioned SQLite
 
 Appearance stays separate from tasks and their backups. Desktop preferences use a local `appearance.json` file. See [theme support](docs/theme.md) for palette sources and catalog updates.
 
+## Install
+
+Download the latest `GitHub-Projects-*-macOS-arm64.zip` from [GitHub Releases](https://github.com/robert-crandall/github-projects/releases). Unzip it, then move **GitHub Projects.app** to Applications.
+
+Releases support Apple silicon Macs running macOS 12 or newer. They are ad-hoc signed, not notarized, so macOS may require you to Control-click the app and choose **Open** on first launch.
+
+## Publish a release
+
+Set the same version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, then push a matching tag:
+
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The tag starts a GitHub Actions build on an Apple silicon runner and publishes the app archive and SHA-256 checksum to a GitHub release. Standard GitHub-hosted runners are free for this public repository.
+
 ## Work top to bottom
 
 1. Open **Settings**. Configure sources and the **Task assessor** and **Task prioritizer**, each with its own name, instructions and model.
