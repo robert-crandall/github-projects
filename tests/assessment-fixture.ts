@@ -1,7 +1,8 @@
 import { ASSESSMENT_VERSION, currentSavedAssessmentSchema, identityDigest, type CurrentAssessment } from '../service/src/work-assessment.ts';
 import { semanticRankTask } from '../service/src/work-rank-input.ts';
 import type { WorkRankInput } from '../service/src/work-schema.ts';
-import { agentIdentity, taskAgent } from '../service/src/work-agents.ts';
+import { taskAgent } from '../service/src/work-agents.ts';
+import { assessmentIdentity } from '../service/src/work-styles.ts';
 
 const fixtureTime = new Date().toISOString();
 export const unknownRatings = {
@@ -12,7 +13,7 @@ export const unknownRatings = {
 
 export async function assessmentBatch(input: WorkRankInput, evaluatedAt = fixtureTime) {
   const agent = taskAgent(input, 'task-assessment');
-  const configurationFingerprint = await identityDigest(agentIdentity(agent));
+  const configurationFingerprint = await identityDigest(assessmentIdentity(input));
   const assessments: CurrentAssessment[] = await Promise.all(input.tasks.slice(0, 20).map(async task => {
     const fingerprint = await identityDigest(semanticRankTask(task));
     const instructionsFingerprint = await identityDigest(agent.instructions);
@@ -21,9 +22,11 @@ export async function assessmentBatch(input: WorkRankInput, evaluatedAt = fixtur
       resultId: input.force ? crypto.randomUUID() : `${key.slice(0, 8)}-${key.slice(8, 12)}-4${key.slice(13, 16)}-a${key.slice(17, 20)}-${key.slice(20, 32)}`,
       id: task.id, profileId: input.profileId ?? 'default', fingerprint, instructionsFingerprint,
       assessmentVersion: ASSESSMENT_VERSION, model: agent.model, evaluatedAt,
+      workStyles: input.workStyles ?? [],
       agent: { id: agent.id, name: agent.name, jobType: 'task-assessment', configurationFingerprint },
       assessment: {
         ...unknownRatings,
+        workStyleIds: [],
         importance: `Assessment of ${task.title}`, urgency: 'No deadline established', blockers: 'None established',
         supportingEvidence: [{ reference: '$title', summary: 'The supplied task title' }],
         uncertainty: 'No additional evidence', reevaluateAt: new Date(Date.parse(evaluatedAt) + 86400000).toISOString(),

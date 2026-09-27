@@ -177,7 +177,7 @@ test('legacy v2 history decodes and displays without manufacturing new ratings o
   }));
   expect(html).toContain('Historical importance');
   expect(html).toContain('Legacy task assessor');
-  expect(html.match(/Not recorded in this assessment format/g)).toHaveLength(3);
+  expect(html.match(/Not recorded in this assessment format/g)).toHaveLength(4);
   const { sequence: _, ...result } = legacy;
   expect(savedAssessmentSchema.parse(JSON.parse(JSON.stringify(result)))).toEqual(result);
   expect(savedAssessmentSchema.safeParse({ ...result, assessmentVersion: 'work-assessment-v3' }).success).toBe(false);

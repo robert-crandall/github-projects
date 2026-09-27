@@ -33,6 +33,8 @@ Do not retain a second workspace or disabled placeholders for the retired Inbox,
 
 ## Palette and type
 
+Work-style pills use semantic borders and text, wrapping beneath task sources without competing with titles or ranks. The Filters sidebar uses the same pills as pressed-state buttons, with All styles as the reset. Settings uses existing fieldsets for names and definitions; task details uses checkboxes for corrections and an explicit Use Copilot assignments reset. Keep loading, missing classification and history-read failures distinct.
+
 Use semantic tokens from `src/themes/catalog.json`, applied to the document root; `src/theme.css` preserves the GitHub-dark startup fallback. [theme.md](docs/theme.md) records their source. Colors change without changing layout. Color accompanies labels and icons, never replacing them.
 
 Use the native system sans stack. No webfonts. Page headings, reader titles, row text and metadata supply a small hierarchy. Keep supporting text legible, focus visible and controls readable at rest.

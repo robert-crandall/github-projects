@@ -79,6 +79,30 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
         }} />
         <p>Agents, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
       </section>
+      <section aria-labelledby="work-styles-heading">
+        <div className="task-section-heading"><h2 id="work-styles-heading">Work styles</h2>
+          <button type="button" className="secondary" disabled={(draft.workStyles?.length ?? 0) >= 20}
+            onClick={() => change({ ...draft, workStyles: [...draft.workStyles ?? [], {
+              id: crypto.randomUUID(), name: '', description: '',
+            }] })}><Plus size={15} />Add work style</button>
+        </div>
+        <p>Define the kinds of work you want to find in this profile. Copilot can assign more than one style; you can correct its choices.</p>
+        {!draft.workStyles?.length && <p className="field-help">No styles yet. For example, you might define Quick wins or Deep focus.</p>}
+        {(draft.workStyles ?? []).map((style, index) => <fieldset key={style.id} className="task-agent">
+          <legend>Work style {index + 1}</legend>
+          <label>Name<input value={style.name} maxLength={60} required onChange={event => change({
+            ...draft, workStyles: draft.workStyles!.map(item => item.id === style.id ? { ...item, name: event.target.value } : item),
+          })} /></label>
+          <label>When does this style fit?<textarea value={style.description} rows={3} maxLength={1000} required
+            onChange={event => change({ ...draft, workStyles: draft.workStyles!.map(item =>
+              item.id === style.id ? { ...item, description: event.target.value } : item) })} /></label>
+          <button type="button" className="quiet danger" aria-label={`Remove work style ${style.name || index + 1}`}
+            onClick={() => change({ ...draft, workStyles: draft.workStyles!.filter(item => item.id !== style.id) })}>
+            <Trash2 size={15} />Remove style</button>
+        </fieldset>)}
+        <p className="field-help">Save definitions, then use Assess selected for existing tasks. New tasks get styles with their first assessment.
+          Corrections stay yours until you choose Use Copilot assignments. Removing a style hides its pills without deleting assessment history.</p>
+      </section>
       <section aria-labelledby="agents-heading"><h2 id="agents-heading">Task agents</h2>
         <p>The assessor and prioritizer run on your task list. Code agents run from explicit task-detail or selected-task actions. Instructions guide judgment, not permissions.</p>
         {[...taskAgents(draft), ...codeAgents(draft)].map(agent => <fieldset className="task-agent" key={agent.jobType}>

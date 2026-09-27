@@ -109,7 +109,7 @@ function notificationSource(notification: NonNullable<WorkMetadata['notification
   return canonicalSource(`https://github.com/${notification.reference.repo}/issues/${notification.reference.number}`);
 }
 
-function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work: WorkMetadata }): Task {
+function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work: WorkMetadata }, styleIds: Set<string>): Task {
   const availabilityPriority = { actionable: 0, unknown: 1, waiting: 2 };
   const firstObserved = first.work.availabilityObservedAt ? Date.parse(first.work.availabilityObservedAt) : 0;
   const secondObserved = second.work.availabilityObservedAt ? Date.parse(second.work.availabilityObservedAt) : 0;
@@ -133,6 +133,9 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
   const { pullRequest: _, ...firstWork } = first.work;
   return {
     ...first, status, completedAt,
+    ...(first.workStyleOverride !== undefined || second.workStyleOverride !== undefined
+      ? { workStyleOverride: [...new Set([...first.workStyleOverride ?? [], ...second.workStyleOverride ?? []])]
+        .filter(id => styleIds.has(id)) } : {}),
     assessmentTaskIds: [...new Set([first.id, second.id, ...first.assessmentTaskIds ?? [], ...second.assessmentTaskIds ?? []])],
     createdAt: Date.parse(first.createdAt) <= Date.parse(second.createdAt) ? first.createdAt : second.createdAt,
     notes: [...new Set([first.notes, additionalNotes].filter(Boolean))].join('\n\n'),
@@ -172,7 +175,8 @@ export function consolidateWorkTasks(state: AppState): AppState {
       tasks.push(normalized);
     } else {
       const previous = tasks[index]!;
-      tasks[index] = mergeTasks({ ...previous, work: previous.work! }, normalized);
+      tasks[index] = mergeTasks({ ...previous, work: previous.work! }, normalized,
+        new Set(state.work.settings.workStyles?.map(style => style.id)));
       replacements.set(task.id, previous.id);
       mergedIds.add(task.id);
       mergedIds.add(previous.id);
@@ -304,6 +308,7 @@ export function rankInput(state: AppState): WorkRankInput {
   return workRankInputSchema.parse({
     profileId: state.activeWorkProfile.id,
     instructions: work.settings.instructions, model: work.settings.model,
+    ...(work.settings.workStyles ? { workStyles: work.settings.workStyles } : {}),
     ...(work.settings.agents ? { agents: work.settings.agents } : {}),
     tasks: rankedTasks(state).map(rankTask),
   });

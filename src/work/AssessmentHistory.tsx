@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from 'react';
 import { identityDigest, type SavedAssessment, type TaskAssessment } from '../../service/src/work-assessment.ts';
-import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
+import { taskAgent } from '../../service/src/work-agents.ts';
+import { assessmentIdentity } from '../../service/src/work-styles.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import { semanticRankTask } from '../../service/src/work-rank-input.ts';
 import type { WorkSettings } from '../../service/src/work-schema.ts';
@@ -13,7 +14,7 @@ function date(value: string) { return new Date(value).toLocaleString(); }
 function AssessmentRatings({ value }: { value: SavedAssessment }) {
   return <>{(['impact', 'visibility', 'effort'] as const).map(field => <div key={field}>
     <dt>{field[0]!.toUpperCase() + field.slice(1)}</dt>
-    <dd>{value.assessmentVersion === 'work-assessment-v3'
+    <dd>{value.assessmentVersion !== 'work-assessment-v2'
       ? `${value.assessment[field].rating} - ${value.assessment[field].rationale}`
       : 'Not recorded in this assessment format.'}</dd>
   </div>)}</>;
@@ -76,11 +77,11 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
   const [error, setError] = useState('');
   const semantic = semanticRankTask(rankTask(task));
   const agent = taskAgent(settings, 'task-assessment');
-  const key = JSON.stringify([semantic, agentIdentity(agent)]);
+  const key = JSON.stringify([semantic, assessmentIdentity(settings)]);
   useEffect(() => {
     let disposed = false;
     setError('');
-    void Promise.all([identityDigest(semantic), identityDigest(agent.instructions), identityDigest(agentIdentity(agent))])
+    void Promise.all([identityDigest(semantic), identityDigest(agent.instructions), identityDigest(assessmentIdentity(settings))])
       .then(([fingerprint, instructionsFingerprint, configurationFingerprint]) => {
       if (!disposed) setIdentity({ key, fingerprint, instructionsFingerprint, configurationFingerprint });
     }).catch(error => {
@@ -112,6 +113,9 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
     {error ? <p role="alert">{error}</p> : <p role="status">{freshness}</p>}
     <dl>
       <AssessmentRatings value={value} />
+      <dt>Work styles when assessed</dt><dd>{value.assessmentVersion === 'work-assessment-v4'
+        ? value.workStyles.filter(style => value.assessment.workStyleIds.includes(style.id)).map(style => style.name).join(', ') || 'No matching styles.'
+        : 'Not recorded in this assessment format.'}</dd>
       <dt>Importance</dt><dd>{value.assessment.importance}</dd>
       <dt>Urgency when assessed</dt><dd>{value.assessment.urgency}</dd>
       <dt>Blockers when assessed</dt><dd>{value.assessment.blockers}</dd>
@@ -124,8 +128,8 @@ export function AssessmentHistory({ task, profileId, settings, latestResultId }:
     <p className="field-help">Original reevaluation suggestion: {date(value.assessment.reevaluateAt)}.
       {' '}This saved judgment remains usable. Assess task explicitly when its scope needs a new judgment.</p>
     <details><summary>Assessment provenance</summary><dl>
-      <dt>Agent</dt><dd>{value.assessmentVersion === 'work-assessment-v3' ? `${value.agent.name} (${value.agent.id})` : 'Legacy task assessor'}</dd>
-      {value.assessmentVersion === 'work-assessment-v3' && <>
+      <dt>Agent</dt><dd>{value.assessmentVersion !== 'work-assessment-v2' ? `${value.agent.name} (${value.agent.id})` : 'Legacy task assessor'}</dd>
+      {value.assessmentVersion !== 'work-assessment-v2' && <>
         <dt>Agent configuration identity</dt><dd>{value.agent.configurationFingerprint}</dd>
       </>}
       <dt>Model requested</dt><dd>{value.model || 'SDK default (resolved model not reported)'}</dd>

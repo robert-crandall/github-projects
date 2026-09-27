@@ -62,6 +62,7 @@ async function sdkHarness<T>(operation: (context: {
           const result = system.content.startsWith('Assess each task') ? {
             assessments: input.tasks.map(task => ({
               ...unknownRatings,
+              workStyleIds: [],
               id: task.id, importance: 'Explicit task', urgency: 'No deadline', blockers: 'None known',
               supportingEvidence: [{ reference: '$title', summary: 'Explicit task' }],
               uncertainty: 'No further evidence', reevaluateAt: '2026-09-11T12:00:00.000Z',
