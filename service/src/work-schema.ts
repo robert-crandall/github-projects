@@ -3,6 +3,7 @@ import { taskAgents, taskAgentsSchema } from './work-agents.ts';
 import { codeAgents, codeAgentsSchema } from './code-agents.ts';
 import { referenceSchema } from './references.ts';
 import { savedAssessmentSchema } from './work-assessment.ts';
+import { workStylesSchema, workStyleIdsSchema } from './work-styles.ts';
 
 const time = z.iso.datetime();
 const id = z.string().min(1).max(500);
@@ -76,6 +77,7 @@ const savedWorkSettingsSchema = z.strictObject({
   model: z.string().max(100),
   agents: taskAgentsSchema.optional(),
   codeAgents: codeAgentsSchema.optional(),
+  workStyles: workStylesSchema.optional(),
   streams: z.array(workstreamSchema).max(30),
   schedule: z.strictObject({ enabled: z.boolean(), everyMinutes: z.number().int().min(5).max(1440) }),
 });
@@ -93,6 +95,7 @@ export const workStateSchema = z.strictObject({
     selectedSources: z.array(z.string().min(1).max(4000)).nullable(),
     collapsedProviders: z.array(z.enum(['github', 'slack', 'mcp'])),
   }).optional(),
+  styleFilter: workStyleIdsSchema.nullable().optional(),
   ranking: workRankingSchema.nullable(),
   lastStartedAt: time.nullable(),
   lastCompletedAt: time.nullable(),
@@ -133,6 +136,7 @@ export const workRankInputSchema = z.strictObject({
   assessments: z.array(z.strictObject({ taskId: id, result: savedAssessmentSchema })).max(2000).optional(),
   instructions: z.string().max(16000), model: z.string().max(100),
   agents: taskAgentsSchema.optional(),
+  workStyles: workStylesSchema.optional(),
   force: z.boolean().optional(),
   tasks: z.array(z.strictObject({
     id, title: z.string().max(2000), notes: z.string().max(16000),

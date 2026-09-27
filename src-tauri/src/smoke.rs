@@ -88,12 +88,14 @@ impl ServiceFixture {
                         "resultId": uuid::Uuid::new_v4().to_string(), "id": task["id"],
                         "profileId": input["profileId"], "fingerprint": fingerprint,
                         "instructionsFingerprint": format!("{:x}", Sha256::digest(instructions.as_bytes())),
-                        "assessmentVersion": "work-assessment-v3", "model": agent["model"], "evaluatedAt": now,
+                        "assessmentVersion": "work-assessment-v4", "model": agent["model"], "evaluatedAt": now,
+                        "workStyles": [],
                         "agent": {
                             "id": agent["id"], "name": agent["name"], "jobType": "task-assessment",
                             "configurationFingerprint": configuration
                         },
                         "assessment": {
+                            "workStyleIds": [],
                             "impact": {"rating": "unknown", "rationale": "Synthetic assessment"},
                             "visibility": {"rating": "unknown", "rationale": "Synthetic assessment"},
                             "effort": {"rating": "unknown", "rationale": "Synthetic assessment"},

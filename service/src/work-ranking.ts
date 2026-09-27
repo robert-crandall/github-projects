@@ -8,6 +8,7 @@ import { LIMITS } from './schema.ts';
 import { orderingRankTask, semanticRankTask, type SemanticRankTask } from './work-rank-input.ts';
 import { workRankOutputSchema, type WorkRankInput } from './work-schema.ts';
 import { agentIdentity, taskAgent, taskAgentJobs } from './work-agents.ts';
+import { assessmentIdentity, type WorkStyle } from './work-styles.ts';
 import {
   ASSESSMENT_VERSION, ASSESSMENT_MAX_AGE, currentSavedAssessmentSchema, savedAssessmentSchema, type Assessment, type SavedAssessment, type CurrentAssessment,
 } from './work-assessment.ts';
@@ -28,7 +29,7 @@ export function digest(value: unknown): string {
 }
 export function assessmentScope(credential: string, input: WorkRankInput, version: string = ASSESSMENT_VERSION): string {
   return digest(['github-projects:work-assessments', credential, input.profileId ?? 'default',
-    agentIdentity(taskAgent(input, 'task-assessment')), version]);
+    assessmentIdentity(input), version]);
 }
 export function exactPermutation(expected: string[], actual: string[], code: 'copilot_output' | 'assessment_storage' | 'assessment_required' = 'copilot_output'): void {
   const ids = new Set(actual);
@@ -40,13 +41,15 @@ export function validateReevaluation(at: string, evaluatedAt: string, maxAge: nu
   const duration = Date.parse(at) - Date.parse(evaluatedAt);
   if (duration < MIN_REEVALUATION || duration > maxAge) throw new ServiceError('copilot_output');
 }
-export function validateAssessment(value: Assessment, task: SemanticRankTask, evaluatedAt: string): void {
+export function validateAssessment(value: Assessment, task: SemanticRankTask, evaluatedAt: string, styles: WorkStyle[] = []): void {
   validateReevaluation(value.reevaluateAt, evaluatedAt, ASSESSMENT_MAX_AGE);
   const references = new Set([
     '$title', '$createdAt', '$availability', ...task.evidence.map(event => event.id),
     ...(task.notes ? ['$notes'] : []), ...(task.context ? ['$source'] : []),
   ]);
-  if (value.supportingEvidence.some(item => !references.has(item.reference))
+  if (value.workStyleIds.some(id => !styles.some(style => style.id === id))
+    || new Set(value.workStyleIds).size !== value.workStyleIds.length
+    || value.supportingEvidence.some(item => !references.has(item.reference))
     || task.availability === 'unknown' && !value.uncertainty.trim()) throw new ServiceError('copilot_output');
 }
 
@@ -112,7 +115,7 @@ export class WorkAssessmentCache {
   }
 }
 
-export type AssessmentInput = { evaluatedAt: string; tasks: SemanticRankTask[] };
+export type AssessmentInput = { evaluatedAt: string; tasks: SemanticRankTask[]; workStyles: WorkStyle[] };
 export type AssessmentOutput = { assessments: (Assessment & { id: string })[] };
 export type OrderInput = {
   evaluatedAt: string;
@@ -143,7 +146,7 @@ export class WorkRanker {
       && value.instructionsFingerprint === digest(agent.instructions) && value.model === agent.model
       && value.assessmentVersion === ASSESSMENT_VERSION
       && value.agent.id === agent.id
-      && value.agent.configurationFingerprint === digest(agentIdentity(agent))
+      && value.agent.configurationFingerprint === digest(assessmentIdentity(input))
       && Date.parse(value.evaluatedAt) <= this.now().getTime()
       && Date.parse(value.assessment.reevaluateAt) > this.now().getTime();
   }
@@ -156,7 +159,7 @@ export class WorkRanker {
     const reusable = tasks.flatMap(task => {
       const value = assessments.get(task.id);
       if (input.force || !this.current(value, task, input)) return [];
-      try { validateAssessment(value.assessment, task, value.evaluatedAt); }
+      try { validateAssessment(value.assessment, task, value.evaluatedAt, input.workStyles); }
       catch (error) {
         if (error instanceof ServiceError && error.dto.code === 'copilot_output') throw new ServiceError('assessment_storage');
         throw error;
@@ -165,7 +168,8 @@ export class WorkRanker {
     }).slice(0, LIMITS.workAssessmentTasks);
     // Deliver cached work before invoking another model; each response is saved by the caller.
     if (reusable.length) return { assessments: reusable };
-    const bytes = (tasks: SemanticRankTask[]) => Buffer.byteLength(JSON.stringify({ evaluatedAt, tasks }));
+    const workStyles = input.workStyles ?? [];
+    const bytes = (tasks: SemanticRankTask[]) => Buffer.byteLength(JSON.stringify({ evaluatedAt, tasks, workStyles }));
     const batch: SemanticRankTask[] = [];
     for (const task of tasks) {
       if (bytes([task]) > LIMITS.workModelBytes) throw new ServiceError('limit');
@@ -173,21 +177,21 @@ export class WorkRanker {
       batch.push(task);
     }
     if (!batch.length) throw new ServiceError('invalid_input');
-    const result = await models.assess({ evaluatedAt, tasks: batch });
+    const result = await models.assess({ evaluatedAt, tasks: batch, workStyles });
     checkAbort(signal);
     exactPermutation(batch.map(task => task.id), result.assessments.map(value => value.id));
     const agent = taskAgent(input, 'task-assessment');
     const values: CurrentAssessment[] = result.assessments.map(({ id, ...assessment }) => {
       const task = batch.find(task => task.id === id)!;
-      validateAssessment(assessment, task, evaluatedAt);
+      validateAssessment(assessment, task, evaluatedAt, workStyles);
       if (Date.parse(assessment.reevaluateAt) <= this.now().getTime()) throw new ServiceError('copilot_output');
       return currentSavedAssessmentSchema.parse({
         resultId: randomUUID(), id, profileId: input.profileId ?? 'default', fingerprint: digest(task),
         instructionsFingerprint: digest(agent.instructions), assessmentVersion: ASSESSMENT_VERSION,
-        model: agent.model, evaluatedAt, assessment,
+        model: agent.model, evaluatedAt, assessment, workStyles,
         agent: {
           id: agent.id, name: agent.name, jobType: 'task-assessment',
-          configurationFingerprint: digest(agentIdentity(agent)),
+          configurationFingerprint: digest(assessmentIdentity(input)),
         },
       });
     });

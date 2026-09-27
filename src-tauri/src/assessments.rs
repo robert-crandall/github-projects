@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+const MAX_ASSESSMENT_BYTES: usize = 256 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Evidence {
@@ -31,6 +33,16 @@ pub struct Assessment {
     visibility: Option<Rating>,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     effort: Option<Rating>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    work_style_ids: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkStyle {
+    id: String,
+    name: String,
+    description: String,
 }
 
 fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
@@ -69,6 +81,8 @@ pub struct SavedAssessment {
     assessment: Assessment,
     #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
     agent: Option<AssessmentAgent>,
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    work_styles: Option<Vec<WorkStyle>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -102,7 +116,7 @@ impl SavedAssessment {
         let ratings = [&result.impact, &result.visibility, &result.effort];
         let format_valid = match self.assessment_version.as_str() {
             "work-assessment-v2" => self.agent.is_none() && ratings.iter().all(|r| r.is_none()),
-            "work-assessment-v3" => self.agent.as_ref().is_some_and(|agent| {
+            "work-assessment-v3" | "work-assessment-v4" => self.agent.as_ref().is_some_and(|agent| {
                 bounded(&agent.id, 1, 100) && bounded(&agent.name, 1, 100)
                     && !agent.name.trim().is_empty() && agent.job_type == "task-assessment"
                     && hash(&agent.configuration_fingerprint)
@@ -112,8 +126,23 @@ impl SavedAssessment {
             })),
             _ => false,
         };
+        let styles_valid = if self.assessment_version == "work-assessment-v4" {
+            self.work_styles.as_ref().zip(result.work_style_ids.as_ref()).is_some_and(|(styles, ids)| {
+                styles.len() <= 20 && ids.len() <= 20
+                    && styles.iter().all(|style| bounded(&style.id, 1, 100)
+                        && bounded(&style.name, 1, 60) && !style.name.trim().is_empty()
+                        && bounded(&style.description, 1, 1000) && !style.description.trim().is_empty())
+                    && styles.iter().map(|style| &style.id).collect::<HashSet<_>>().len() == styles.len()
+                    && styles.iter().map(|style| style.name.to_lowercase()).collect::<HashSet<_>>().len() == styles.len()
+                    && ids.iter().collect::<HashSet<_>>().len() == ids.len()
+                    && ids.iter().all(|id| styles.iter().any(|style| &style.id == id))
+            })
+        } else {
+            self.work_styles.is_none() && result.work_style_ids.is_none()
+        };
         if Uuid::parse_str(&self.result_id).is_err()
             || !format_valid
+            || !styles_valid
             || !bounded(&self.id, 1, 500)
             || !bounded(&self.profile_id, 1, 100)
             || !hash(&self.fingerprint)
@@ -165,7 +194,7 @@ fn exists(connection: &Connection) -> Result<bool> {
 fn decode(sequence: i64, payload: String, checksum: String) -> Result<HistoryEntry> {
     if sequence <= 0
         || sequence > 9_007_199_254_740_991
-        || payload.len() > 65_536
+        || payload.len() > MAX_ASSESSMENT_BYTES
         || digest(payload.as_bytes()) != checksum
     {
         return Err(NativeError::corrupt());
@@ -245,6 +274,9 @@ fn insert(connection: &Connection, result: &SavedAssessment) -> Result<HistoryEn
         return Ok(saved);
     }
     let payload = serde_json::to_string(result).map_err(|_| NativeError::invalid())?;
+    if payload.len() > MAX_ASSESSMENT_BYTES {
+        return Err(NativeError::invalid());
+    }
     connection.execute(
         "INSERT INTO task_assessments(result_id,profile_id,task_id,payload,checksum) VALUES (?,?,?,?,?)",
         params![result.result_id, result.profile_id, result.id, payload, digest(payload.as_bytes())],
@@ -447,6 +479,43 @@ mod tests {
             assert!(store.assessment_append("default", vec![serde_json::from_value(invalid).unwrap()]).is_err());
         }
         assert_eq!(store.assessment_read("default", "manual", None).unwrap().assessments.len(), 2);
+    }
+
+    #[test]
+    fn work_styles_round_trip_with_history_and_reject_unknown_or_duplicate_assignments() {
+        let (dir, mut store) = setup();
+        let mut raw = serde_json::to_value(result("manual")).unwrap();
+        raw["assessmentVersion"] = json!("work-assessment-v4");
+        raw["agent"] = json!({
+            "id": "task-assessment", "jobType": "task-assessment", "name": "Assessor",
+            "configurationFingerprint": "c".repeat(64)
+        });
+        for field in ["impact", "visibility", "effort"] {
+            raw["assessment"][field] = json!({"rating":"unknown","rationale":"No supplied evidence"});
+        }
+        raw["workStyles"] = json!((0..20).map(|index| json!({
+            "id": format!("style-{index}"), "name": format!("Style {index}"),
+            "description": "\u{0001}".repeat(1000)
+        })).collect::<Vec<_>>());
+        raw["assessment"]["workStyleIds"] = json!(["style-1"]);
+        let value: SavedAssessment = serde_json::from_value(raw.clone()).unwrap();
+        store.assessment_append("default", vec![value.clone()]).unwrap();
+        drop(store);
+        let mut store = Store::new(dir.path().to_owned()).unwrap();
+        assert_eq!(store.assessment_read("default", "manual", None).unwrap().assessments[0].result, value);
+        let export: Value = serde_json::from_str(&store.export_json(&store.read().unwrap().revision).unwrap()).unwrap();
+        assert_eq!(export["assessments"][0]["workStyles"], raw["workStyles"]);
+        for ids in [json!(["missing"]), json!(["style-1", "style-1"])] {
+            let mut invalid = raw.clone();
+            invalid["resultId"] = json!(Uuid::new_v4().to_string());
+            invalid["assessment"]["workStyleIds"] = ids;
+            assert!(store.assessment_append("default", vec![serde_json::from_value(invalid).unwrap()]).is_err());
+        }
+        let mut missing = raw.clone();
+        missing.as_object_mut().unwrap().remove("workStyles");
+        assert!(serde_json::from_value::<SavedAssessment>(missing).unwrap().validate().is_err());
+        raw["workStyles"] = Value::Null;
+        assert!(serde_json::from_value::<SavedAssessment>(raw).is_err());
     }
 
     #[test]

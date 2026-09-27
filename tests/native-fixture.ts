@@ -66,6 +66,7 @@ export class NativeMock {
   assessmentBackups = new Map<string, typeof this.assessments.entries>();
   holdRank?: ReturnType<typeof gate>;
   holdAssessment?: ReturnType<typeof gate>;
+  failAssessmentRead = false;
   assessmentHolds: ReturnType<typeof gate>[] = [];
   cancelledAssessments = new Set<string>();
   conversationApi = new ConversationApi();
@@ -151,8 +152,11 @@ export class NativeMock {
       return structuredClone(this.assessments.append(String(args.profileId),
         workAssessOutputSchema.parse({ assessments: args.assessments }).assessments, this.state));
     }
-    if (command === 'assessment_read') return structuredClone(this.assessments.read(String(args.profileId), String(args.taskId),
-      args.before as number | null, this.state));
+    if (command === 'assessment_read') {
+      if (this.failAssessmentRead) throw new ExpectedFailure('History read unavailable');
+      return structuredClone(this.assessments.read(String(args.profileId), String(args.taskId),
+        args.before as number | null, this.state));
+    }
     if (command === 'clock_now') return { now: this.now, timeZone: 'UTC', error: null };
     if (command === 'workspace_save') {
       const snapshot = snapshotSchema.parse(args.snapshot);

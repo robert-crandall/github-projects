@@ -4,7 +4,7 @@ export const taskAgentJobs = {
   'task-assessment': {
     name: 'Task assessor',
     capability: 'Assess supplied task evidence. No tools or source collection.',
-    resultFormat: 'work-assessment-v3',
+    resultFormat: 'work-assessment-v4',
     instructions: 'Assess each task independently. Explain impact, visibility and effort from evidence; use unknown when evidence is missing. Preserve uncertainty.',
   },
   'task-prioritization': {

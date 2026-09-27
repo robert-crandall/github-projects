@@ -10,6 +10,116 @@ import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
 
 test.use({ referenceWorkspace: false });
 
+test('work styles show automatic pills, preserve corrections and filter without changing ranks across relaunch', async ({ page, native }, testInfo) => {
+  const state = emptyWorkspace(native.now, 'UTC');
+  state.work.settings.streams = [];
+  state.work.settings.workStyles = [
+    { id: 'quick', name: 'Quick wins', description: 'Small clear tasks' },
+    { id: 'focus', name: 'Deep focus', description: 'Uninterrupted concentration' },
+  ];
+  state.tasks = ['Small fix', 'Design feature', 'Unclassified work'].map((title, index) => ({
+    id: `style-task-${index}`, title, notes: '', status: 'open', createdAt: native.now,
+  }));
+  state.work.ranking = { orderedIds: ['style-task-1', 'style-task-2', 'style-task-0'], reasons: [], rankedAt: native.now };
+  native.saved = { revision: crypto.randomUUID(), savedAt: native.now, snapshot: snapshotSchema.parse({
+    formatVersion: 1, reminders: [], workspace: { version: 1, state, scroll: {} },
+  }) };
+  const input = rankInput(state);
+  input.tasks = input.tasks.filter(task => task.id !== 'style-task-2');
+  const { assessments } = await assessmentBatch(input, native.now);
+  for (const value of assessments) value.assessment.workStyleIds = value.id === 'style-task-0' ? ['quick'] : ['focus'];
+  native.assessments.append('default', assessments, native.state);
+  await page.goto('/');
+  const rows = page.locator('.ranked-list > li');
+  await expect(rows.filter({ hasText: 'Small fix' }).locator('.work-style-pill')).toHaveText('Quick wins');
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  const filters = page.getByRole('region', { name: 'Filter by work style' });
+  await filters.getByRole('button', { name: 'Quick wins', exact: true }).click();
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first().locator('.task-rank')).toHaveText('3');
+  await rows.first().locator('.task-row').click();
+  const detail = page.getByRole('region', { name: 'Task work styles' });
+  await detail.getByLabel('Deep focus', { exact: true }).check();
+  await expect(detail).toContainText('Your choices');
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  await expect(detail.getByLabel('Quick wins', { exact: true })).toBeChecked();
+  await expect(detail.getByLabel('Deep focus', { exact: true })).toBeChecked();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  await expect(filters.getByRole('button', { name: 'Quick wins', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(rows).toHaveCount(1);
+  await filters.getByRole('button', { name: 'Deep focus', exact: true }).click();
+  await expect(rows).toHaveCount(2);
+  await expect(rows.locator('.task-rank')).toHaveText(['1', '3']);
+  await page.screenshot({ path: testInfo.outputPath('work-styles-desktop.png') });
+  await rows.filter({ hasText: 'Small fix' }).locator('.task-row').click();
+  await page.getByRole('button', { name: 'Mark done', exact: true }).click();
+  await page.getByRole('button', { name: /^Done/ }).click();
+  await expect(rows).toHaveCount(1);
+  await rows.first().locator('.task-row').click();
+  await detail.getByRole('button', { name: 'Use Copilot assignments' }).click();
+  await expect(rows).toHaveCount(0);
+  await filters.getByRole('button', { name: 'All styles' }).click();
+  await expect(rows).toHaveCount(1);
+  await rows.first().locator('.task-row').click();
+  await expect(detail).toContainText('Copilot found no matching styles');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await detail.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await page.locator('.task-detail').boundingBox())!.height).toBeGreaterThan(150);
+  await page.screenshot({ path: testInfo.outputPath('work-styles-narrow.png') });
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess']);
+  expect(native.state.work.ranking?.orderedIds).toEqual(state.work.ranking.orderedIds);
+});
+
+test('work style settings start empty, accept personal definitions and persist edits without model calls', async ({ page, native }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const styles = page.getByRole('region', { name: 'Work styles', exact: true });
+  await expect(styles).toContainText('No styles yet');
+  await styles.getByRole('button', { name: 'Add work style' }).click();
+  const definition = styles.getByRole('group', { name: 'Work style 1', exact: true });
+  await definition.getByLabel('Name', { exact: true }).fill('Team conversations');
+  await definition.getByLabel('When does this style fit?').fill('Replies and coordination with other people.');
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(definition.getByLabel('Name', { exact: true })).toHaveValue('Team conversations');
+  await definition.getByLabel('Name', { exact: true }).fill('Collaboration');
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await persisted(page);
+  expect(native.state.work.settings.workStyles?.[0]?.name).toBe('Collaboration');
+  await styles.getByRole('button', { name: 'Remove work style Collaboration', exact: true }).click();
+  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await persisted(page);
+  expect(native.state.work.settings.workStyles).toEqual([]);
+  expect(native.requests).toHaveLength(0);
+});
+
+test('unreadable work styles stay explicit and retry reads saved assignments without calling a model', async ({ page, native }) => {
+  const state = emptyWorkspace(native.now, 'UTC');
+  state.work.settings.workStyles = [{ id: 'focus', name: 'Focus', description: 'Concentrated work' }];
+  state.tasks = [{ id: 'focus-task', title: 'Write a proposal', notes: '', createdAt: native.now, status: 'open' }];
+  native.saved = { revision: crypto.randomUUID(), savedAt: native.now, snapshot: snapshotSchema.parse({
+    formatVersion: 1, reminders: [], workspace: { version: 1, state, scroll: {} },
+  }) };
+  const { assessments } = await assessmentBatch(rankInput(state), native.now);
+  assessments[0]!.assessment.workStyleIds = ['focus'];
+  native.assessments.append('default', assessments, native.state);
+  native.failAssessmentRead = true;
+  await page.goto('/');
+  await expect(page.getByRole('alert')).toContainText('Work styles could not load');
+  await expect(page.locator('.task-title')).toHaveText('Write a proposal');
+  native.failAssessmentRead = false;
+  await page.getByRole('button', { name: 'Retry work styles' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.task-row .work-style-pill')).toHaveText('Focus');
+  expect(native.requests).toHaveLength(0);
+});
+
 test('prioritization refreshes PR readiness while retaining the saved judgment across relaunch', async ({ page, native }, testInfo) => {
   codeTask(native);
   const task = native.state.tasks[0]!;

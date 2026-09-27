@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { taskAgentJobs } from './work-agents.ts';
+import { workStylesSchema, workStyleIdsSchema } from './work-styles.ts';
 
 // Bump when assessment meaning, canonical inputs, or the assessment prompt changes.
 export const ASSESSMENT_VERSION = taskAgentJobs['task-assessment'].resultFormat;
@@ -19,9 +20,10 @@ export const assessmentRatingSchema = z.strictObject({
   rating: z.enum(['high', 'medium', 'low', 'unknown']),
   rationale: text,
 });
-export const assessmentSchema = legacyAssessmentSchema.extend({
+const ratedAssessmentSchema = legacyAssessmentSchema.extend({
   impact: assessmentRatingSchema, visibility: assessmentRatingSchema, effort: assessmentRatingSchema,
 });
+export const assessmentSchema = ratedAssessmentSchema.extend({ workStyleIds: workStyleIdsSchema });
 const envelope = z.strictObject({
   resultId: z.uuid(), id: z.string().min(1).max(500), profileId: z.string().min(1).max(100),
   fingerprint: hash, instructionsFingerprint: hash,
@@ -30,22 +32,28 @@ const envelope = z.strictObject({
 const legacySavedAssessmentSchema = envelope.extend({
   assessmentVersion: z.literal('work-assessment-v2'), assessment: legacyAssessmentSchema,
 });
-export const currentSavedAssessmentSchema = envelope.extend({
-  assessmentVersion: z.literal(ASSESSMENT_VERSION), assessment: assessmentSchema,
+const ratedSavedAssessmentSchema = envelope.extend({
+  assessmentVersion: z.literal('work-assessment-v3'), assessment: ratedAssessmentSchema,
   agent: z.strictObject({
     id: z.string().min(1).max(100), name: z.string().trim().min(1).max(100),
     jobType: z.literal('task-assessment'), configurationFingerprint: hash,
   }),
 });
+export const currentSavedAssessmentSchema = ratedSavedAssessmentSchema.extend({
+  assessmentVersion: z.literal(ASSESSMENT_VERSION), assessment: assessmentSchema,
+  workStyles: workStylesSchema,
+}).refine(value => value.assessment.workStyleIds.every(id => value.workStyles.some(style => style.id === id)),
+  'Assessment styles must belong to its saved definitions.');
 export const savedAssessmentSchema = z.discriminatedUnion('assessmentVersion', [
-  legacySavedAssessmentSchema, currentSavedAssessmentSchema,
+  legacySavedAssessmentSchema, ratedSavedAssessmentSchema, currentSavedAssessmentSchema,
 ]);
 export const workAssessOutputSchema = z.strictObject({
   assessments: z.array(savedAssessmentSchema).min(1).max(20),
 });
 const sequence = z.number().int().positive().safe();
 export const storedAssessmentSchema = z.discriminatedUnion('assessmentVersion', [
-  legacySavedAssessmentSchema.extend({ sequence }), currentSavedAssessmentSchema.extend({ sequence }),
+  legacySavedAssessmentSchema.extend({ sequence }), ratedSavedAssessmentSchema.extend({ sequence }),
+  currentSavedAssessmentSchema.safeExtend({ sequence }),
 ]);
 export const assessmentPageSchema = z.strictObject({
   assessments: z.array(storedAssessmentSchema).max(20),
