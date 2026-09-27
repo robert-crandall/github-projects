@@ -10,6 +10,96 @@ import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
 
 test.use({ referenceWorkspace: false });
 
+test('settings autosave each edit while focused and retain the latest edit after navigation and relaunch', async ({ page, native }) => {
+  await page.goto('/');
+  await persisted(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const writes = native.writes.length;
+  await expect(page.getByRole('button', { name: 'Save settings', exact: true })).toHaveCount(0);
+  expect(native.writes).toHaveLength(writes);
+  const name = page.getByLabel('Profile name', { exact: true });
+  await name.fill('Personal work');
+  await expect(name).toBeFocused();
+  await expect.poll(() => native.state.activeWorkProfile.name).toBe('Personal work');
+  const model = page.getByLabel('Collection model (optional)');
+  await model.fill('collection-model');
+  await expect.poll(() => native.state.work.settings.model).toBe('collection-model');
+  const instructions = page.getByLabel('What should come first?');
+  native.holdSave = gate();
+  await instructions.fill('First edit');
+  await expect.poll(() => native.activeSaves).toBe(1);
+  await instructions.fill('Latest edit');
+  await page.getByLabel('Minutes between runs').fill('15');
+  await page.getByLabel('Collect and prioritize automatically').check();
+  await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
+  native.holdSave.release();
+  native.holdSave = undefined;
+  await persisted(page);
+  expect(taskAgent(native.state.work.settings, 'task-prioritization').instructions).toBe('Latest edit');
+  expect(native.state.work.settings.schedule).toEqual({ enabled: true, everyMinutes: 15 });
+  expect(native.maxActiveSaves).toBe(1);
+  expect(native.requests).toEqual([]);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(name).toHaveValue('Personal work');
+  await expect(model).toHaveValue('collection-model');
+  await expect(instructions).toHaveValue('Latest edit');
+});
+
+test('settings autosave retains invalid input without saving it and resumes when corrected', async ({ page, native }) => {
+  await page.goto('/');
+  await persisted(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const minutes = page.getByLabel('Minutes between runs');
+  const previous = native.state.work.settings.schedule.everyMinutes;
+  await minutes.fill('');
+  await expect(page.getByRole('alert')).toContainText('Changes not saved');
+  await expect(minutes).toHaveValue('0');
+  expect(native.state.work.settings.schedule.everyMinutes).toBe(previous);
+  await minutes.fill('10');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect.poll(() => native.state.work.settings.schedule.everyMinutes).toBe(10);
+  const name = page.getByLabel('Profile name', { exact: true });
+  await name.fill(' ');
+  await expect(page.getByRole('alert')).toContainText('Changes not saved');
+  expect(native.state.activeWorkProfile.name).toBe('Default');
+  await name.fill('Valid name');
+  await expect.poll(() => native.state.activeWorkProfile.name).toBe('Valid name');
+  await page.getByRole('button', { name: 'Add source', exact: true }).click();
+  const source = page.locator('.task-stream').last();
+  await source.getByLabel('What should Copilot look for?').fill('Find requests');
+  await source.getByLabel('MCP server name').fill('Slack');
+  await source.getByLabel('Enabled', { exact: true }).check();
+  await persisted(page);
+  const tools = source.getByLabel('Allowed read tools, comma-separated');
+  await tools.fill('*');
+  await expect(page.getByRole('alert')).toContainText('Wildcards are not allowed');
+  expect(native.state.work.settings.streams.at(-1)?.tools).not.toContain('*');
+  await tools.fill('slack_read_thread, ');
+  await expect(tools).toHaveValue('slack_read_thread, ');
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect.poll(() => native.state.work.settings.streams.at(-1)?.tools).toEqual(['slack_read_thread']);
+  expect(native.requests).toEqual([]);
+});
+
+test('settings autosave failures keep edits available for storage retry', async ({ page, native }) => {
+  await page.goto('/');
+  await persisted(page);
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  native.failSave = true;
+  const instructions = page.getByLabel('What should come first?');
+  await instructions.fill('Keep my changes');
+  await expect(page.getByRole('alert')).toContainText('Pending edits are not saved');
+  await instructions.fill('Keep the latest changes');
+  await expect(instructions).toHaveValue('Keep the latest changes');
+  native.failSave = false;
+  await page.getByRole('button', { name: 'Retry storage', exact: true }).click();
+  await persisted(page);
+  await page.reload();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(instructions).toHaveValue('Keep the latest changes');
+});
+
 test('work styles show automatic pills, preserve corrections and filter without changing ranks across relaunch', async ({ page, native }, testInfo) => {
   const state = emptyWorkspace(native.now, 'UTC');
   state.work.settings.streams = [];
@@ -83,17 +173,14 @@ test('work style settings start empty, accept personal definitions and persist e
   const definition = styles.getByRole('group', { name: 'Work style 1', exact: true });
   await definition.getByLabel('Name', { exact: true }).fill('Team conversations');
   await definition.getByLabel('When does this style fit?').fill('Replies and coordination with other people.');
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
   await persisted(page);
   await page.reload();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(definition.getByLabel('Name', { exact: true })).toHaveValue('Team conversations');
   await definition.getByLabel('Name', { exact: true }).fill('Collaboration');
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
   await persisted(page);
   expect(native.state.work.settings.workStyles?.[0]?.name).toBe('Collaboration');
   await styles.getByRole('button', { name: 'Remove work style Collaboration', exact: true }).click();
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
   await persisted(page);
   expect(native.state.work.settings.workStyles).toEqual([]);
   expect(native.requests).toHaveLength(0);
@@ -414,12 +501,11 @@ test('configurable agents run independently with named roles, durable ratings an
   await prioritizer.getByLabel('Agent name').fill('Roadmap sorter');
   await prioritizer.getByLabel('Agent model').fill('priority-model');
   await prioritizer.getByLabel('What should come first?').fill('Favor explicit commitments.');
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
   await persisted(page);
   await page.screenshot({ path: testInfo.outputPath('agent-settings-desktop.png') });
   await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
   await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
-  await expect(page.getByText(/Use Run assessor for unassessed tasks or Assess selected/)).toBeAttached();
+  await expect(page.getByText(/Use Run assessor for unassessed tasks\./)).toBeAttached();
   expect(native.requests).toEqual([]);
   native.holdAssessment = gate();
   await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
@@ -656,7 +742,6 @@ test('saved team searches survive relaunch and collect through configured source
   await source.getByLabel('GitHub query').fill(query);
   await source.getByLabel('Action to take on matches').selectOption('review');
   await source.getByLabel('Enabled', { exact: true }).check();
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   const settings = structuredClone(native.state.work.settings);
   await page.reload();
@@ -677,7 +762,6 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await page.getByRole('button', { name: 'Mark done: Regular task', exact: true }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByLabel('What should come first?').fill('Roadmap first');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   await page.getByRole('button', { name: 'Add profile', exact: true }).click();
@@ -690,7 +774,6 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await expect(page.getByLabel('What should come first?')).toHaveValue('Roadmap first');
   await page.getByLabel('What should come first?').fill('Incidents first');
   await page.getByLabel('Profile name').fill('Incident response');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   const profileId = native.state.activeWorkProfile.id;
   expect(native.state.work.settings.schedule.enabled).toBe(false);
@@ -740,7 +823,6 @@ test('profile creation reports duplicate names and starts empty without copying'
   expect(native.state.tasks).toEqual([]);
   expect(native.state.work.settings.streams).toEqual([]);
   await page.getByLabel('Profile name').fill('Default');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await expect(page.getByRole('alert')).toContainText('must be unique');
   expect(native.state.activeWorkProfile.name).toBe('Release week');
 });
@@ -781,7 +863,6 @@ test('every run ranks all tasks with saved instructions without reading notifica
   await add(page, 'Read release notes');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByLabel('What should come first?').fill('Prioritize relay roadmap phase one and Slack reviews.');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   await run(page);
   const rank = native.requests.find(request => request.op === 'work.rank');
@@ -937,7 +1018,7 @@ test('local capture and Done during ranking survive the result', async ({ page, 
 
 test('Slack sources start with official read tools and retain them across relaunch', async ({ page, native }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('button', { name: 'Add source' }).click();
   const stream = page.locator('.task-stream').last();
   await expect(stream.getByLabel('Source type')).toHaveValue('slack');
@@ -948,10 +1029,9 @@ test('Slack sources start with official read tools and retain them across relaun
   await stream.getByLabel('What should Copilot look for?').fill('Find direct requests in my team channel.');
   await stream.getByLabel('MCP server name').fill('Slack');
   await stream.getByLabel('Enabled').check();
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await page.reload();
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(stream.getByLabel('Allowed read tools, comma-separated'))
     .toHaveValue('slack_search_public_and_private,slack_read_thread');
   await page.getByRole('button', { name: 'Back to tasks' }).click();
@@ -963,7 +1043,7 @@ test('Slack sources start with official read tools and retain them across relaun
 
 test('selecting Slack fills only empty tool lists and preserves saved choices', async ({ page, native }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   const stream = page.locator('.task-stream').first();
   const type = stream.getByLabel('Source type');
   const tools = stream.getByLabel('Allowed read tools, comma-separated');
@@ -977,16 +1057,14 @@ test('selecting Slack fills only empty tool lists and preserves saved choices', 
   await type.selectOption('slack');
   await expect(tools).toHaveValue('slack_search_public, slack_read_thread');
   await stream.getByLabel('Enabled').uncheck();
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await page.reload();
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(tools).toHaveValue('slack_search_public,slack_read_thread');
   await tools.fill('');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await page.reload();
-  await page.getByRole('button', { name: 'Sources and priorities', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(tools).toHaveValue('');
   expect(native.state.work.settings.streams[0]?.tools).toEqual([]);
 });
@@ -1003,7 +1081,6 @@ test('settings accept explicit read tools and scheduled native ticks use the sam
   await stream.getByLabel('Enabled').check();
   await page.getByLabel('Collect and prioritize automatically').check();
   await page.getByLabel('Minutes between runs').fill('5');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   expect(native.state.work.settings.streams.at(-1)?.tools).toEqual(['search_messages', 'get_thread']);
   await page.getByRole('button', { name: 'Back to tasks' }).click();
@@ -1024,11 +1101,9 @@ test('completed-review extraction is offered only for MCP sources', async ({ pag
   await stream.getByLabel('Default action').selectOption('review-result');
   await stream.getByLabel('Source type').selectOption('github');
   await expect(action.locator('option:checked')).toHaveText('Choose a supported GitHub action');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await expect(page.getByRole('alert')).toContainText(/review-result/i);
   expect(native.state.work.settings.streams[0]?.action).toBe('review');
   await action.selectOption('reply');
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await expect(page.getByRole('alert')).toHaveCount(0);
   expect(native.state.work.settings.streams[0]?.action).toBe('reply');
@@ -1044,7 +1119,6 @@ test('notification source is opt-in, automatic, and keeps backlog searches', asy
   await expect(notification.getByText('The first scan covers 30 days.', { exact: false })).toBeVisible();
   await expect(notification.getByLabel('MCP server name')).toHaveCount(0);
   await expect(notification.getByRole('combobox')).toHaveCount(1);
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   expect(native.state.work.settings.streams.slice(0, 2)).toEqual(before);
   expect(native.state.work.settings.streams[2]).toMatchObject({ kind: 'github-notifications', enabled: true });
@@ -1172,7 +1246,6 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
     await source.getByLabel('GitHub query').fill('is:issue is:open assignee:@me');
     await source.getByLabel('Enabled', { exact: true }).check();
   }
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   const sources = native.state.work.settings.streams.filter(source => source.enabled);
@@ -1255,7 +1328,6 @@ test('manual-only progress omits the collection bar and stays active through ass
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   for (const enabled of await page.locator('.task-stream').getByLabel('Enabled', { exact: true }).all()) await enabled.uncheck();
-  await page.getByRole('button', { name: 'Save settings' }).click();
   await persisted(page);
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   await add(page, 'Rank local work');
@@ -1571,9 +1643,8 @@ test('saved semantic code-agent changes still stop the batch while Settings navi
   const batch = page.getByRole('region', { name: 'Code batch', exact: true });
   await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('group', { name: 'PR reviewer', exact: true }).getByLabel('Agent model').fill('changed-model');
   expect(native.requests.map(request => request.op)).toEqual(['work.reviewCode']);
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+  await page.getByRole('group', { name: 'PR reviewer', exact: true }).getByLabel('Agent model').fill('changed-model');
   await expect(batch).toContainText('Code agent settings changed. The batch stopped.');
   await expect(batch).toContainText('1 not started');
   await expect.poll(() => native.requests.map(request => request.op)).toEqual(['work.reviewCode', 'cancel']);
