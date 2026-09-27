@@ -90,6 +90,22 @@ test('run popover keeps layout and selection stable, dismisses without trapping 
   await page.keyboard.press('Tab');
   await expect(page.getByLabel('Work profile', { exact: true })).toBeFocused();
   await expect(panel).toHaveCount(0);
+  for (const control of [trigger, page.getByRole('button', { name: 'Close run details' })]) {
+    await openRunDetails(page);
+    await control.focus();
+    const relatedTarget = await control.evaluate(element => {
+      let target: EventTarget | null | undefined;
+      element.addEventListener('blur', event => {
+        if (event instanceof FocusEvent) target = event.relatedTarget;
+      }, { once: true });
+      element.blur();
+      return target;
+    });
+    expect(relatedTarget).toBeNull();
+    await expect(panel).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    await expect(trigger).not.toBeFocused();
+  }
   await openRunDetails(page);
   await trigger.click();
   await expect(panel).toHaveCount(0);

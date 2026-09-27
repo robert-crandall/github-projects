@@ -81,7 +81,7 @@ export function RunProgressPopover({ run, details, error, profileName, cancelAss
 
   if (!available) return null;
   return <div className="task-run-activity" ref={container} onBlur={event => {
-    if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+    if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
   }}>
     <button ref={trigger} className={`secondary task-run-indicator${incomplete ? ' task-run-incomplete' : warning ? ' task-run-warning' : ''}`}
       aria-label={`Run details: ${status}`} aria-expanded={open} aria-controls={id}
