@@ -100,6 +100,57 @@ test('settings autosave failures keep edits available for storage retry', async 
   await expect(instructions).toHaveValue('Keep the latest changes');
 });
 
+async function runAction(page: Page, name: 'Run assessor' | 'Run prioritizer') {
+  await page.getByRole('button', { name: 'More run actions', exact: true }).click();
+  await page.getByRole('button', { name, exact: true }).click();
+}
+
+test('run dropdown keeps the pipeline default and supports keyboard and outside dismissal', async ({ page, native }, testInfo) => {
+  assessmentTasks(native, 1);
+  await page.goto('/');
+  const trigger = page.getByRole('button', { name: 'More run actions', exact: true });
+  const assessor = page.getByRole('button', { name: 'Run assessor', exact: true });
+  const prioritizer = page.getByRole('button', { name: 'Run prioritizer', exact: true });
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(assessor).toBeHidden();
+  await expect(prioritizer).toBeHidden();
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
+  await page.keyboard.press('Tab');
+  await expect(assessor).toBeFocused();
+  await expect(assessor).toHaveAccessibleDescription('Fill missing judgments without changing the order.');
+  await page.keyboard.press('Tab');
+  await expect(prioritizer).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('run-dropdown-desktop.png') });
+  await page.keyboard.press('Escape');
+  await expect(trigger).toBeFocused();
+  await expect(assessor).toBeHidden();
+  await trigger.click();
+  await page.getByRole('heading', { name: 'Ranked Tasks', exact: true }).click();
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await trigger.click();
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await trigger.click();
+  await expect(assessor).toBeVisible();
+  await expect(prioritizer).toBeVisible();
+  const bounds = await page.locator('#task-run-options').boundingBox();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: testInfo.outputPath('run-dropdown-narrow.png') });
+  await assessor.click();
+  await expect(trigger).toBeEnabled();
+  await expect(assessor).toBeHidden();
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess']);
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await expect(trigger).toBeEnabled();
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess', 'work.intake', 'work.rank']);
+});
+
 test('work styles show automatic pills, preserve corrections and filter without changing ranks across relaunch', async ({ page, native }, testInfo) => {
   const state = emptyWorkspace(native.now, 'UTC');
   state.work.settings.streams = [];
@@ -223,15 +274,15 @@ test('prioritization refreshes PR readiness while retaining the saved judgment a
   }];
   await page.goto('/');
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
-  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await runAction(page, 'Run prioritizer');
   const current = page.getByRole('region', { name: 'Current PR status' });
   await expect(current).toContainText('CI: failing');
-  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   native.workObservations[0]!.pullRequest = { ...status, draft: false, checks: 'passing', readiness: 'ready' };
-  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await runAction(page, 'Run prioritizer');
   await expect(current).toContainText('Not a draft');
   await expect(current).toContainText('CI: passing');
-  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   expect(native.requests.map(request => request.op)).toEqual(['work.collect', 'work.rank', 'work.collect', 'work.rank']);
   expect(native.requests.filter(request => request.op === 'work.collect').every(request => request.input.observeOnly && request.input.stateOnly)).toBe(true);
   expect(native.assessments.values(task.id)).toHaveLength(1);
@@ -345,7 +396,7 @@ test('restoring a workspace keeps every Copilot action disabled until the old co
     await expect.poll(() => native.requests.some(request => request.op === 'cancel')).toBe(true);
     await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
     await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
-    for (const name of ['Run now', 'Run assessor', 'Run prioritizer', 'Review PR']) {
+    for (const name of ['Run now', 'More run actions', 'Review PR']) {
       await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
     }
     await expect(panel.getByRole('status')).toContainText('Waiting for the previous code job');
@@ -413,7 +464,7 @@ test('assessment progress counts saved batches through the final remainder', asy
   const first = gate(), second = gate(), third = gate();
   native.assessmentHolds = [first, second, third];
   await page.goto('/');
-  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
+  await runAction(page, 'Run assessor');
   const progress = page.getByRole('progressbar', { name: 'Assessments saved' });
   const region = page.getByRole('region', { name: 'Run progress' });
   await expect(progress).toHaveAttribute('aria-valuemax', '45');
@@ -465,13 +516,13 @@ test('assessment cancellation stays accessible in Settings and keeps only saved 
   await expect.poll(() => native.requests.filter(request => request.op === 'cancel').length).toBe(1);
   expect(native.requests.find(request => request.op === 'cancel')?.input).toEqual({ requestId: target.id });
   await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeDisabled();
   await expect(progress).toHaveAttribute('aria-valuenow', '20');
   second.release();
   await expect(region).toContainText('Assessment cancelled');
   await expect(region).toContainText('Saved batches kept');
   await expect(region).toContainText('25 not assessed');
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   expect(native.assessments.entries).toHaveLength(20);
   expect(native.requests.filter(request => request.op === 'work.assess')).toHaveLength(2);
   expect(native.requests.some(request => request.op === 'work.rank')).toBe(false);
@@ -480,8 +531,8 @@ test('assessment cancellation stays accessible in Settings and keeps only saved 
   const savedVersions = native.assessments.entries.map(value => value.resultId);
   await page.reload();
   expect(native.assessments.entries).toHaveLength(20);
-  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await runAction(page, 'Run assessor');
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await expect(progress).toHaveAttribute('aria-valuemax', '25');
   await expect(progress).toHaveAttribute('aria-valuenow', '25');
   expect(native.assessments.entries).toHaveLength(45);
@@ -504,15 +555,15 @@ test('configurable agents run independently with named roles, durable ratings an
   await persisted(page);
   await page.screenshot({ path: testInfo.outputPath('agent-settings-desktop.png') });
   await page.getByRole('button', { name: 'Back to tasks', exact: true }).click();
-  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
+  await runAction(page, 'Run prioritizer');
   await expect(page.getByText(/Use Run assessor for unassessed tasks\./)).toBeAttached();
   expect(native.requests).toEqual([]);
   native.holdAssessment = gate();
-  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeDisabled();
+  await runAction(page, 'Run assessor');
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeDisabled();
   await expect(page.getByText('Assessor only · Order unchanged')).toBeVisible();
   native.holdAssessment.release();
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await persisted(page);
   expect(native.requests.map(request => request.op)).toEqual(['work.assess']);
   expect(native.state.work.ranking).toBeNull();
@@ -525,21 +576,21 @@ test('configurable agents run independently with named roles, durable ratings an
   await expect(history).toContainText('Evidence specialist');
   await expect(history).toContainText('assessor-model');
   const firstIds = native.assessments.entries.map(value => value.resultId);
-  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await runAction(page, 'Run prioritizer');
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await persisted(page);
   expect(native.requests.map(request => request.op)).toEqual(['work.assess', 'work.rank']);
   expect(native.state.work.ranking?.orderedIds).toEqual(native.state.tasks.map(task => task.id).reverse());
   expect(native.assessments.entries.map(value => value.resultId)).toEqual(firstIds);
   const order = structuredClone(native.state.work.ranking);
   native.failRank = true;
-  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await runAction(page, 'Run prioritizer');
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await persisted(page);
   expect(native.state.work.ranking).toEqual(order);
   expect(native.assessments.entries.map(value => value.resultId)).toEqual(firstIds);
-  await page.getByRole('button', { name: 'Run assessor', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await runAction(page, 'Run assessor');
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   await persisted(page);
   expect(native.assessments.entries).toHaveLength(2);
   await expect(page.getByRole('region', { name: 'Run progress' })).toContainText('No tasks to assess in this run');
@@ -549,7 +600,7 @@ test('configurable agents run independently with named roles, durable ratings an
   await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('agents-history-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeVisible();
   await expect(history.getByLabel('Assessment version')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('agents-history-narrow.png') });
@@ -617,8 +668,8 @@ test('assessment age never expires its reusable judgment', async ({ page, native
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
-  await page.getByRole('button', { name: 'Run prioritizer', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Run prioritizer', exact: true })).toBeEnabled();
+  await runAction(page, 'Run prioritizer');
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   expect(native.requests.filter(request => request.op === 'work.assess')).toHaveLength(1);
   await expect(history).toContainText('Assessment of Keep this assessment');
   expect(native.assessments.values(version.id)).toEqual([version]);
@@ -1472,7 +1523,7 @@ test('selected assessor and detail assessor save only requested judgments withou
   await page.getByRole('button', { name: 'Mark done', exact: true }).click();
   await add(page, 'Captured during assessment');
   native.holdAssessment.release();
-  await expect(page.getByRole('button', { name: 'Run assessor', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
   expect(native.requests[0]).toMatchObject({ op: 'work.assess', input: { force: true, tasks: [{ id }] } });
   expect(native.assessments.entries.map(value => value.id)).toEqual([id]);
   expect(native.state.work.ranking).toEqual(priorOrder);
@@ -1493,7 +1544,7 @@ test('mixed code batch runs only named PRs, preserves detail navigation, and sav
   await page.getByRole('button', { name: 'Review selected PRs (2)', exact: true }).click();
   const batch = page.getByRole('region', { name: 'Code batch', exact: true });
   await expect(batch.getByRole('status')).toContainText('Current task: Shared review');
-  for (const name of ['Run now', 'Run assessor', 'Run prioritizer']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
+  for (const name of ['Run now', 'More run actions']) await expect(page.getByRole('button', { name, exact: true })).toBeDisabled();
   await page.locator('.task-row').filter({ hasText: 'Assigned issue' }).click();
   await expect(page.getByRole('button', { name: 'Assess implementation', exact: true })).toBeDisabled();
   await page.getByLabel('Task notes', { exact: true }).fill('Notes while the batch runs');
