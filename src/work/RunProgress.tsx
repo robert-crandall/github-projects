@@ -81,7 +81,7 @@ export function RunProgress({ run, details, cancelAssessor }: {
       <summary>Coverage and run details{detailCount > 0 ? ` (${detailCount})` : ''}
         {failed > 0 && <span className="task-run-warning">{' '}{failed} source{failed === 1 ? '' : 's'} failed</span>}
       </summary>
-      <div className="task-run-ledger">
+      <div className="task-run-ledger" tabIndex={0} role="region" aria-label="Scrollable source details">
         {sources.length > 0 && <ul className="task-run-sources" aria-label="Collection sources">
           {sources.map(source => {
             const Icon = sourceIcons[source.state];
