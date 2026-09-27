@@ -64,6 +64,7 @@ test('collection, workspace restart and ranking share cache invalidation without
         const result = phase === 'assess' ? {
           assessments: data.tasks.map(task => ({
             ...unknownRatings,
+            workStyleIds: [],
             id: task.id, importance: 'Assigned issue', urgency: 'No deadline established',
             blockers: 'None established', uncertainty: 'No further context',
             supportingEvidence: [{ reference: '$title', summary: 'Assigned source issue' }],

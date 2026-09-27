@@ -11,6 +11,7 @@ import { orderingRankTask, semanticRankTask } from '../../service/src/work-rank-
 import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
+import { assessmentIdentity, workStyleIdsSchema } from '../../service/src/work-styles.ts';
 import { CodeSessions } from './code-sessions.ts';
 import { githubReference } from '../../service/src/references.ts';
 
@@ -84,16 +85,34 @@ export class WorkQueue {
 
   saveSettings(settings: WorkSettings, profileName = this.controller.state.activeWorkProfile.name): void {
     const saved = workSettingsSchema.parse(settings);
-    this.update(current => ({
-      ...renameWorkProfile(current, profileName), work: {
-        ...current.work, settings: saved,
-        ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null } : {}),
-      },
-    }));
+    this.update(current => {
+      const retained = current.work.styleFilter?.filter(id => saved.workStyles?.some(style => style.id === id));
+      return {
+        ...renameWorkProfile(current, profileName), work: {
+          ...current.work, settings: saved,
+          styleFilter: retained?.length ? retained : null,
+          ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null } : {}),
+        },
+      };
+    });
   }
   saveSourceFilter(filter: NonNullable<AppState['work']['sourceFilter']>): void {
     const sourceFilter = workStateSchema.shape.sourceFilter.parse(filter);
     this.update(current => ({ ...current, work: { ...current.work, sourceFilter } }));
+  }
+  saveStyleFilter(filter: AppState['work']['styleFilter']): void {
+    const styleFilter = workStateSchema.shape.styleFilter.parse(filter);
+    this.update(current => ({ ...current, work: { ...current.work, styleFilter } }));
+  }
+  setWorkStyles(id: string, styles: string[] | null): void {
+    const override = styles === null ? undefined : workStyleIdsSchema.parse(styles);
+    this.update(current => {
+      if (!current.tasks.some(task => task.id === id)) throw new Error('This task no longer exists.');
+      if (override?.some(id => !current.work.settings.workStyles?.some(style => style.id === id))) {
+        throw new Error('This work style no longer exists. Choose a saved style.');
+      }
+      return { ...current, tasks: current.tasks.map(task => task.id === id ? { ...task, workStyleOverride: override } : task) };
+    });
   }
   private assertProfileIdle(): void {
     if (this.status.running || this.status.unsubscribing.length) {
@@ -324,7 +343,7 @@ export class WorkQueue {
     const fingerprints = new Map(await Promise.all(input.tasks.map(async task =>
       [task.id, await identityDigest(semanticRankTask(task))] as const)));
     const instructionsFingerprint = await identityDigest(agent.instructions);
-    const configurationFingerprint = await identityDigest(agentIdentity(agent));
+    const configurationFingerprint = await identityDigest(assessmentIdentity(input));
     const assessments = new Map<string, SavedAssessment>();
     let pending = input.tasks;
     while (pending.length) {
@@ -333,9 +352,9 @@ export class WorkQueue {
       this.assertWorkspace(assessmentGeneration);
       this.assertProfile(this.controller.state, input.profileId);
       if (selected) {
-        if (JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))
-          !== JSON.stringify(agentIdentity(agent))) {
-          throw new Error('Remaining selected assessments stopped after the assessor instructions or model changed. Saved results are retained.');
+        if (JSON.stringify(assessmentIdentity(this.controller.state.work.settings))
+          !== JSON.stringify(assessmentIdentity(input))) {
+          throw new Error('Remaining selected assessments stopped after the assessor settings or work styles changed. Saved results are retained.');
         }
         const current = new Map(rankInput(this.controller.state).tasks.map(task => [task.id, JSON.stringify(semanticRankTask(task))]));
         pending = pending.filter(task => current.get(task.id) === JSON.stringify(semanticRankTask(task)));
@@ -364,7 +383,8 @@ export class WorkQueue {
         || batch.assessments.some(value => !pendingIds.has(value.id) || value.profileId !== input.profileId
           || value.fingerprint !== fingerprints.get(value.id) || value.instructionsFingerprint !== instructionsFingerprint
           || value.model !== agent.model || value.assessmentVersion !== ASSESSMENT_VERSION
-          || value.agent.id !== agent.id || value.agent.configurationFingerprint !== configurationFingerprint)) {
+          || value.agent.id !== agent.id || value.agent.configurationFingerprint !== configurationFingerprint
+          || JSON.stringify(value.workStyles) !== JSON.stringify(input.workStyles ?? []))) {
         throw new Error('Assessment results did not match the submitted tasks and settings. The previous order is retained.');
       }
       await this.controller.saveAssessments(input.profileId, batch.assessments, assessmentGeneration);
@@ -383,12 +403,11 @@ export class WorkQueue {
     assessments?: Map<string, SavedAssessment>, force = false): Promise<string[]> {
     this.assertAssessmentNotCancelled();
     const profileId = input.profileId;
-    const assessor = taskAgent(input, 'task-assessment');
     const prioritizer = taskAgent(input, 'task-prioritization');
     const assertSettings = (current: AppState) => {
       this.assertWorkspace(assessmentGeneration);
       if (current.activeWorkProfile.id !== profileId
-        || JSON.stringify(agentIdentity(taskAgent(current.work.settings, 'task-assessment'))) !== JSON.stringify(agentIdentity(assessor))
+        || JSON.stringify(assessmentIdentity(current.work.settings)) !== JSON.stringify(assessmentIdentity(input))
         || JSON.stringify(agentIdentity(taskAgent(current.work.settings, 'task-prioritization'))) !== JSON.stringify(agentIdentity(prioritizer))) {
         throw new Error('Ranking settings changed during the run. The previous order is retained; run again with the saved settings.');
       }
@@ -396,7 +415,7 @@ export class WorkQueue {
     assertSettings(this.controller.state);
     const latestInput = rankInput(this.controller.state);
     const submitted = new Map(latestInput.tasks.map(task => [task.id, JSON.stringify(orderingRankTask(task))]));
-    const configurationFingerprint = await identityDigest(agentIdentity(assessor));
+    const configurationFingerprint = await identityDigest(assessmentIdentity(input));
     const assessmentIds: string[] = [];
     const selected: NonNullable<WorkRankInput['assessments']> = [];
     const warnings: string[] = [];
@@ -513,10 +532,10 @@ export class WorkQueue {
           if (selectedIds && assessed.size < selectedIds.size) {
             warnings.push(`${selectedIds.size - assessed.size} selected tasks were not assessed because they changed or are no longer eligible.`);
           }
-          if (JSON.stringify(agentIdentity(taskAgent(input, 'task-assessment')))
-            !== JSON.stringify(agentIdentity(taskAgent(this.controller.state.work.settings, 'task-assessment')))) {
+          if (JSON.stringify(assessmentIdentity(input))
+            !== JSON.stringify(assessmentIdentity(this.controller.state.work.settings))) {
             warnings.push(selectedIds
-              ? 'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.'
+              ? 'Assessor settings or work styles changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.'
               : 'Assessor settings changed during the run. Results are saved as history; use Assess selected to refresh them with the saved settings.');
           }
         } else {

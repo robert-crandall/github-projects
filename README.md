@@ -54,6 +54,14 @@ Selections and collapsed groups save automatically per work profile, including a
 **Ranked Tasks** always shows the full list. Filters do not change source collection, schedules, ranking, Done or notes.
 **Ranked Tasks** always shows the full list. Filters do not change source collection, schedules, ranking, Done or notes.
 
+### Work styles
+
+In **Settings → Work styles**, define names and descriptions for this profile. There are no required categories: Quick wins and Deep focus are examples, not defaults. The Task assessor assigns zero or more matching styles from task evidence. For tasks with existing assessments, save your definitions and use **Assess selected**; changing definitions never automatically reruns an assessment.
+
+Styles appear as pills on task rows. **Filters → Work styles** matches any selected style within the selected sources, preserving original ranks across To do, Done and No action now. **All styles** includes unclassified tasks. Filter choices persist per profile; **Ranked Tasks** bypasses both source and style filters.
+
+In task details, change the style checkboxes to save your own assignments, including no styles. Reassessment never overwrites these corrections. **Use Copilot assignments** restores the latest saved automatic assignments. Renaming a style updates its current pills; deleting it hides them without deleting history. Historical assessments retain the original definitions, and details disclose changed definitions. The Implementation assessor remains a separate code-inspection agent.
+
 ### Work profiles
 
 Use **Work profile** above the task list to switch between named setups, such as regular work and on-call work. Your existing setup becomes **Default**, without changing its tasks or settings. **Add profile** creates and selects an empty task list, then opens its settings. Optionally copy the current profile's saved instructions, sources and model; automatic runs start off. Rename the selected profile in **Settings**.
@@ -94,7 +102,7 @@ Saved judgments do not expire. An older assessment's reevaluation suggestion rem
 
 **Task details → Assessment** keeps the latest result and a version selector for earlier results. Evidence, evaluation time and provenance remain readable after edits, Done or relaunch. “Outdated” means saved inputs or settings changed; the judgment is still available for prioritization. Urgency and blockers are labeled as observations from assessment time, not fresh source checks. Blank model selection is identified as SDK default, not a guessed resolved model.
 
-New v3 results identify the agent and its configuration fingerprint. Earlier v2 history stays readable; absent ratings are labeled **Not recorded**, not invented. Changing an agent never rewrites its historical judgments. Roles and result formats are code-defined, with exactly one definition per supported role; instructions cannot grant tools, source access, delegation or GitHub writes.
+New v4 results include work-style assignments and the definitions used, alongside the agent and its configuration fingerprint. Earlier v2/v3 history stays readable; absent ratings and styles are labeled **Not recorded**, not invented. Changing an agent never rewrites its historical judgments. Roles and result formats are code-defined, with exactly one definition per supported role; instructions cannot grant tools, source access, delegation or GitHub writes.
 
 Assessment history belongs to the task, including manual tasks, in separate rows of the same local SQLite database. Details read 20 versions at a time; **Older assessments** reads the next page. Logical append order identifies the latest result even if the clock moves backwards. Each subset saves before further assessment or ordering; retries do not duplicate versions. History does not count toward the **8 MiB** task snapshot limit and never prunes itself.
 

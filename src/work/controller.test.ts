@@ -19,6 +19,46 @@ import { workAssessOutputSchema } from '../../service/src/work-assessment.ts';
 const before = '2026-09-15T10:00:00.000Z';
 const previousCompleted = '2026-09-15T11:00:00.000Z';
 const url = 'https://github.com/Owner/Repo/pull/42';
+
+test('work style corrections survive in-flight assessment and retry; definitions and filter updates remain local', async () => {
+  const started = deferred<void>();
+  const release = deferred<void>();
+  const mock = await fixture(initial(), async request => {
+    if (request.op === 'work.assess') {
+      started.resolve();
+      await release.promise;
+      const batch = await assessmentBatch(request.input);
+      batch.assessments[0]!.assessment.workStyleIds = ['quick'];
+      return batch;
+    }
+  });
+  mock.queue.capture('Work to classify');
+  const id = mock.workspace.state.tasks[0]!.id;
+  mock.queue.saveSettings({ ...mock.workspace.state.work.settings,
+    workStyles: [{ id: 'quick', name: 'Quick wins', description: 'Small clear work' }] });
+  mock.queue.saveStyleFilter(['quick']);
+  expect(mock.requests).toHaveLength(0);
+  const running = mock.queue.runAssessor([id]);
+  await started.promise;
+  mock.queue.setWorkStyles(id, []);
+  mock.history.fail = true;
+  release.resolve();
+  await running;
+  expect(mock.workspace.state.tasks[0]!.workStyleOverride).toEqual([]);
+  expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(1);
+  mock.history.fail = false;
+  await mock.workspace.retryAssessments();
+  expect(mock.history.values(id)[0]!.assessment).toHaveProperty('workStyleIds', ['quick']);
+  expect(mock.workspace.state.tasks[0]!.workStyleOverride).toEqual([]);
+  mock.queue.setWorkStyles(id, null);
+  expect(mock.workspace.state.tasks[0]!.workStyleOverride).toBeUndefined();
+  expect(() => mock.queue.setWorkStyles(id, ['missing'])).toThrow('no longer exists');
+  expect(() => mock.queue.setWorkStyles('missing', [])).toThrow('no longer exists');
+  mock.queue.saveSettings({ ...mock.workspace.state.work.settings, workStyles: [] });
+  expect(mock.workspace.state.work.styleFilter).toBeNull();
+  expect(mock.history.values(id)).toHaveLength(1);
+  expect(mock.requests).toHaveLength(1);
+});
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(yes => { resolve = yes; });
@@ -299,7 +339,7 @@ describe('durable local work', () => {
     });
     await mock.queue.run();
     const version = mock.history.values('manual')[0]!;
-    expect(version).toMatchObject({ id: 'manual', profileId: 'default', model: '', assessmentVersion: 'work-assessment-v3' });
+    expect(version).toMatchObject({ id: 'manual', profileId: 'default', model: '', assessmentVersion: 'work-assessment-v4' });
     expect(mock.saved().work.ranking).toEqual(state.work.ranking);
     expect(mock.queue.getSnapshot().error).toContain('Ordering unavailable');
     const reloaded = new DesktopWorkspace(mock.platform);
@@ -1096,7 +1136,7 @@ describe('explicit task agents', () => {
     expect(mock.history.entries[0]).toMatchObject({ id: ids[0], model: originalModel });
     expect(mock.history.entries.every(value => value.model === originalModel)).toBe(true);
     if (selected) {
-      expect(mock.queue.getSnapshot().error).toBe('Remaining selected assessments stopped after the assessor instructions or model changed. Saved results are retained.');
+      expect(mock.queue.getSnapshot().error).toBe('Remaining selected assessments stopped after the assessor settings or work styles changed. Saved results are retained.');
     } else {
       expect(mock.queue.getSnapshot().error).toBe('');
       expect(mock.queue.getSnapshot().warnings).toEqual(['Assessor settings changed during the run. Results are saved as history; use Assess selected to refresh them with the saved settings.']);
@@ -1124,7 +1164,7 @@ describe('explicit task agents', () => {
     expect(mock.history.entries[0]).toMatchObject({ id: ids[0], model: originalModel });
     expect(mock.queue.getSnapshot().error).toBe('');
     expect(mock.queue.getSnapshot().warnings).toEqual([
-      'Assessor instructions or model changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.',
+      'Assessor settings or work styles changed while selected assessments were in flight. Their results are saved as history; assess again with the saved settings.',
     ]);
   });
 
@@ -1251,8 +1291,8 @@ describe('explicit task agents', () => {
       if (value.id === 'expired') return { ...value, evaluatedAt: before, assessment: { ...value.assessment, reevaluateAt: previousCompleted } };
       if (value.id === 'old-settings') return { ...value, instructionsFingerprint: 'f'.repeat(64) };
       if (value.id !== 'legacy') return value;
-      const { agent: _agent, assessmentVersion: _version, ...legacy } = value;
-      const { impact: _impact, visibility: _visibility, effort: _effort, ...assessment } = value.assessment;
+      const { agent: _agent, assessmentVersion: _version, workStyles: _styles, ...legacy } = value;
+      const { impact: _impact, visibility: _visibility, effort: _effort, workStyleIds: _ids, ...assessment } = value.assessment;
       return { ...legacy, assessmentVersion: 'work-assessment-v2' as const, assessment };
     });
     await mock.workspace.saveAssessments('default', workAssessOutputSchema.parse({ assessments: history }).assessments);

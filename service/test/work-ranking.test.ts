@@ -40,6 +40,7 @@ type Call = { phase: 'assess' | 'order'; input: ModelInput; config: SessionConfi
 function assessment(id: string, time: string) {
   return {
     ...unknownRatings,
+    workStyleIds: [],
     id, importance: 'Explicit owner commitment', urgency: 'Deadline tomorrow', blockers: 'None established',
     supportingEvidence: [{ reference: '$title', summary: 'Task names a commitment' }],
     uncertainty: 'No additional evidence', reevaluateAt: new Date(Date.parse(time) + 86400000).toISOString(),
@@ -103,6 +104,41 @@ async function fixture(run: (h: {
 }
 
 describe('durable independent assessments and comparative ordering', () => {
+  test('work styles reach the assessor, are saved with definitions, and definition edits invalidate reuse', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.workStyles = [{ id: 'focused', name: 'Deep focus', description: 'Needs uninterrupted concentration' }];
+      h.respond((call, result) => call.phase === 'assess' ? {
+        assessments: call.input.tasks.map(task => ({ ...assessment(task.id, call.input.evaluatedAt), workStyleIds: ['focused'] })),
+      } : result);
+      const first = await h.sdk.assessWork(data, signal());
+      expect((h.calls[0]!.input as AssessmentInput).workStyles).toEqual(data.workStyles);
+      expect(h.calls[0]!.config.systemMessage?.content).toContain('Return [] when no style fits or evidence is insufficient');
+      expect(first.assessments[0]).toMatchObject({
+        assessmentVersion: 'work-assessment-v4', workStyles: data.workStyles, assessment: { workStyleIds: ['focused'] },
+      });
+      await h.sdk.assessWork(data, signal());
+      expect(h.calls).toHaveLength(1);
+      data.workStyles[0]!.description = 'Needs at least an hour of concentration';
+      const second = await h.sdk.assessWork(data, signal());
+      expect(h.calls).toHaveLength(2);
+      expect(second.assessments[0]!.resultId).not.toBe(first.assessments[0]!.resultId);
+      expect(first.assessments[0]).toHaveProperty('workStyles.0.description', 'Needs uninterrupted concentration');
+    });
+  });
+
+  for (const ids of [['unknown'], ['focused', 'focused']]) test(`rejects invalid work-style assignments ${JSON.stringify(ids)}`, async () => {
+    await fixture(async h => {
+      const data = input();
+      data.workStyles = [{ id: 'focused', name: 'Focus', description: 'Concentrated work' }];
+      h.respond((call, result) => call.phase === 'assess' ? {
+        assessments: call.input.tasks.map(task => ({ ...assessment(task.id, call.input.evaluatedAt), workStyleIds: ids })),
+      } : result);
+      await expect(h.sdk.assessWork(data, signal())).rejects.toMatchObject({ dto: { code: 'copilot_output' } });
+      expect(new WorkAssessmentCache(h.path).load(assessmentScope('synthetic-test-token', data), data.tasks.map(task => task.id)).assessments.size).toBe(0);
+    });
+  });
+
   test('week-old durable judgments rank after cache loss, with current PR state instead of historical draft blockers', async () => {
     await fixture(async h => {
       const data = input();
@@ -141,9 +177,9 @@ describe('durable independent assessments and comparative ordering', () => {
       const data = input();
       const batch = await h.sdk.assessWork(data, signal());
       const legacy = batch.assessments.map(value => {
-        if (value.assessmentVersion === 'work-assessment-v2') return value;
-        const { agent: _, ...saved } = value;
-        const { impact: _i, visibility: _v, effort: _e, ...assessment } = saved.assessment;
+        if (value.assessmentVersion !== 'work-assessment-v4') throw new Error('Expected current assessment');
+        const { agent: _, workStyles: _styles, ...saved } = value;
+        const { impact: _i, visibility: _v, effort: _e, workStyleIds: _ids, ...assessment } = saved.assessment;
         return { ...saved, assessmentVersion: 'work-assessment-v2' as const, assessment };
       });
       h.advance(30 * 86400000);
@@ -341,7 +377,7 @@ describe('durable independent assessments and comparative ordering', () => {
       expect(JSON.stringify(order)).not.toContain('FULL EVIDENCE');
       expect(JSON.stringify(order)).not.toContain('Current source body');
       expect(Object.keys(order.tasks[0]!.assessment).sort()).toEqual([
-        'blockers', 'effort', 'impact', 'importance', 'reevaluateAt', 'supportingEvidence', 'uncertainty', 'urgency', 'visibility',
+        'blockers', 'effort', 'impact', 'importance', 'reevaluateAt', 'supportingEvidence', 'uncertainty', 'urgency', 'visibility', 'workStyleIds',
       ]);
     });
   });

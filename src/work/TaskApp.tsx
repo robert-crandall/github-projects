@@ -18,6 +18,8 @@ import { RunProgress } from './RunProgress.tsx';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
+import { matchesStyles, taskStyles, useStyleAssessments } from './styles.ts';
+import type { SavedAssessment } from '../../service/src/work-assessment.ts';
 import { TaskAssessmentHistory } from './AssessmentHistory.tsx';
 import { CodeSessionPanel } from './CodeSessionPanel.tsx';
 import { codeJob } from './code-sessions.ts';
@@ -121,9 +123,10 @@ function NewProfile({ queue, currentName, close, created }: {
     </form>
   </Modal>;
 }
-function TaskDetail({ task, reason, queue, controller, remote, close, batchProgress }: {
+function TaskDetail({ task, reason, queue, controller, remote, close, batchProgress, styleAssessment, stylesLoading, stylesError }: {
   task: Task; reason?: string; queue: WorkQueue; controller: DesktopWorkspace; remote: ServiceWorkspace; close: () => void;
   batchProgress: ReactNode;
+  styleAssessment?: SavedAssessment; stylesLoading: boolean; stylesError: string;
 }) {
   const [confirmUnsubscribe, setConfirmUnsubscribe] = useState(false);
   const [unsubscribeError, setUnsubscribeError] = useState('');
@@ -143,6 +146,8 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
     repo: match[1], kind: match[2] === 'issues' ? 'issue' : 'pr', number: Number(match[3]),
   }));
   const reference = parsed.success ? parsed.data : null;
+  const styles = controller.state.work.settings.workStyles ?? [];
+  const assigned = taskStyles(task, styles, styleAssessment);
   const run = (operation: () => void | Promise<unknown>) => {
     try { Promise.resolve(operation()).catch(error => controller.report(error)); }
     catch (error) { controller.report(error); }
@@ -168,6 +173,25 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
     </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
+    {styles.length > 0 && <section aria-label="Task work styles"><h3>Work styles</h3>
+      <p className="field-help">{task.workStyleOverride !== undefined ? 'Your choices. Reassessment will not overwrite them.'
+        : stylesLoading ? 'Reading saved work styles...'
+        : stylesError ? 'Automatic styles are unavailable until history can be read.'
+        : styleAssessment?.assessmentVersion !== 'work-assessment-v4' ? 'Not classified yet. Use Assess task to assign styles.'
+        : assigned.length ? 'Assigned by Copilot. Change any choice to keep your own assignments.'
+        : 'Copilot found no matching styles. You can choose styles yourself.'}</p>
+      {styleAssessment?.assessmentVersion === 'work-assessment-v4' && task.workStyleOverride === undefined
+        && JSON.stringify(styleAssessment.workStyles) !== JSON.stringify(styles)
+        && <p className="field-help">Definitions changed since this assessment. Use Assess task to update automatic matches.</p>}
+      {styles.map(style => <label className="checkbox-label task-style-choice" key={style.id} title={style.description}>
+        <input type="checkbox" checked={assigned.some(item => item.id === style.id)}
+          disabled={task.workStyleOverride === undefined && (stylesLoading || !!stylesError)}
+          onChange={event => run(() => queue.setWorkStyles(task.id, event.target.checked
+            ? [...assigned.map(item => item.id), style.id] : assigned.filter(item => item.id !== style.id).map(item => item.id)))} />
+        {style.name}</label>)}
+      {task.workStyleOverride !== undefined && <button className="text-button"
+        onClick={() => run(() => queue.setWorkStyles(task.id, null))}>Use Copilot assignments</button>}
+    </section>}
     {task.work?.reference?.kind === 'pr' && <section aria-label="Current PR status"><h3>Current PR status</h3>
       {task.work.pullRequest ? <>
         <p>{task.work.pullRequest.draft === null ? 'Draft status unknown' : task.work.pullRequest.draft ? 'Draft' : 'Not a draft'}
@@ -218,6 +242,7 @@ export function TaskApp({ controller, queue, remote }: {
   controller: DesktopWorkspace; queue: WorkQueue; remote: ServiceWorkspace;
 }) {
   const saved = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
+  const styleAssessments = useStyleAssessments(controller, saved);
   const run = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
   const code = useSyncExternalStore(queue.code.subscribe, queue.code.getSnapshot);
   const network = useSyncExternalStore(remote.subscribe, remote.getSnapshot);
@@ -231,10 +256,14 @@ export function TaskApp({ controller, queue, remote }: {
   const [selection, setSelection] = useState<string | null>(null);
   const [view, setView] = useState<'tasks' | 'done' | 'waiting'>('tasks');
   const [checked, setChecked] = useState<{ context: string; ids: string[] }>({ context: '', ids: [] });
+  const styles = saved.workspace?.state.work.settings.workStyles ?? [];
+  const selectedStyles = saved.workspace?.state.work.styleFilter ?? null;
+  const matches = (task: Task) => !filters || (matchesSources(task, saved.workspace?.state.work.sourceFilter?.selectedSources ?? null)
+    && matchesStyles(task, styles, selectedStyles, styleAssessments.values.get(task.id)));
   const selectionContext = JSON.stringify([saved.workspace?.state.activeWorkProfile.id, controller.assessmentGeneration,
-    view, settings, filters, saved.workspace?.state.work.sourceFilter?.selectedSources ?? null]);
+    view, settings, filters, saved.workspace?.state.work.sourceFilter?.selectedSources ?? null, selectedStyles]);
   const selectableIds = saved.workspace && view === 'tasks' && !settings ? rankedTasks(saved.workspace.state)
-    .filter(task => !filters || matchesSources(task, saved.workspace!.state.work.sourceFilter?.selectedSources ?? null))
+    .filter(matches)
     .map(task => task.id) : [];
   const selectableKey = JSON.stringify(selectableIds);
   const checkedIds = checked.context === selectionContext ? checked.ids.filter(id => selectableIds.includes(id)) : [];
@@ -291,13 +320,13 @@ export function TaskApp({ controller, queue, remote }: {
   const sourceFilter = state.work.sourceFilter ?? { selectedSources: null, collapsedProviders: [] };
   const selectedSources = sourceFilter.selectedSources;
   const selectedSourceCount = sources.filter(item => selectedSources === null || selectedSources.includes(item.id)).length;
-  const filterTasks = (tasks: Task[]) => filters ? tasks.filter(task => matchesSources(task, selectedSources)) : tasks;
+  const filterTasks = (tasks: Task[]) => tasks.filter(matches);
   const filteredRanked = filterTasks(ranked);
   const filteredDone = filterTasks(done);
   const filteredWaiting = filterTasks(waiting);
   const unfiltered = view === 'done' ? done : view === 'waiting' ? waiting : ranked;
   const visible = view === 'done' ? filteredDone : view === 'waiting' ? filteredWaiting : filteredRanked;
-  const selected = state.tasks.find(task => task.id === selection && (!filters || matchesSources(task, selectedSources)));
+  const selected = state.tasks.find(task => task.id === selection && matches(task));
   const positions = new Map(ranked.map((task, index) => [task.id, index + 1]));
   const saveFilter = (next: typeof sourceFilter) => {
     try {
@@ -306,6 +335,10 @@ export function TaskApp({ controller, queue, remote }: {
     } catch (error) { controller.report(error); }
   };
   const selectAllSources = () => saveFilter({ ...sourceFilter, selectedSources: null });
+  const saveStyleFilter = (ids: string[] | null) => {
+    try { changeContext(() => queue.saveStyleFilter(ids)); }
+    catch (error) { controller.report(error); }
+  };
   const reasons = new Map(state.work.ranking?.reasons.map(item => [item.id, item.reason]) ?? []);
   const checkedTasks = visible.filter(task => checkedIds.includes(task.id));
   const issueCount = checkedTasks.filter(task => codeJob(task, state) === 'implementation-assessment').length;
@@ -314,7 +347,7 @@ export function TaskApp({ controller, queue, remote }: {
     inspect={id => { setSettings(false); setFilters(false); setView('tasks'); setSelection(id); }} />;
   const runProgress = <RunProgress key={state.activeWorkProfile.id} run={run} details={runDetails}
     cancelAssessor={() => invoke(() => queue.cancelAssessor())} />;
-  return <div className={`task-app ${filters && !settings ? 'task-filter-view' : ''}`}>
+  return <div className={`task-app ${filters && !settings ? `task-filter-view ${styles.length ? 'task-styles-view' : ''}` : ''}`}>
     <a className="skip-link" href={settings ? '#task-settings' : '#ranked-tasks'}>Skip to {settings ? 'settings' : 'tasks'}</a>
     <aside className="task-sidebar" aria-label="Workspace navigation">
       <div className="task-brand"><Github size={20} /><span>GitHub Projects</span></div>
@@ -328,7 +361,20 @@ export function TaskApp({ controller, queue, remote }: {
           aria-expanded={!settings && filters} aria-controls="task-source-tree" onClick={() => {
             if (settings || !filters) changeContext(() => { setSettings(false); setFilters(true); });
           }}>
-          <ListFilter size={17} />Filters<span className="count">{ranked.filter(task => matchesSources(task, selectedSources)).length}</span></button>
+          <ListFilter size={17} />Filters<span className="count">{ranked.filter(task => matchesSources(task, selectedSources)
+            && matchesStyles(task, styles, selectedStyles, styleAssessments.values.get(task.id))).length}</span></button>
+        {filters && !settings && styles.length > 0 && <section className="work-style-filters" aria-label="Filter by work style">
+          <h2>Work styles</h2>
+          <div className="work-style-pills"><button className="work-style-pill" aria-pressed={selectedStyles === null}
+            onClick={() => saveStyleFilter(null)}>All styles</button>
+            {styles.map(style => <button key={style.id} className="work-style-pill" title={style.description}
+              aria-pressed={selectedStyles?.includes(style.id) ?? false} onClick={() => {
+                const next = selectedStyles?.includes(style.id) ? selectedStyles.filter(id => id !== style.id) : [...selectedStyles ?? [], style.id];
+                saveStyleFilter(next.length ? next : null);
+              }}>{style.name}</button>)}
+          </div>
+          <p className="field-help">Match any selected style within your selected sources.</p>
+        </section>}
         {filters && !settings && <SourceTree key={state.activeWorkProfile.id} sources={sources} selected={selectedSources}
           collapsed={sourceFilter.collapsedProviders} counts={sourceCounts(unfiltered)} selectAll={selectAllSources}
           toggle={(ids, checked) => {
@@ -372,6 +418,10 @@ export function TaskApp({ controller, queue, remote }: {
         <button className="secondary" onClick={() => setRecovery(true)}>Export pending results</button>
       </div>}
     </div>}
+    {!settings && styleAssessments.error && <div className="task-error" role="alert">
+      <p>Work styles could not load: {styleAssessments.error} Style filters may be incomplete.</p>
+      <button className="secondary" onClick={styleAssessments.retry}>Retry work styles</button>
+    </div>}
     {saved.assessmentQuarantined.length > 0 && <div className="task-run-details" role="status">
       <p>{saved.assessmentQuarantined.length} results from a previous workspace are kept separately in this session. Export before quitting. Current runs and saves are unaffected.</p>
       <button className="secondary" onClick={() => setRecovery(true)}>Export previous workspace results</button>
@@ -388,6 +438,7 @@ export function TaskApp({ controller, queue, remote }: {
       {filters && <div className="task-filter-summary">
         <span role="status"><strong>{visible.length} of {unfiltered.length} {view === 'tasks' ? 'to dos' : view === 'done' ? 'completed tasks' : 'tasks with no action now'}</strong>
           <span>From {selectedSourceCount} selected {selectedSourceCount === 1 ? 'source' : 'sources'}</span></span>
+        {selectedStyles !== null && <button className="text-button" onClick={() => saveStyleFilter(null)}>Show all styles</button>}
         <button className="text-button" onClick={selectAllSources}>Show all sources</button>
       </div>}
       <div className={`task-body ${selected ? 'task-with-detail' : ''}`}>
@@ -397,6 +448,7 @@ export function TaskApp({ controller, queue, remote }: {
               if (view !== value) changeContext(() => { setView(value); setSelection(null); });
             }}>{title}<span>{count}</span></button>)}</nav>
           {batchProgress}
+          {styleAssessments.loading && styles.length > 0 && <p className="field-help" role="status">Reading saved work styles...</p>}
           {filters && view === 'tasks' && <p className="task-filter-order">Original ranks · Same order as Ranked Tasks</p>}
           {view === 'tasks' && visible.length > 0 && <section className="task-selection" aria-label="Selected tasks">
             <div className="button-row"><span role="status">{checkedIds.length} selected</span>
@@ -429,6 +481,10 @@ export function TaskApp({ controller, queue, remote }: {
               <button className="task-row" aria-current={task.id === selection ? 'true' : undefined} onClick={() => setSelection(task.id)}>
                 <span className="task-title">{task.title}</span>
                 <span className="task-source">{source(task)}</span>
+                {taskStyles(task, styles, styleAssessments.values.get(task.id)).length > 0 && <span className="work-style-pills">
+                  {taskStyles(task, styles, styleAssessments.values.get(task.id)).map(style =>
+                    <span key={style.id} className="work-style-pill" title={style.description}>{style.name}</span>)}
+                </span>}
                 <span className="task-reason">{view === 'waiting' ? task.work?.availabilityReason : view === 'done' ? `Done ${date(task.completedAt ?? null)}`
                   : reasons.get(task.id) ?? 'Not ranked yet · included on the next run'}</span>
                 {task.work?.availability === 'unknown' && <span className="task-uncertain">{task.work.availabilityReason || 'Source state could not be confirmed.'}</span>}
@@ -438,10 +494,11 @@ export function TaskApp({ controller, queue, remote }: {
               }}><Check size={17} /></button>}
             </li>)}
           </ol> : filters ? <div className="task-empty">
-            <h2>{selectedSourceCount ? 'No matching tasks' : 'No sources selected'}</h2>
-            <p>{selectedSourceCount ? 'The selected sources have no tasks in this tab. Choose another source or task tab.'
+            <h2>{styleAssessments.loading && selectedStyles !== null ? 'Reading work styles' : selectedSourceCount ? 'No matching tasks' : 'No sources selected'}</h2>
+            <p>{selectedSourceCount ? 'No tasks match the current filters in this tab. Choose another source, work style or task tab.'
               : 'Select a source in the sidebar to show its tasks. Your tasks are still saved.'}</p>
-            <div className="button-row"><button className="secondary" onClick={selectAllSources}>Show all sources</button></div>
+            <div className="button-row"><button className="secondary" onClick={selectAllSources}>Show all sources</button>
+              {selectedStyles !== null && <button className="secondary" onClick={() => saveStyleFilter(null)}>Show all styles</button>}</div>
           </div> : <div className="task-empty"><h2>{view === 'done' ? 'Nothing completed yet' : view === 'waiting' ? 'No tasks waiting on other people or systems' : 'No tasks to act on'}</h2>
             <p>{view === 'done' ? 'Completed work stays here. Repeated searches will not put it back on your list.'
               : view === 'waiting' ? 'Tasks linked to queued, closed or merged work leave the active list without being marked Done.'
@@ -451,7 +508,8 @@ export function TaskApp({ controller, queue, remote }: {
           </div>}
         </main>
         {selected ? <TaskDetail key={`${state.activeWorkProfile.id}:${selected.id}`} task={selected} reason={reasons.get(selected.id)}
-          queue={queue} controller={controller} remote={remote} close={() => setSelection(null)} batchProgress={batchProgress} />
+          queue={queue} controller={controller} remote={remote} close={() => setSelection(null)} batchProgress={batchProgress}
+          styleAssessment={styleAssessments.values.get(selected.id)} stylesLoading={styleAssessments.loading} stylesError={styleAssessments.error} />
           : <aside className="task-detail task-detail-empty" aria-label="Task details"><h2>Select a task</h2><p>See why it ranks here, read its source, and keep your notes alongside.</p></aside>}
       </div>
     </>}
