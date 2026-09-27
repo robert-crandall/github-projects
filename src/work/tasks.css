@@ -163,7 +163,6 @@ button.work-style-pill[aria-pressed="true"] { border-color: var(--accent); backg
 .task-stream-top .checkbox-label { margin: 0; }
 .task-field-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
 .task-cadence { max-width: 240px; }
-.task-settings-save { margin-top: 24px; }
 .task-connection-info { white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-settings .task-error { padding: 14px 0; background: none; }
 @media (max-width: 1100px) {

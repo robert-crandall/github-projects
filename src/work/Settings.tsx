@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
 import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
 import type { WorkQueue } from './controller.ts';
@@ -30,10 +30,24 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
   const [draft, setDraft] = useState(() => structuredClone(settings));
   const [name, setName] = useState(profileName);
   const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
   const [checking, setChecking] = useState(false);
   const [connectionInfo, setConnectionInfo] = useState('');
-  function change(next: WorkSettings) { setDraft(next); setSaved(false); setError(''); }
+  const [connectionError, setConnectionError] = useState('');
+  function change(next: WorkSettings, nextName = name) {
+    setDraft(next); setName(nextName); setError('');
+    const parsed = workSettingsSchema.safeParse({
+      ...next, streams: next.streams.map(stream => ({ ...stream, tools: stream.tools.map(tool => tool.trim()).filter(Boolean) })),
+    });
+    if (!parsed.success) {
+      setError(parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join(' '));
+      return;
+    }
+    const invalidMcp = parsed.data.streams.find(stream => stream.enabled && !isGitHubStream(stream)
+      && (!stream.server.trim() || !stream.tools.length || stream.tools.includes('*')));
+    if (invalidMcp) { setError(`${invalidMcp.name}: choose a server and name its allowed read tools. Wildcards are not allowed.`); return; }
+    try { queue.saveSettings(parsed.data, nextName); }
+    catch (error) { setError(error instanceof Error ? error.message : 'Settings could not be saved.'); }
+  }
   function agentChange(job: keyof typeof agentJobs, patch: Partial<Pick<TaskAgent, 'name' | 'instructions' | 'model'>>) {
     change({
       ...draft, agents: taskAgents(draft).map(agent => agent.jobType === job ? { ...agent, ...patch } : agent),
@@ -43,40 +57,28 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
   function streamChange(id: string, patch: Partial<Workstream>) {
     change({ ...draft, streams: draft.streams.map(stream => stream.id === id ? { ...stream, ...patch } : stream) });
   }
-  function save(event: FormEvent) {
-    event.preventDefault();
-    const parsed = workSettingsSchema.safeParse({
-      ...draft, streams: draft.streams.map(stream => ({ ...stream, tools: stream.tools.map(tool => tool.trim()).filter(Boolean) })),
-    });
-    if (!parsed.success) { setError(parsed.error.issues.map(issue => issue.message).join(' ')); return; }
-    const invalidMcp = parsed.data.streams.find(stream => stream.enabled && !isGitHubStream(stream)
-      && (!stream.server.trim() || !stream.tools.length || stream.tools.includes('*')));
-    if (invalidMcp) { setError(`${invalidMcp.name}: choose a server and name its allowed read tools. Wildcards are not allowed.`); return; }
-    try { queue.saveSettings(parsed.data, name); setSaved(true); }
-    catch (error) { setError(error instanceof Error ? error.message : 'Settings could not be saved.'); }
-  }
   async function connections() {
-    setChecking(true); setError('');
+    setChecking(true); setConnectionError('');
     try {
       await queue.connections();
       const info = queue.getSnapshot().connections;
       setConnectionInfo(info ? `${info.instructions}\n${info.servers.map(server =>
         `${server.name} (${server.source})${server.tools.length ? `: ${server.tools.join(', ')}` : ''}`).join('\n')}` : 'No connection information was returned.');
-    } catch (error) { setError(error instanceof Error ? error.message : 'Connections could not be read.'); }
+    } catch (error) { setConnectionError(error instanceof Error ? error.message : 'Connections could not be read.'); }
     finally { setChecking(false); }
   }
   return <main id="task-settings" className="task-settings">
     <header className="task-settings-heading"><button className="quiet" onClick={close}><ArrowLeft size={16} />Back to tasks</button><h1>Settings</h1>
       <p>Choose sources and configure each agent's judgment. Run now collects, assesses and prioritizes; agents can also run separately.</p>
+      <p>Changes save automatically. Complete any invalid fields to save pending edits.</p>
+      {error && <p className="task-error" role="alert">Changes not saved. {error}</p>}
     </header>
     {batchProgress}
     <Appearance />
-    <form onSubmit={save}>
+    <form onSubmit={event => event.preventDefault()}>
       <section aria-labelledby="profile-heading"><h2 id="profile-heading">Work profile</h2>
         <label htmlFor="profile-name">Profile name</label>
-        <input id="profile-name" value={name} maxLength={80} required onChange={event => {
-          setName(event.target.value); setSaved(false); setError('');
-        }} />
+        <input id="profile-name" value={name} maxLength={80} required onChange={event => change(draft, event.target.value)} />
         <p>Agents, sources, schedule and tasks belong to this profile. Switch profiles or add one from the task list.</p>
       </section>
       <section aria-labelledby="work-styles-heading">
@@ -100,7 +102,7 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
             onClick={() => change({ ...draft, workStyles: draft.workStyles!.filter(item => item.id !== style.id) })}>
             <Trash2 size={15} />Remove style</button>
         </fieldset>)}
-        <p className="field-help">Save definitions, then use Assess selected for existing tasks. New tasks get styles with their first assessment.
+        <p className="field-help">Definitions save automatically when complete. Use Assess selected for existing tasks. New tasks get styles with their first assessment.
           Corrections stay yours until you choose Use Copilot assignments. Removing a style hides its pills without deleting assessment history.</p>
       </section>
       <section aria-labelledby="agents-heading"><h2 id="agents-heading">Task agents</h2>
@@ -186,13 +188,11 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
         <p>Runs only while this profile is selected and the app is open, including hidden in the menu bar. After sleep, it catches up once. Quitting stops scheduled runs.</p>
         <p className="field-help">Run now and scheduled runs use these sources and both agents, reusing current results. Separate agent runs do not collect sources or change this schedule.</p>
       </section>
-      {error && <p className="task-error" role="alert">{error}</p>}
-      {saved && <p role="status">Settings applied. The save status below confirms when they reach disk.</p>}
-      <div className="task-settings-save"><button type="submit" className="primary">Save settings</button></div>
     </form>
     <section aria-labelledby="connections-heading"><h2 id="connections-heading">Connections and intake</h2>
       <p>GitHub uses your GitHub CLI sign-in. MCP source connections stay in backend configuration, never in task data.</p>
       <button className="secondary" disabled={checking} onClick={() => void connections()}>{checking ? 'Reading connections...' : 'Read MCP connections'}</button>
+      {connectionError && <p className="task-error" role="alert">{connectionError}</p>}
       {connectionInfo && <p className="task-connection-info" role="status">{connectionInfo}</p>}
       <p>A Slack connection saved in Copilot app settings is not automatically shared with this app. Read connections for setup details.</p>
       <p>External agents can submit tasks through this app's MCP server. The next run adds them to the selected profile.

@@ -27,7 +27,7 @@ The tag starts a GitHub Actions build on an Apple silicon runner and publishes t
 
 ## Work top to bottom
 
-1. Open **Settings**. Configure sources and the **Task assessor** and **Task prioritizer**, each with its own name, instructions and model.
+1. Open **Settings**. Configure sources and the **Task assessor** and **Task prioritizer**, each with its own name, instructions and model. Changes save automatically; complete any invalid fields to save pending edits. The footer confirms when changes reach disk.
 2. Choose **Run now**. The app collects requests, reconciles task identity and completion, and asks Copilot to order all actionable tasks with reasons.
 3. Work down the list. **Done** is local; it does not submit a review, close an issue or acknowledge a notification.
 4. Optionally enable a cadence. Runs continue while the app is running, including hidden in the menu bar. An overdue schedule catches up once after sleep or relaunch; quitting stops it.
@@ -56,7 +56,7 @@ Selections and collapsed groups save automatically per work profile, including a
 
 ### Work styles
 
-In **Settings → Work styles**, define names and descriptions for this profile. There are no required categories: Quick wins and Deep focus are examples, not defaults. The Task assessor assigns zero or more matching styles from task evidence. For tasks with existing assessments, save your definitions and use **Assess selected**; changing definitions never automatically reruns an assessment.
+In **Settings → Work styles**, define names and descriptions for this profile. There are no required categories: Quick wins and Deep focus are examples, not defaults. The Task assessor assigns zero or more matching styles from task evidence. Complete definitions save automatically. For tasks with existing assessments, use **Assess selected**; changing definitions never automatically reruns an assessment.
 
 Styles appear as pills on task rows. **Filters → Work styles** matches any selected style within the selected sources, preserving original ranks across To do, Done and No action now. **All styles** includes unclassified tasks. Filter choices persist per profile; **Ranked Tasks** bypasses both source and style filters.
 
@@ -124,7 +124,7 @@ Done records handled evidence and a completion boundary. A repeated search, an o
 
 ### GitHub notifications
 
-In **Settings**, choose **Add GitHub notifications**, then **Save settings**. The source joins the same manual or scheduled run as saved searches. Use it instead of broad mentions searches; keep assigned-work, review-request and project backlog searches separately. Adding notifications does not rewrite or remove saved queries.
+In **Settings**, choose **Add GitHub notifications**. The source saves automatically and joins the same manual or scheduled run as saved searches. Use it instead of broad mentions searches; keep assigned-work, review-request and project backlog searches separately. Adding notifications does not rewrite or remove saved queries.
 
 The first scan covers the last **30 days**. Later scans include both read and unread issue/PR notifications updated since the last successful run. Reading a notification elsewhere does not finish a task. Large backlogs advance oldest-first across runs, with the remaining history shown in the task list. The saved cursor advances only through successfully inspected history, never beyond the run's start, after collection, ranking and persistence succeed. Failures retain the previous boundary for retry.
 
