@@ -34,6 +34,8 @@ The tag starts a GitHub Actions build on an Apple silicon runner and publishes t
 
 Manual tasks save offline immediately and join the ranking on the next run. A failed model call preserves new discoveries and the previous order, with unranked tasks visible. **Coverage and run details** holds source warnings and run failures without a duplicate error banner above the task list. Storage and local action failures stay visible separately. Source failures never masquerade as successful empty results.
 
+Open **More run actions** beside **Run now** to run **Run assessor** or **Run prioritizer** separately. **Run now** remains the default action.
+
 **Run assessor**, **Run now** and the opted-in schedule only assess tasks with no saved assessment history. Age, changed source state and edits do not automatically regenerate a saved judgment. **Assess task** and **Assess selected** explicitly create fresh versions when the work needs reassessment.
 
 **Run prioritizer** refreshes tracked GitHub source state without collecting new tasks or calling the assessor, then orders the whole eligible list from saved judgments. Draft, CI, head revision and readiness are separate from permanent assessments. Current source state overrides historical readiness claims; unavailable or incomplete state stays unknown. Review-readiness demotion applies to review actions, not fixing your own PR's CI or advancing active work. **Task details → Current PR status** shows the last observation separately from assessment history. A failed refresh or missing assessment preserves the previous order. Separate agent runs never advance the collection cursor or schedule.
