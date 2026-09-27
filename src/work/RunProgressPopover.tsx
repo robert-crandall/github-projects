@@ -99,7 +99,7 @@ export function RunProgressPopover({ run, details, error, profileName, cancelAss
           trigger.current?.focus({ preventScroll: true });
         }}><X size={17} aria-hidden="true" /></button>
       </header>
-      <RunProgress run={run} details={details} cancelAssessor={cancelAssessor} />
+      <RunProgress run={run} details={details} cancelAssessor={cancelAssessor} announcePhase={false} />
       <p className="task-run-popover-footer">{run.running ? 'You can keep working while this runs.' : 'Details remain available until the next run.'}</p>
     </section>}
   </div>;

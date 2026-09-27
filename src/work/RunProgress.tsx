@@ -15,8 +15,8 @@ const phases: Record<WorkQueueSnapshot['phase'], string> = {
   cancelled: 'Assessment cancelled · Saved batches kept · Order unchanged',
 };
 
-export function RunProgress({ run, details, cancelAssessor }: {
-  run: WorkQueueSnapshot; details: string[]; cancelAssessor: () => void;
+export function RunProgress({ run, details, cancelAssessor, announcePhase = true }: {
+  run: WorkQueueSnapshot; details: string[]; cancelAssessor: () => void; announcePhase?: boolean;
 }) {
   const { progress } = run;
   const [now, setNow] = useState(Date.now);
@@ -73,7 +73,7 @@ export function RunProgress({ run, details, cancelAssessor }: {
           <span className="task-run-done" style={{ width: `${assessment.saved / assessment.total * 100}%` }} />
         </div>}
       </div>}
-      <div className="task-run-now"><span role="status">{phase}</span><span>Elapsed {elapsed}</span></div>
+      <div className="task-run-now"><span role={announcePhase ? 'status' : undefined}>{phase}</span><span>Elapsed {elapsed}</span></div>
       {canCancel && <button className="secondary task-run-cancel" disabled={run.cancelRequested}
         onClick={cancelAssessor}>{run.cancelRequested ? 'Cancelling...' : 'Cancel assessment'}</button>}
     </>}

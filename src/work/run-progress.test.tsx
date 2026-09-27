@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { WorkQueueSnapshot } from './controller.ts';
+import { RunProgress } from './RunProgress.tsx';
 import { RunProgressPopover } from './RunProgressPopover.tsx';
 
 function snapshot(patch: Partial<WorkQueueSnapshot> = {}): WorkQueueSnapshot {
@@ -35,6 +36,24 @@ test('all active phases retain an activity indicator rather than claiming comple
     expect(html).toContain(`aria-label="Run details: ${label}"`);
     expect(html).toContain('task-run-spinner');
     expect(html).not.toContain('Run complete');
+  }
+});
+
+test('inline progress announces phases by default but popover details can defer to their owner', () => {
+  for (const [phase, label] of [
+    ['assessing', 'Assessing tasks'], ['ranking', 'Ranking tasks'], ['saving', 'Saving results'], ['idle', 'Run complete'],
+  ] as const) {
+    const run = snapshot({ phase, running: phase !== 'idle', progress: {
+      startedAt: 0, finishedAt: phase === 'idle' ? 1000 : null, sources: [], assessment: { total: 1, saved: 0, batches: 0 },
+    } });
+    const inline = renderToStaticMarkup(<RunProgress run={run} details={[]} cancelAssessor={() => {}} />);
+    const owned = renderToStaticMarkup(<RunProgress run={run} details={[]} cancelAssessor={() => {}} announcePhase={false} />);
+    expect(inline).toContain(`<span role="status">${label}</span>`);
+    expect(owned).toContain(`<span>${label}</span>`);
+    expect(owned).not.toContain(`<span role="status">${label}</span>`);
+    expect(owned.match(/role="status"/g)).toHaveLength(2);
+    expect(owned).toContain('aria-label="Assessments saved"');
+    expect(owned).not.toContain('aria-hidden="true"');
   }
 });
 
