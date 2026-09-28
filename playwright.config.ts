@@ -10,7 +10,7 @@ export default defineConfig({
   },
   projects: [
     { name: 'desktop', testMatch: 'desktop.spec.ts', use: { baseURL: 'http://127.0.0.1:1420' } },
-    { name: 'tasks', testMatch: 'tasks.spec.ts', use: { baseURL: 'http://127.0.0.1:1420' } },
+    { name: 'tasks', testMatch: ['tasks.spec.ts', 'profile-switcher.spec.ts'], use: { baseURL: 'http://127.0.0.1:1420' } },
     { name: 'themes', testMatch: 'themes.spec.ts', use: { baseURL: 'http://127.0.0.1:1420' } },
   ],
   webServer: [{
