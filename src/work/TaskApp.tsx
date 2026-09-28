@@ -16,6 +16,7 @@ import { canonicalSource, rankedTasks } from './engine.ts';
 import { Settings } from './Settings.tsx';
 import { RunProgress } from './RunProgress.tsx';
 import { RunProgressPopover } from './RunProgressPopover.tsx';
+import { ProfileSwitcher } from './ProfileSwitcher.tsx';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
@@ -386,6 +387,11 @@ export function TaskApp({ controller, queue, remote }: {
             ? [...sourceFilter.collapsedProviders, provider] : sourceFilter.collapsedProviders.filter(item => item !== provider) })} />}
       </nav>
       <div className="task-sidebar-bottom">
+        <ProfileSwitcher profiles={workProfiles(state)} active={state.activeWorkProfile} busy={profileBusy}
+          select={id => {
+            try { queue.switchProfile(id); setSelection(null); setView('tasks'); }
+            catch (error) { controller.report(error); }
+          }} add={() => setNewProfile(true)} />
         <button className="nav-link" aria-current={settings ? 'page' : undefined} onClick={() => {
           if (!settings) changeContext(() => setSettings(true));
         }}><Settings2 size={17} />Settings</button>
@@ -401,20 +407,6 @@ export function TaskApp({ controller, queue, remote }: {
           profileName={state.activeWorkProfile.name} cancelAssessor={() => invoke(() => queue.cancelAssessor())} />
       </div>
     </header>}
-    {!settings && <div className="task-profile-bar">
-      <label htmlFor="work-profile">Work profile</label>
-      <select id="work-profile" value={state.activeWorkProfile.id} disabled={profileBusy}
-        aria-describedby="work-profile-help" onChange={event => {
-          try { queue.switchProfile(event.target.value); setSelection(null); setView('tasks'); }
-          catch (error) { controller.report(error); }
-        }}>
-        {workProfiles(state).map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
-      </select>
-      <button className="quiet" disabled={profileBusy} onClick={() => setNewProfile(true)}><Plus size={15} />Add profile</button>
-      <p id="work-profile-help" className="field-help">{profileBusy
-        ? 'Profiles can be switched after the current run or unsubscribe finishes.'
-        : 'Only this profile collects and ranks work. Other task lists stay saved.'}</p>
-    </div>}
     {error && <div className="task-error" role="alert">
       <p>{error}</p>
       {saved.persistence.error && <button className="secondary" onClick={() => invoke(() => controller.retryStorage())}>Retry storage</button>}

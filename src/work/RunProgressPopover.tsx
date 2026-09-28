@@ -1,7 +1,8 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, CircleAlert, LoaderCircle, X } from 'lucide-react';
 import type { WorkQueueSnapshot } from './controller.ts';
 import { RunProgress } from './RunProgress.tsx';
+import { usePopoverDismissal } from './usePopoverDismissal.ts';
 
 const activityLabels: Record<WorkQueueSnapshot['phase'], string> = {
   preparing: 'Preparing', intake: 'Reading intake', collecting: 'Collecting',
@@ -18,6 +19,7 @@ export function RunProgressPopover({ run, details, error, profileName, cancelAss
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
   const id = useId();
+  const close = usePopoverDismissal(open, container, panel, trigger, setOpen);
   const available = !!run.progress || details.length > 0;
   const failed = run.progress?.sources.filter(source => source.state === 'failed').length ?? 0;
   const notes = details.length > 0 || run.progress?.sources.some(source => source.diagnostics.length > 0);
@@ -56,29 +58,6 @@ export function RunProgressPopover({ run, details, error, profileName, cancelAss
     };
   }, [open, available, status]);
 
-  useEffect(() => {
-    if (!open) return;
-    const dismiss = (event: PointerEvent) => {
-      if (event.target instanceof Node && !container.current?.contains(event.target)) {
-        setOpen(false);
-        if (panel.current?.contains(document.activeElement)) trigger.current?.focus({ preventScroll: true });
-      }
-    };
-    const escape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      trigger.current?.focus({ preventScroll: true });
-    };
-    document.addEventListener('pointerdown', dismiss);
-    document.addEventListener('keydown', escape, true);
-    return () => {
-      document.removeEventListener('pointerdown', dismiss);
-      document.removeEventListener('keydown', escape, true);
-    };
-  }, [open]);
-
   if (!available) return null;
   return <div className="task-run-activity" ref={container} onBlur={event => {
     if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
@@ -94,10 +73,7 @@ export function RunProgressPopover({ run, details, error, profileName, cancelAss
       <header className="task-run-popover-heading">
         <div><h2 id={`${id}-title`}>{run.running ? 'Current run' : 'Last run'}</h2>
           <p>{profileName} · {scope}</p></div>
-        <button className="icon-button" aria-label="Close run details" onClick={() => {
-          setOpen(false);
-          trigger.current?.focus({ preventScroll: true });
-        }}><X size={17} aria-hidden="true" /></button>
+        <button className="icon-button" aria-label="Close run details" onClick={close}><X size={17} aria-hidden="true" /></button>
       </header>
       <RunProgress run={run} details={details} cancelAssessor={cancelAssessor} announcePhase={false} />
       <p className="task-run-popover-footer">{run.running ? 'You can keep working while this runs.' : 'Details remain available until the next run.'}</p>

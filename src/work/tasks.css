@@ -7,7 +7,7 @@
 .task-sidebar .count { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; }
 .task-sidebar .nav-link[aria-current] { color: var(--text); background: var(--selected); }
 .task-sidebar .nav-link[aria-current] svg { color: var(--accent); }
-.task-sidebar-bottom { margin-top: auto; }
+.task-sidebar-bottom { margin-top: auto; min-width: 0; }
 .task-sidebar-bottom > p { color: var(--secondary); font-size: 12px; padding: 20px 10px 0; }
 .task-workspace { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .task-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; padding: 24px 28px 16px; }
@@ -19,10 +19,30 @@
 .task-run-options p { margin: 0 10px 10px; font-size: 12px; color: var(--secondary); }
 .task-brand { display: flex; align-items: center; gap: 12px; }
 .task-brand h1 { font-size: 25px; }
-.task-profile-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 28px 16px; }
-.task-profile-bar label { margin: 0; }
-.task-profile-bar select { width: auto; max-width: min(100%, 320px); min-width: 0; }
-.task-profile-bar .field-help { flex-basis: 100%; margin: 0; }
+.task-profile-switcher { min-width: 0; margin-bottom: 8px; }
+.task-profile-trigger { width: 100%; padding: 9px 10px; gap: 10px; border-color: var(--border); text-align: left; }
+.task-profile-trigger[aria-expanded="true"] { border-color: var(--accent); background: var(--selected); }
+.task-profile-trigger > svg { color: var(--secondary); }
+.task-profile-identity { flex: 1; min-width: 0; }
+.task-profile-identity > span { display: block; font-size: 12px; color: var(--secondary); }
+.task-profile-identity strong { display: block; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-profile-popover { position: fixed; z-index: 5; width: min(290px, calc(100vw - 24px)); max-height: min(380px, calc(100dvh - 24px)); overflow-y: auto; overscroll-behavior: contain; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--sidebar); box-shadow: 0 12px 32px #0006; }
+.task-profile-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 4px 0 10px; }
+.task-profile-heading h2 { font-size: 14px; }
+.task-profile-popover > p { padding: 4px 10px 10px; font-size: 12px; color: var(--secondary); overflow-wrap: anywhere; }
+.task-profile-popover > p[role="status"] { color: var(--warning); }
+.task-profile-choices { border-top: 1px solid var(--border); padding: 6px 0; }
+.task-profile-choices button, .task-profile-add button { display: flex; width: 100%; justify-content: flex-start; gap: 10px; min-height: 38px; padding: 8px 10px; text-align: left; font-size: 13px; }
+.task-profile-choices button[aria-pressed="true"] { background: var(--selected); }
+.task-profile-check { width: 15px; flex-shrink: 0; color: var(--accent); }
+.task-profile-name { min-width: 0; overflow-wrap: anywhere; }
+.task-profile-choices small { margin-left: auto; flex-shrink: 0; color: var(--secondary); font-size: 12px; }
+.task-profile-add { border-top: 1px solid var(--border); padding-top: 6px; }
+@media (max-width: 900px) {
+  .task-profile-switcher { width: 180px; max-width: 100%; margin: 0; }
+  .task-sidebar-bottom { flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }
+}
+
 .task-shortcut { color: var(--secondary); margin-left: 12px; font-size: 12px; }
 .task-context { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding: 0 28px 18px; color: var(--secondary); font-size: 13px; }
 .task-context > span { line-height: 1.65; }
@@ -206,7 +226,6 @@ button.work-style-pill[aria-pressed="true"] { border-color: var(--accent); backg
   .task-top .secondary, .task-top .primary { padding: 7px 9px; }
   .task-shortcut { display: none; }
   .task-context { padding: 0 20px 22px; }
-  .task-profile-bar { padding: 0 20px 20px; }
   .task-main { padding: 0 20px 40px; }
   .task-body { grid-template-columns: minmax(0, 1fr); }
   .task-with-detail .task-main { display: none; }

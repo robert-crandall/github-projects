@@ -10,6 +10,11 @@ import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
 
 test.use({ referenceWorkspace: false });
 
+async function chooseProfile(page: Page, name: string) {
+  await page.getByRole('button', { name: /^Work profile / }).click();
+  await page.getByRole('region', { name: 'Work profiles', exact: true }).getByRole('button', { name, exact: true }).click();
+}
+
 test('settings autosave each edit while focused and retain the latest edit after navigation and relaunch', async ({ page, native }) => {
   await page.goto('/');
   await persisted(page);
@@ -178,7 +183,7 @@ test('run popover keeps layout and selection stable, dismisses without trapping 
   await openRunDetails(page);
   await page.keyboard.press('Tab');
   await page.keyboard.press('Tab');
-  await expect(page.getByLabel('Work profile', { exact: true })).toBeFocused();
+  await expect(page.getByRole('button', { name: /^To do/ })).toBeFocused();
   await expect(panel).toHaveCount(0);
   for (const control of [trigger, page.getByRole('button', { name: 'Close run details' })]) {
     await openRunDetails(page);
@@ -927,6 +932,7 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await page.getByLabel('What should come first?').fill('Roadmap first');
   await persisted(page);
   await page.getByRole('button', { name: 'Back to tasks' }).click();
+  await page.getByRole('button', { name: /^Work profile / }).click();
   await page.getByRole('button', { name: 'Add profile', exact: true }).click();
   const modal = page.getByRole('dialog', { name: 'Add work profile' });
   await expect(modal.getByLabel('Profile name')).toBeFocused();
@@ -938,7 +944,6 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await page.getByLabel('What should come first?').fill('Incidents first');
   await page.getByLabel('Profile name').fill('Incident response');
   await persisted(page);
-  const profileId = native.state.activeWorkProfile.id;
   expect(native.state.work.settings.schedule.enabled).toBe(false);
   await page.getByRole('button', { name: 'Back to tasks' }).click();
   await expect(page.locator('.task-title')).toHaveCount(0);
@@ -950,13 +955,13 @@ test('work profiles preserve separate tasks and priorities across switching and 
   expect(request.input.tasks.map(task => task.title)).not.toContain('Regular task');
   await page.screenshot({ path: testInfo.outputPath('work-profiles-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByLabel('Work profile', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Work profile Incident response', exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath('work-profiles-narrow.png') });
 
   await openRunDetails(page);
   await expect(page.locator('.task-run-popover')).toContainText('Incident response · Collect, assess, prioritize');
-  await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await chooseProfile(page, 'Default');
   await expect(page.getByRole('button', { name: /^Run details:/ })).toHaveCount(0);
   await expect(page.locator('.task-run-popover')).toHaveCount(0);
   await persisted(page);
@@ -966,16 +971,17 @@ test('work profiles preserve separate tasks and priorities across switching and 
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.getByLabel('What should come first?')).toHaveValue('Roadmap first');
   await page.getByRole('button', { name: 'Back to tasks' }).click();
-  await page.getByLabel('Work profile', { exact: true }).selectOption(profileId);
+  await chooseProfile(page, 'Incident response');
   await persisted(page);
   await page.reload();
-  await expect(page.getByLabel('Work profile', { exact: true })).toHaveValue(profileId);
+  await expect(page.getByRole('button', { name: 'Work profile Incident response', exact: true })).toBeVisible();
   await expect(page.locator('.task-title')).toContainText(['Review the relay rollout', 'Investigate incident']);
   expect(native.state.inactiveWorkProfiles[0]!.tasks[0]!.status).toBe('done');
 });
 
 test('profile creation reports duplicate names and starts empty without copying', async ({ page, native }) => {
   await page.goto('/');
+  await page.getByRole('button', { name: /^Work profile / }).click();
   await page.getByRole('button', { name: 'Add profile', exact: true }).click();
   const modal = page.getByRole('dialog', { name: 'Add work profile' });
   await modal.getByLabel('Profile name').fill(' default ');
@@ -1000,12 +1006,14 @@ test('profile selection and creation wait for an in-flight ranking', async ({ pa
   native.holdRank = gate();
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
   await expect.poll(() => native.requests.filter(request => request.op === 'work.rank').length).toBe(1);
-  await expect(page.getByLabel('Work profile', { exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: /^Work profile / }).click();
+  const profiles = page.getByRole('region', { name: 'Work profiles', exact: true });
+  await expect(profiles.getByRole('button', { name: 'Default', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'Add profile', exact: true })).toBeDisabled();
   await expect(page.getByText('Profiles can be switched after the current run or unsubscribe finishes.')).toBeVisible();
   native.holdRank.release();
   native.holdRank = undefined;
-  await expect(page.getByLabel('Work profile', { exact: true })).toBeEnabled();
+  await expect(profiles.getByRole('button', { name: 'Default', exact: true })).toBeEnabled();
   await expect(page.getByRole('button', { name: 'Add profile', exact: true })).toBeEnabled();
 });
 
@@ -1455,7 +1463,7 @@ test('live collection progress shows partial failure, elapsed time and a keyboar
   await expect(progress).toHaveAttribute('aria-valuemax', '6');
   await expect(progress).toHaveAttribute('aria-valuenow', '0');
   await expect(region).toContainText(`Now: ${sources[0]!.name}`);
-  await expect(page.getByLabel('Work profile', { exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /^Work profile / })).toBeEnabled();
   await expect(details).not.toHaveAttribute('open', '');
   await details.locator('summary').focus();
   await page.keyboard.press('Space');
@@ -1661,8 +1669,8 @@ test('explicit task selection is keyboard accessible, context-bound, local-only 
   await page.getByRole('button', { name: /^To do/ }).click();
   await expect(selected).toContainText('0 selected');
   await checkbox.check();
-  await page.getByLabel('Work profile', { exact: true }).selectOption({ label: 'On call' });
-  await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await chooseProfile(page, 'On call');
+  await chooseProfile(page, 'Default');
   await expect(checkbox).not.toBeChecked();
   await checkbox.check();
   await page.getByRole('button', { name: 'Mark done: Shared review', exact: true }).click();
@@ -1954,10 +1962,10 @@ test('source selections and collapsed groups persist per profile and report fail
   await page.locator('.task-source-tree summary').filter({ hasText: /^GitHub$/ }).click();
   await persisted(page);
   const selected = structuredClone(native.state.work.sourceFilter);
-  await page.getByLabel('Work profile', { exact: true }).selectOption({ label: 'On call' });
+  await chooseProfile(page, 'On call');
   await expect(page.getByRole('checkbox', { name: 'Manual tasks', exact: true })).toBeChecked();
   await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).toBeVisible();
-  await page.getByLabel('Work profile', { exact: true }).selectOption('default');
+  await chooseProfile(page, 'Default');
   await expect(page.getByRole('checkbox', { name: 'Manual tasks', exact: true })).not.toBeChecked();
   await expect(page.getByRole('checkbox', { name: 'Select all GitHub sources' })).not.toBeVisible();
   await persisted(page);
