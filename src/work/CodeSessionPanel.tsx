@@ -87,6 +87,7 @@ export function CodeSessionPanel({ task, controller, sessions, workBusy }: {
   const [page, setPage] = useState<{ key: string; page: CodeRunPage }>();
   const [cursor, setCursor] = useState<number | null>(null);
   const [selected, setSelected] = useState('');
+  const [expanded, setExpanded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState('');
   const key = JSON.stringify([profileId, task.id, task.assessmentTaskIds, saved.codeRevision, state.revision, controller.assessmentGeneration, cursor, attempt]);
@@ -104,34 +105,41 @@ export function CodeSessionPanel({ task, controller, sessions, workBusy }: {
     && (run.intent.input.taskId === task.id || task.assessmentTaskIds?.includes(run.intent.input.taskId)));
   const versions = page?.key === key ? page.page.runs : [];
   const result = versions.find(run => run.intent.runId === selected) ?? versions[0];
-  return <section className="code-sessions" aria-label="Code sessions"><h3>Code sessions</h3>
-    {!source && task.work && githubReference(task.work.url) && <p className="field-help">Source kind unknown: this saved issue-form link may identify a PR. Run now to collect its GitHub source before starting a code job. Nothing is fetched on selection.</p>}
-    {source && <div className="button-row"><button className="secondary" disabled={state.busy || workBusy}
-      onClick={() => invoke(() => sessions.start(task.id))}>{source.kind === 'pr' ? 'Review PR' : 'Assess implementation'}</button>
-      {active && active.phase !== 'saving' && <button className="secondary" disabled={active.phase === 'cancelling'}
-        onClick={() => invoke(() => sessions.cancel())}>{state.batch?.running ? 'Stop batch' : 'Cancel code job'}</button>}
-    </div>}
-    {active && state.batch?.running && <p className="field-help">Stop batch cancels the current code job and leaves remaining tasks not started.</p>}
-    {active && <p role="status">{active.phase === 'preparing' ? 'Saving start before contacting GitHub...' : active.phase === 'cancelling'
-      ? 'Cancellation requested. Waiting for the actual outcome...' : active.phase === 'saving' ? 'Saving code result...'
-      : 'Reading pinned code and running the agent (up to three minutes)...'}</p>}
-    {state.busy && !active && <p role="status">Waiting for the previous code job to finish before starting another Copilot run...</p>}
-    {state.error && <p role="alert">{state.error}</p>}
-    {!active && !result && !pending.length && !error && <p className="field-help">No saved code sessions. Only an explicit task action contacts GitHub and Copilot.</p>}
-    {error && <><p role="alert">{error}</p><button className="secondary" onClick={() => setAttempt(value => value + 1)}>Retry code history</button></>}
-    {pending.map(value => <div key={value.intent.runId}>
-      <p role="alert">{saved.codeError || (saved.codeSaving.includes(value.intent.runId) ? 'Saving code result...' : 'This result is not saved. Retry saving or export it.')}</p>
-      <CodeRunResult controller={controller} run={{ generation: value.generation, intent: value.intent, outcome: value.outcome, sequence: 1, quarantined: false }} pending />
-      <div className="button-row"><button className="secondary" disabled={saved.codeSaving.includes(value.intent.runId)}
-        onClick={() => invoke(() => controller.retryCodeRun(value.intent.runId))}>Retry saving result</button>
-        <button className="secondary" onClick={() => downloadBackup(JSON.stringify(value), 'code-result.json')}>Export this result</button></div>
-    </div>)}
-    {result && <><label>Code session version<select value={result.intent.runId} onChange={event => setSelected(event.target.value)}>
-      {versions.map(run => <option key={run.intent.runId} value={run.intent.runId}>Version {run.sequence} - {labels[run.outcome.status]} - {new Date(run.intent.startedAt).toLocaleString()}</option>)}
-    </select></label><CodeRunResult run={result} controller={controller} /></>}
-    <div className="button-row">
-      {cursor !== null && <button className="secondary" onClick={() => setCursor(null)}>Latest code sessions</button>}
-      {page?.key === key && page.page.before !== null && <button className="secondary" onClick={() => setCursor(page.page.before)}>Older code sessions</button>}
-    </div>
+  useEffect(() => {
+    if (active || pending.length || error || state.error || state.busy) setExpanded(true);
+  }, [active, pending.length, error, state.error, state.busy]);
+  return <section className="code-sessions" aria-label="Code sessions">
+    <details className="task-disclosure" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+      <summary>{source?.kind === 'pr' ? 'PR reviewer' : source?.kind === 'issue' ? 'Implementation assessor' : 'Code sessions'}
+        {active ? ' - In progress' : result ? ` - ${labels[result.outcome.status]}` : ''}</summary>
+      {!source && task.work && githubReference(task.work.url) && <p className="field-help">Source kind unknown: this saved issue-form link may identify a PR. Run now to collect its GitHub source before starting a code job. Nothing is fetched on selection.</p>}
+      {source && <div className="button-row"><button className="secondary" disabled={state.busy || workBusy}
+        onClick={() => invoke(() => sessions.start(task.id))}>{source.kind === 'pr' ? 'Review PR' : 'Assess implementation'}</button>
+        {active && active.phase !== 'saving' && <button className="secondary" disabled={active.phase === 'cancelling'}
+          onClick={() => invoke(() => sessions.cancel())}>{state.batch?.running ? 'Stop batch' : 'Cancel code job'}</button>}
+      </div>}
+      {active && state.batch?.running && <p className="field-help">Stop batch cancels the current code job and leaves remaining tasks not started.</p>}
+      {active && <p role="status">{active.phase === 'preparing' ? 'Saving start before contacting GitHub...' : active.phase === 'cancelling'
+        ? 'Cancellation requested. Waiting for the actual outcome...' : active.phase === 'saving' ? 'Saving code result...'
+        : 'Reading pinned code and running the agent (up to three minutes)...'}</p>}
+      {state.busy && !active && <p role="status">Waiting for the previous code job to finish before starting another Copilot run...</p>}
+      {state.error && <p role="alert">{state.error}</p>}
+      {!active && !result && !pending.length && !error && <p className="field-help">No saved code sessions. Only an explicit task action contacts GitHub and Copilot.</p>}
+      {error && <><p role="alert">{error}</p><button className="secondary" onClick={() => setAttempt(value => value + 1)}>Retry code history</button></>}
+      {pending.map(value => <div key={value.intent.runId}>
+        <p role="alert">{saved.codeError || (saved.codeSaving.includes(value.intent.runId) ? 'Saving code result...' : 'This result is not saved. Retry saving or export it.')}</p>
+        <CodeRunResult controller={controller} run={{ generation: value.generation, intent: value.intent, outcome: value.outcome, sequence: 1, quarantined: false }} pending />
+        <div className="button-row"><button className="secondary" disabled={saved.codeSaving.includes(value.intent.runId)}
+          onClick={() => invoke(() => controller.retryCodeRun(value.intent.runId))}>Retry saving result</button>
+          <button className="secondary" onClick={() => downloadBackup(JSON.stringify(value), 'code-result.json')}>Export this result</button></div>
+      </div>)}
+      {result && <><label>Code session version<select value={result.intent.runId} onChange={event => setSelected(event.target.value)}>
+        {versions.map(run => <option key={run.intent.runId} value={run.intent.runId}>Version {run.sequence} - {labels[run.outcome.status]} - {new Date(run.intent.startedAt).toLocaleString()}</option>)}
+      </select></label><CodeRunResult run={result} controller={controller} /></>}
+      <div className="button-row">
+        {cursor !== null && <button className="secondary" onClick={() => setCursor(null)}>Latest code sessions</button>}
+        {page?.key === key && page.page.before !== null && <button className="secondary" onClick={() => setCursor(page.page.before)}>Older code sessions</button>}
+      </div>
+    </details>
   </section>;
 }
