@@ -9,6 +9,7 @@ import type { AppState } from '../types.ts';
 import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
 import { orderingRankTask, semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
+import { importWorkProfile, type ProfileFile } from './profile-files.ts';
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import { assessmentIdentity, workStyleIdsSchema } from '../../service/src/work-styles.ts';
@@ -127,6 +128,11 @@ export class WorkQueue {
   createProfile(name: string, copySettings = false): void {
     this.assertProfileIdle();
     this.update(current => createWorkProfile(current, name, copySettings));
+    this.publish({ error: '', warnings: [], phase: 'idle', progress: null });
+  }
+  importProfile(file: ProfileFile, name: string): void {
+    this.assertProfileIdle();
+    this.update(current => importWorkProfile(current, file, name));
     this.publish({ error: '', warnings: [], phase: 'idle', progress: null });
   }
   capture(title: string, notes = ''): void {

@@ -68,6 +68,10 @@ Use **Work profile** in the sidebar footer, above Settings, to switch between na
 
 Each profile keeps its own agents, sources, collection model, schedule, tasks, notes, Done history, ranking and notification cursor. Older settings initialize both agents with the saved owner instructions and model; sources and scheduling stay unchanged. Agent edits thereafter are independent. Display-name changes retain the stable agent identity and do not invalidate judgments. The same source can appear independently in different profiles; completing it in one does not complete it in another. Switching waits until a run or unsubscribe finishes.
 
+**Work profiles → Export profile** downloads the selected profile's configuration as a versioned JSON file: its name, agent instructions and models, work styles, sources and cadence. Tasks, notes, assessments, run history, filter selections, connections and credentials are not included. Instructions and source queries can contain private information; review the file before sharing it.
+
+**Import profile** accepts that JSON file and lets you choose a unique name. It creates and selects a new profile, then opens Settings for review. Existing profiles remain unchanged; the imported task list starts empty and automatic runs start off, even if enabled in the exported configuration. Connect any required MCP servers separately. Invalid, unsupported or oversized files (over 2 MiB) show an error without changing the workspace.
+
 ### Code sessions
 
 **Task details → Assess implementation** inspects a GitHub issue and its pinned default-branch code. **Review PR** inspects a PR at its pinned head and merge base. Both run inside this app and save results automatically. Configure the **Implementation assessor** and **PR reviewer** in the same Settings agent section. Existing assessor/prioritizer customizations stay unchanged. Each role has one stable identity, editable name/instructions/model, and fixed capabilities.

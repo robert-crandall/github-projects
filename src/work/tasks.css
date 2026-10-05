@@ -38,6 +38,7 @@
 .task-profile-name { min-width: 0; overflow-wrap: anywhere; }
 .task-profile-choices small { margin-left: auto; flex-shrink: 0; color: var(--secondary); font-size: 12px; }
 .task-profile-add { border-top: 1px solid var(--border); padding-top: 6px; }
+.task-profile-add p { padding: 4px 10px; overflow-wrap: anywhere; }
 @media (max-width: 900px) {
   .task-profile-switcher { width: 180px; max-width: 100%; margin: 0; }
   .task-sidebar-bottom { flex-wrap: wrap; align-items: center; gap: 8px; max-width: 100%; }

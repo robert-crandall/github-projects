@@ -13,6 +13,7 @@ import { rankedTasks, reconcileWork } from './engine.ts';
 import { assessmentBatch } from '../../tests/assessment-fixture.ts';
 import { rankInput } from './engine.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
+import { decodeProfileFile, encodeProfileFile } from './profile-files.ts';
 import { AssessmentStoreFixture } from '../../tests/assessment-store-fixture.ts';
 import { workAssessOutputSchema } from '../../service/src/work-assessment.ts';
 
@@ -634,6 +635,34 @@ describe('durable local work', () => {
 });
 
 describe('work profiles', () => {
+  test('profile imports persist and retain failed saves for retry without running imported settings', async () => {
+    const mock = await fixture();
+    mock.queue.capture('Keep in Default');
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings,
+      instructions: 'Shared priorities', schedule: { enabled: true, everyMinutes: 45 } });
+    await mock.workspace.flush();
+    const original = structuredClone(mock.saved());
+    const file = decodeProfileFile(encodeProfileFile(original));
+    mock.fail(() => true);
+    mock.queue.importProfile(file, 'Shared');
+    await expect(mock.workspace.flush()).rejects.toThrow('Disk unavailable');
+    expect(mock.saved()).toEqual(original);
+    expect(mock.workspace.state.activeWorkProfile.name).toBe('Shared');
+    expect(mock.workspace.state.inactiveWorkProfiles[0]!.tasks).toEqual(original.tasks);
+    await mock.queue.tick();
+    expect(mock.requests).toEqual([]);
+    mock.fail(() => false);
+    await mock.workspace.retryStorage();
+    const reloaded = new DesktopWorkspace(mock.platform);
+    await reloaded.load();
+    expect(reloaded.state.activeWorkProfile.name).toBe('Shared');
+    expect(reloaded.state.tasks).toEqual([]);
+    expect(reloaded.state.work.settings).toMatchObject({
+      instructions: 'Shared priorities', schedule: { enabled: false, everyMinutes: 45 },
+    });
+    expect(reloaded.state.inactiveWorkProfiles[0]!.work).toEqual(original.work);
+  });
+
   test('existing v3 work migrates to Default without changing tasks, settings or history', async () => {
     const current = reconcileWork(initial(), collection(), before);
     current.work.settings.instructions = 'Keep these priorities';
@@ -810,6 +839,7 @@ describe('work profiles', () => {
     await entered.promise;
     expect(() => mock.queue.switchProfile(targetId)).toThrow('Wait for the current run');
     expect(() => mock.queue.createProfile('Release')).toThrow('Wait for the current run');
+    expect(() => mock.queue.importProfile(decodeProfileFile(encodeProfileFile(mock.workspace.state)), 'Shared')).toThrow('Wait for the current run');
     const request = mock.requests.find(request => request.op === 'work.rank')!;
     result.resolve(ranked(request));
     await pending;
@@ -2069,6 +2099,7 @@ describe('notification task controls', () => {
     const request = await entered.promise;
     await expect(mock.queue.unsubscribe(id)).rejects.toThrow('already in progress');
     expect(() => mock.queue.createProfile('On call')).toThrow('unsubscribe');
+    expect(() => mock.queue.importProfile(decodeProfileFile(encodeProfileFile(mock.workspace.state)), 'Shared')).toThrow('unsubscribe');
     expect(() => mock.queue.switchProfile('default')).toThrow('unsubscribe');
     mock.queue.complete(id);
     mock.queue.edit(id, 'Edited during unsubscribe', 'Keep this note');

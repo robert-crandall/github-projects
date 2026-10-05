@@ -17,6 +17,9 @@ import { Settings } from './Settings.tsx';
 import { RunProgress } from './RunProgress.tsx';
 import { RunProgressPopover } from './RunProgressPopover.tsx';
 import { ProfileSwitcher } from './ProfileSwitcher.tsx';
+import { ImportProfile } from './ImportProfile.tsx';
+import { encodeProfileFile, profileFilename } from './profile-files.ts';
+import { downloadBackup } from '../storage.ts';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
@@ -250,6 +253,7 @@ export function TaskApp({ controller, queue, remote }: {
   const network = useSyncExternalStore(remote.subscribe, remote.getSnapshot);
   const [capture, setCapture] = useState(false);
   const [newProfile, setNewProfile] = useState(false);
+  const [importProfile, setImportProfile] = useState(false);
   const [settings, setSettings] = useState(false);
   const [filters, setFilters] = useState(false);
   const [recovery, setRecovery] = useState(false);
@@ -391,7 +395,11 @@ export function TaskApp({ controller, queue, remote }: {
           select={id => {
             try { queue.switchProfile(id); setSelection(null); setView('tasks'); }
             catch (error) { controller.report(error); }
-          }} add={() => setNewProfile(true)} />
+          }} add={() => setNewProfile(true)} importProfile={() => setImportProfile(true)}
+          exportProfile={() => {
+            try { downloadBackup(encodeProfileFile(state), profileFilename(state.activeWorkProfile.name)); }
+            catch (error) { controller.report(error); }
+          }} />
         <button className="nav-link" aria-current={settings ? 'page' : undefined} onClick={() => {
           if (!settings) changeContext(() => setSettings(true));
         }}><Settings2 size={17} />Settings</button>
@@ -517,6 +525,8 @@ export function TaskApp({ controller, queue, remote }: {
     {capture && <Capture queue={queue} close={() => setCapture(false)} />}
     {newProfile && <NewProfile queue={queue} currentName={state.activeWorkProfile.name} close={() => setNewProfile(false)}
       created={() => { setSelection(null); setView('tasks'); setSettings(true); }} />}
+    {importProfile && <ImportProfile queue={queue} close={() => setImportProfile(false)}
+      imported={() => { setSelection(null); setView('tasks'); setSettings(true); }} />}
     {recovery && <RecoveryPanel controller={controller} close={() => setRecovery(false)} />}
     {connections && <ConnectionsPanel controller={controller} checking={network.checking} diagnostics={network.diagnostics}
       check={() => invoke(() => remote.check())} recover={() => { setConnections(false); setRecovery(true); }}

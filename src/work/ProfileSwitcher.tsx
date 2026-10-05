@@ -1,12 +1,12 @@
 import { useId, useLayoutEffect, useRef, useState } from 'react';
-import { Check, ChevronUp, PanelsTopLeft, Plus, X } from 'lucide-react';
+import { Check, ChevronUp, Download, PanelsTopLeft, Plus, Upload, X } from 'lucide-react';
 import { usePopoverDismissal } from './usePopoverDismissal.ts';
 
 type Profile = { id: string; name: string };
 
-export function ProfileSwitcher({ profiles, active, busy, select, add }: {
+export function ProfileSwitcher({ profiles, active, busy, select, add, importProfile, exportProfile }: {
   profiles: Profile[]; active: Profile; busy: boolean;
-  select: (id: string) => void; add: () => void;
+  select: (id: string) => void; add: () => void; importProfile: () => void; exportProfile: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const container = useRef<HTMLDivElement>(null);
@@ -72,8 +72,15 @@ export function ProfileSwitcher({ profiles, active, busy, select, add }: {
           {profile.id === active.id && <small>Current</small>}
         </button>)}
       </div>
-      <div className="task-profile-add"><button disabled={busy} aria-describedby={busy ? `${id}-busy` : undefined}
-        onClick={() => { close(); add(); }}><Plus size={15} aria-hidden="true" />Add profile</button></div>
+      <div className="task-profile-add">
+        <button disabled={busy} aria-describedby={busy ? `${id}-busy` : undefined}
+          onClick={() => { close(); add(); }}><Plus size={15} aria-hidden="true" />Add profile</button>
+        <button disabled={busy} aria-describedby={busy ? `${id}-busy` : undefined}
+          onClick={() => { close(); importProfile(); }}><Upload size={15} aria-hidden="true" />Import profile</button>
+        <button aria-describedby={`${id}-export-help`}
+          onClick={() => { close(); exportProfile(); }}><Download size={15} aria-hidden="true" />Export profile</button>
+        <p id={`${id}-export-help`} className="field-help">Export the selected profile's settings, without tasks or history. Instructions and source queries are included.</p>
+      </div>
     </section>}
   </div>;
 }
