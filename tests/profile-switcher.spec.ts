@@ -1,8 +1,10 @@
 import { expect } from '@playwright/test';
-import { test, persisted, type NativeMock } from './native-fixture.ts';
+import { readFile } from 'node:fs/promises';
+import { test, persisted, gate, type NativeMock } from './native-fixture.ts';
 import { emptyWorkspace } from '../src/domain/live.ts';
 import { createWorkProfile, switchWorkProfile } from '../src/work/profiles.ts';
 import { snapshotSchema } from '../src/platform/native.ts';
+import { encodeProfileFile, MAX_PROFILE_FILE_BYTES } from '../src/work/profile-files.ts';
 
 test.use({ referenceWorkspace: false });
 
@@ -64,6 +66,10 @@ test('compact profile switcher preserves layout and selection, supports keyboard
 
   await trigger.click();
   await panel.getByRole('button', { name: 'Add profile', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  await expect(panel.getByRole('button', { name: 'Import profile', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(panel.getByRole('button', { name: 'Export profile', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(settings).toBeFocused();
   await expect(panel).toHaveCount(0);
@@ -153,4 +159,117 @@ test('compact profile switcher stays available in Settings and exposes persisten
   await page.reload();
   await expect(page.getByRole('button', { name: 'Work profile On call', exact: true })).toBeVisible();
   expect(native.state.inactiveWorkProfiles.find(profile => profile.id === 'default')?.tasks[0]?.title).toBe('Keep working');
+});
+
+test('profile JSON export and import round-trip configuration, preserve other work and persist without network calls', async ({ page, native }, testInfo) => {
+  profiles(native);
+  const source = native.state;
+  source.work.settings.instructions = 'Shared priorities';
+  source.work.settings.model = 'collection-model';
+  source.work.settings.workStyles = [{ id: 'quick', name: 'Quick wins', description: 'Small clear work' }];
+  source.work.settings.schedule = { enabled: false, everyMinutes: 45 };
+  source.work.sourceFilter = { selectedSources: [], collapsedProviders: ['github'] };
+  source.tasks[0]!.notes = 'Private notes not to export';
+  native.saved.snapshot!.workspace.state = source;
+  const original = structuredClone(source);
+  await page.goto('/');
+  const trigger = page.getByRole('button', { name: /^Work profile / });
+  const panel = page.getByRole('region', { name: 'Work profiles', exact: true });
+  await trigger.click();
+  await page.screenshot({ path: testInfo.outputPath('profile-menu-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: testInfo.outputPath('profile-menu-mobile.png') });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const downloading = page.waitForEvent('download');
+  await panel.getByRole('button', { name: 'Export profile', exact: true }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe('github-projects-profile-default.json');
+  const exported = testInfo.outputPath('profile.json');
+  await download.saveAs(exported);
+  expect(JSON.parse(await readFile(exported, 'utf8'))).toEqual({
+    format: 'github-projects-work-profile', version: 1, name: 'Default', settings: original.work.settings,
+  });
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await panel.getByRole('button', { name: 'Import profile', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Import work profile' });
+  await expect(dialog.getByLabel('Profile JSON file')).toBeFocused();
+  await dialog.getByLabel('Profile JSON file').setInputFiles(exported);
+  await expect(dialog.getByLabel('Profile name')).toHaveValue('Default');
+  await dialog.getByRole('button', { name: 'Import profile', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toContainText('must be unique');
+  await expect(trigger).toHaveAccessibleName('Work profile Default');
+  await dialog.getByLabel('Profile name').fill('Shared');
+  await page.screenshot({ path: testInfo.outputPath('profile-import-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(dialog.getByRole('button', { name: 'Import profile', exact: true })).toBeInViewport();
+  expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('profile-import-mobile.png') });
+  await dialog.getByRole('button', { name: 'Import profile', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByLabel('Profile name', { exact: true })).toHaveValue('Shared');
+  await persisted(page);
+  expect(native.state.tasks).toEqual([]);
+  expect(native.state.work.sourceFilter).toBeUndefined();
+  expect(native.state.work.settings).toEqual(original.work.settings);
+  expect(native.state.inactiveWorkProfiles.find(profile => profile.id === 'default')).toEqual({
+    ...original.activeWorkProfile, work: original.work, tasks: original.tasks, undo: original.undo,
+  });
+  await page.reload();
+  await expect(trigger).toHaveAccessibleName('Work profile Shared');
+  expect(native.requests).toEqual([]);
+});
+
+test('profile import handles invalid files, cancellation and enabled schedules without automatic collection', async ({ page, native }) => {
+  profiles(native);
+  const file = JSON.parse(encodeProfileFile(native.state));
+  file.settings.schedule.enabled = true;
+  await page.goto('/');
+  await persisted(page);
+  const original = structuredClone(native.state);
+  const trigger = page.getByRole('button', { name: /^Work profile / });
+  const open = async () => {
+    await trigger.click();
+    await page.getByRole('region', { name: 'Work profiles', exact: true }).getByRole('button', { name: 'Import profile', exact: true }).click();
+  };
+  await open();
+  const dialog = page.getByRole('dialog', { name: 'Import work profile' });
+  const input = dialog.getByLabel('Profile JSON file');
+  const submit = dialog.getByRole('button', { name: 'Import profile', exact: true });
+  for (const buffer of [Buffer.from('{'), Buffer.from(JSON.stringify({ ...file, version: 2 })),
+    Buffer.from(JSON.stringify({ ...file, settings: { ...file.settings, streams: [{}] } })),
+    Buffer.alloc(MAX_PROFILE_FILE_BYTES + 1, ' ')]) {
+    await input.setInputFiles({ name: 'invalid.json', mimeType: 'application/json', buffer });
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(submit).toBeDisabled();
+    expect(native.state).toEqual(original);
+  }
+  await input.setInputFiles({ name: 'shared.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(file)) });
+  await expect(dialog.getByLabel('Profile name')).toHaveValue('Default');
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(trigger).toBeFocused();
+  expect(native.state).toEqual(original);
+  await open();
+  await input.setInputFiles({ name: 'shared.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(file)) });
+  await dialog.getByLabel('Profile name').fill('Imported');
+  await submit.click();
+  await persisted(page);
+  expect(native.state.work.settings.schedule.enabled).toBe(false);
+  expect(native.requests).toEqual([]);
+});
+
+test('profile selector blocks importing during a run but keeps configuration export available', async ({ page, native }) => {
+  profiles(native);
+  native.holdRank = gate();
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Run now', exact: true }).click();
+  await expect.poll(() => native.requests.some(request => request.op === 'work.rank')).toBe(true);
+  await page.getByRole('button', { name: /^Work profile / }).click();
+  const panel = page.getByRole('region', { name: 'Work profiles', exact: true });
+  await expect(panel.getByRole('button', { name: 'Import profile', exact: true })).toBeDisabled();
+  await expect(panel.getByRole('button', { name: 'Add profile', exact: true })).toBeDisabled();
+  await expect(panel.getByRole('button', { name: 'Export profile', exact: true })).toBeEnabled();
+  native.holdRank.release();
+  await expect(panel.getByRole('button', { name: 'Import profile', exact: true })).toBeEnabled();
 });
