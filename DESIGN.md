@@ -25,13 +25,13 @@ Work profile lives in one sidebar footer row above Settings, showing the active 
 
 Settings is a full settings page, not a large modal. Separate appearance, instructions, source queries, the opt-in schedule, connection guidance and recovery. Appearance applies and saves immediately, independently of the work-settings form. Manual capture uses a small focused dialog and Command/Ctrl+K. Local edits stay available during collection and ranking.
 
-Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings, each with a name, model and instructions. Run now is the default split-button action; its dropdown contains Run assessor and Run prioritizer with brief role descriptions. Assessment ratings stay in the compact task-details definition list and history selector, not a dashboard or card grid.
+Keep Task assessor and Task prioritizer as plainly labeled fieldsets in Settings, each with a name, model and instructions. Run now is the default split-button action; its dropdown contains Run assessor and Run prioritizer with brief role descriptions. Task notes precede a bounded Why this order area. Overview shows the ranking reason and compact rating/work-style pills; Assessment holds the latest judgments, rating-rationale disclosures and work-style corrections; History holds saved versions, pagination and provenance. Use keyboard-accessible tabs, not a dashboard or card grid.
 
 Implementation assessor and PR reviewer use the same Settings fieldset language. Their actions live in task details and the selected-task toolbar beside compact progress/cancel/result/history controls. Show the service-owned PR conclusion and partial coverage even with no findings. Keep revision/configuration detail in a disclosure and code evidence behind explicit links. Results never displace editing, Done or navigation.
 
 To do checkboxes are separate from row focus, rank and Done. Keep select/clear visible tasks and the selected count above the list; reveal eligible agent actions only with a selection. Whole-list prioritization stays outside this toolbar. Eligibility and per-task batch outcomes use compact disclosures, not another dashboard. Batch progress lives in the scrolling list pane, in task details on narrow windows, and near the top of scrolling Settings. Its frozen scope and Stop stay discoverable during navigation without consuming the available editing area.
 
-Do not retain a second workspace or disabled placeholders for the retired Inbox, Filtered, Archive or Tasks destinations. Saved conversations and private thread notes appear alongside matching tasks.
+Do not retain a second workspace or disabled placeholders for the retired Inbox, Filtered, Archive or Tasks destinations. Private thread notes remain in a collapsed disclosure alongside matching tasks. Saved conversations are preserved but no longer read or loaded in Task Details.
 
 ## Palette and type
 
@@ -45,7 +45,7 @@ Use monospace only for raw preserved records or other machine output. Display us
 
 ## Task details and conversations
 
-Task details retain editable text, Done, priority reasons, evidence and notes. Matching saved thread notes remain separate from ranking notes. The conversation reader loads cached messages on selection and fetches only after an explicit action. Keep full Markdown messages readable; never execute HTML or automatically fetch remote images. Unsubscribe and historical operation retries require confirmation.
+Task details retain editable text, Done, Open source, priority reasons, evidence and notes. Matching saved thread notes remain private and separate from ranking notes. PR reviewer/Implementation assessor and conversation notifications use disclosures below the evidence; code progress and failures stay discoverable and open automatically. Removing the conversation reader from this surface must not delete cached data or trigger cache reads/network calls on selection. Unsubscribe and historical operation retries still require confirmation. Markdown in code results remains untrusted: never execute HTML or automatically fetch remote images.
 
 ## Feedback and recovery
 

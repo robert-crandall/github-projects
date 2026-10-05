@@ -4,9 +4,7 @@ import { Check, ChevronDown, ExternalLink, Github, ListFilter, ListOrdered, Plus
 import { Modal } from '../Modal.tsx';
 import { ConnectionsPanel, RecoveryPanel } from '../runtime/NativePanels.tsx';
 import { DestinationPanel } from '../runtime/DestinationPanel.tsx';
-import { ConversationReader } from '../runtime/ConversationReader.tsx';
 import { getRow } from '../domain/engine.ts';
-import { referenceSchema } from '../../service/src/schema.ts';
 import type { Destination } from '../runtime/view.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { ServiceWorkspace } from '../runtime/service-workspace.ts';
@@ -25,7 +23,7 @@ import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
 import { matchesStyles, taskStyles, useStyleAssessments } from './styles.ts';
 import type { SavedAssessment } from '../../service/src/work-assessment.ts';
-import { TaskAssessmentHistory } from './AssessmentHistory.tsx';
+import { TaskAssessmentHistory, type ReasoningView } from './AssessmentHistory.tsx';
 import { CodeSessionPanel } from './CodeSessionPanel.tsx';
 import { codeJob } from './code-sessions.ts';
 import { CodeBatchProgress } from './CodeBatchProgress.tsx';
@@ -128,11 +126,14 @@ function NewProfile({ queue, currentName, close, created }: {
     </form>
   </Modal>;
 }
-function TaskDetail({ task, reason, queue, controller, remote, close, batchProgress, styleAssessment, stylesLoading, stylesError }: {
-  task: Task; reason?: string; queue: WorkQueue; controller: DesktopWorkspace; remote: ServiceWorkspace; close: () => void;
+function TaskDetail({ task, reason, rank, queue, controller, close, batchProgress, styleAssessment, stylesLoading, stylesError }: {
+  task: Task; reason?: string; rank?: number; queue: WorkQueue; controller: DesktopWorkspace; close: () => void;
   batchProgress: ReactNode;
   styleAssessment?: SavedAssessment; stylesLoading: boolean; stylesError: string;
 }) {
+  const [reasoningView, setReasoningView] = useState<ReasoningView>('overview');
+  const reasoningPanel = useRef<HTMLDivElement>(null);
+  useEffect(() => { reasoningPanel.current?.scrollTo({ top: 0 }); }, [reasoningView]);
   const [confirmUnsubscribe, setConfirmUnsubscribe] = useState(false);
   const [unsubscribeError, setUnsubscribeError] = useState('');
   const status = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
@@ -142,15 +143,6 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
   const threads = controller.state.threads.filter(thread => thread.id === task.threadId
     || (task.work && canonicalSource(`https://github.com/${thread.repo}/issues/${thread.number}`) === canonicalSource(task.work.url)));
   const notes = controller.state.notes.filter(note => threads.some(thread => thread.id === note.threadId));
-  const url = task.work ? new URL(task.work.url) : null;
-  const match = url?.hostname === 'github.com' ? /^\/([^/]+\/[^/]+)\/(pull|pulls|issues)\/(\d+)\/?$/.exec(url.pathname) : null;
-  const thread = threads[0];
-  const parsed = referenceSchema.safeParse(task.work?.notification?.reference ?? (thread && {
-    repo: thread.repo, kind: thread.kind, number: thread.number,
-  }) ?? task.work?.reference ?? (match && {
-    repo: match[1], kind: match[2] === 'issues' ? 'issue' : 'pr', number: Number(match[3]),
-  }));
-  const reference = parsed.success ? parsed.data : null;
   const styles = controller.state.work.settings.workStyles ?? [];
   const assigned = taskStyles(task, styles, styleAssessment);
   const run = (operation: () => void | Promise<unknown>) => {
@@ -167,36 +159,7 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
       {task.work && <button className="secondary" onClick={() => run(() => controller.platform.launchWebUrl(task.work!.url))}><ExternalLink size={14} />Open source</button>}
     </div>
     {task.status === 'done' && <p className="task-detail-notice">Done {date(task.completedAt ?? null)}. Only a fresh actionable request can bring this task back.</p>}
-    {task.work?.notification && <section><h3>Conversation notifications</h3>
-      <p>Done handles the current request. Unsubscribe stops following the conversation without changing this task or closing the source.</p>
-      {subscription?.status === 'confirmed' ? <p role="status">Unsubscribed on GitHub {date(subscription.confirmedAt ?? null)}. Direct mentions, team mentions and review requests can still notify you.</p>
-        : <><button className="secondary" disabled={unsubscribing} onClick={() => { setUnsubscribeError(''); setConfirmUnsubscribe(true); }}>
-          {unsubscribing ? 'Unsubscribing...' : subscription ? 'Retry unsubscribe on GitHub' : 'Unsubscribe on GitHub'}</button>
-          {subscription && !unsubscribing && <p className="task-detail-notice" role="status">
-            {subscription.error || 'Unsubscribe is not confirmed. Retry explicitly; this app never resends it automatically.'}
-          </p>}</>}
-    </section>}
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
-    <section><h3>Why this order</h3><p>{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p></section>
-    {styles.length > 0 && <section aria-label="Task work styles"><h3>Work styles</h3>
-      <p className="field-help">{task.workStyleOverride !== undefined ? 'Your choices. Reassessment will not overwrite them.'
-        : stylesLoading ? 'Reading saved work styles...'
-        : stylesError ? 'Automatic styles are unavailable until history can be read.'
-        : styleAssessment?.assessmentVersion !== 'work-assessment-v4' ? 'Not classified yet. Use Assess task to assign styles.'
-        : assigned.length ? 'Assigned by Copilot. Change any choice to keep your own assignments.'
-        : 'Copilot found no matching styles. You can choose styles yourself.'}</p>
-      {styleAssessment?.assessmentVersion === 'work-assessment-v4' && task.workStyleOverride === undefined
-        && JSON.stringify(styleAssessment.workStyles) !== JSON.stringify(styles)
-        && <p className="field-help">Definitions changed since this assessment. Use Assess task to update automatic matches.</p>}
-      {styles.map(style => <label className="checkbox-label task-style-choice" key={style.id} title={style.description}>
-        <input type="checkbox" checked={assigned.some(item => item.id === style.id)}
-          disabled={task.workStyleOverride === undefined && (stylesLoading || !!stylesError)}
-          onChange={event => run(() => queue.setWorkStyles(task.id, event.target.checked
-            ? [...assigned.map(item => item.id), style.id] : assigned.filter(item => item.id !== style.id).map(item => item.id)))} />
-        {style.name}</label>)}
-      {task.workStyleOverride !== undefined && <button className="text-button"
-        onClick={() => run(() => queue.setWorkStyles(task.id, null))}>Use Copilot assignments</button>}
-    </section>}
     {task.work?.reference?.kind === 'pr' && <section aria-label="Current PR status"><h3>Current PR status</h3>
       {task.work.pullRequest ? <>
         <p>{task.work.pullRequest.draft === null ? 'Draft status unknown' : task.work.pullRequest.draft ? 'Draft' : 'Not a draft'}
@@ -205,19 +168,76 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
         <p className="field-help">Checked {date(task.work.pullRequest.observedAt)}. Prioritization refreshes this separately from the saved assessment.</p>
       </> : <p>Not checked yet. Run prioritizer to refresh current PR status without reassessing this task.</p>}
     </section>}
-    {task.status === 'open' && task.work?.availability !== 'waiting' && <button className="secondary"
-      disabled={status.running || code.busy} onClick={() => run(() => queue.runAssessor([task.id]))}>Assess task</button>}
-    <TaskAssessmentHistory key={task.id} task={task} controller={controller} />
-    <CodeSessionPanel key={`${controller.state.activeWorkProfile.id}:${task.id}`} task={task} controller={controller} sessions={queue.code} workBusy={status.running} />
-    <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
-      onChange={event => run(() => queue.edit(task.id, task.title, event.target.value))} /></label>
-    <p className="field-help">Task notes inform Copilot's ranking.</p>
+    <section className="task-notes">
+      <label>Task notes<textarea id="task-notes" rows={6} value={task.notes} maxLength={16000}
+        onChange={event => run(() => queue.edit(task.id, task.title, event.target.value))} /></label>
+      <p className="field-help">Task notes inform Copilot's ranking.</p>
+    </section>
+    <section className="task-reasoning" aria-label="Why this order">
+      <div className="reasoning-heading"><h3>Why this order</h3>{rank !== undefined && <span className="field-help">Rank #{rank}</span>}</div>
+      <div className="reasoning-tabs" role="tablist" aria-label="Reasoning view">
+        {(['overview', 'assessment', 'history'] as const).map(view => <button key={view}
+          id={`reasoning-tab-${view}`} role="tab" aria-selected={reasoningView === view}
+          aria-controls="reasoning-panel" tabIndex={reasoningView === view ? 0 : -1}
+          onClick={() => setReasoningView(view)} onKeyDown={event => {
+            const views = ['overview', 'assessment', 'history'] as const;
+            const index = views.indexOf(view);
+            const next = event.key === 'ArrowRight' ? views[(index + 1) % views.length]
+              : event.key === 'ArrowLeft' ? views[(index + views.length - 1) % views.length]
+              : event.key === 'Home' ? views[0] : event.key === 'End' ? views[2] : undefined;
+            if (next) {
+              event.preventDefault();
+              setReasoningView(next);
+              document.getElementById(`reasoning-tab-${next}`)?.focus();
+            }
+          }}>{view[0].toUpperCase() + view.slice(1)}</button>)}
+      </div>
+      <div ref={reasoningPanel} className="reasoning-panel" id="reasoning-panel" role="tabpanel" tabIndex={0}
+        aria-labelledby={`reasoning-tab-${reasoningView}`}>
+        <TaskAssessmentHistory task={task} controller={controller} view={reasoningView}
+          overview={<>
+            <p className="task-reason">{reason ?? 'Not ranked yet. The next run considers this task alongside all your other work.'}</p>
+            {reason && controller.state.work.ranking && <p className="field-help">Ranked {date(controller.state.work.ranking.rankedAt)}</p>}
+          </>}
+          overviewStyles={<>
+            {assigned.map(style => <span key={style.id} className="work-style-pill task-style-pill">Work style · {style.name}</span>)}
+            {styles.length > 0 && task.workStyleOverride === undefined && <span className="field-help">{stylesLoading ? 'Reading saved work styles...'
+              : stylesError ? 'Work styles unavailable. Retry work styles to read saved assignments.'
+              : styleAssessment?.assessmentVersion !== 'work-assessment-v4' ? 'Work styles not classified yet.'
+              : !assigned.length ? 'No matching work styles.' : ''}</span>}
+            {styles.length > 0 && task.workStyleOverride !== undefined && <span className="field-help">Your work-style choices{!assigned.length ? ': no styles.' : '.'}</span>}
+          </>}
+          controls={<>
+            {styles.length > 0 && <section aria-label="Task work styles"><details className="task-style-details"><summary>Work styles</summary>
+              <p className="field-help">{task.workStyleOverride !== undefined ? 'Your choices. Reassessment will not overwrite them.'
+                : stylesLoading ? 'Reading saved work styles...'
+                : stylesError ? 'Automatic styles are unavailable until history can be read.'
+                : styleAssessment?.assessmentVersion !== 'work-assessment-v4' ? 'Not classified yet. Use Assess task to assign styles.'
+                : assigned.length ? 'Assigned by Copilot. Change any choice to keep your own assignments.'
+                : 'Copilot found no matching styles. You can choose styles yourself.'}</p>
+              {styleAssessment?.assessmentVersion === 'work-assessment-v4' && task.workStyleOverride === undefined
+                && JSON.stringify(styleAssessment.workStyles) !== JSON.stringify(styles)
+                && <p className="field-help">Definitions changed since this assessment. Use Assess task to update automatic matches.</p>}
+              {styles.map(style => <label className="checkbox-label task-style-choice" key={style.id} title={style.description}>
+                <input type="checkbox" aria-label={style.name} checked={assigned.some(item => item.id === style.id)}
+                  disabled={task.workStyleOverride === undefined && (stylesLoading || !!stylesError)}
+                  onChange={event => run(() => queue.setWorkStyles(task.id, event.target.checked
+                    ? [...assigned.map(item => item.id), style.id] : assigned.filter(item => item.id !== style.id).map(item => item.id)))} />
+                {style.name}<span className="field-help">{style.description}</span></label>)}
+              {task.workStyleOverride !== undefined && <button className="text-button"
+                onClick={() => run(() => queue.setWorkStyles(task.id, null))}>Use Copilot assignments</button>}
+            </details></section>}
+            {task.status === 'open' && task.work?.availability !== 'waiting' && <button className="secondary"
+              disabled={status.running || code.busy} onClick={() => run(() => queue.runAssessor([task.id]))}>Assess task</button>}
+          </>} />
+      </div>
+    </section>
     {!!task.work?.evidence.length && <section><h3>What brought this task here</h3>
       <ol className="task-evidence">{task.work.evidence.map(item => <li key={`${item.source}:${item.streamId}:${item.id}`}>
         <p>{item.summary}</p><span>{item.source} · {date(item.at)}</span>
         <button className="text-button" onClick={() => run(() => controller.platform.launchWebUrl(item.url))}>Open request<ExternalLink size={12} /></button>
       </li>)}</ol></section>}
-    {notes.length > 0 && <section><h3>Saved thread notes</h3>
+    {notes.length > 0 && <details className="task-disclosure"><summary>Saved thread notes · Private</summary>
       <p className="field-help">Private notes from the previous workspace. These do not inform Copilot's ranking.</p>
       {notes.map((note, index) => <div key={note.id}>
         <label htmlFor={`thread-note-${index}`}>{index ? `Thread note ${index + 1}` : 'Thread notes'}</label>
@@ -226,9 +246,17 @@ function TaskDetail({ task, reason, queue, controller, remote, close, batchProgr
           type: 'note', threadId: note.threadId, noteId: note.id, text: event.target.value,
         })} />
       </div>)}
-    </section>}
-    {reference && <ConversationReader reference={reference} controller={remote.conversation}
-      platform={controller.platform} refreshing={false} timeZone={controller.state.timeZone} />}
+    </details>}
+    <CodeSessionPanel key={`${controller.state.activeWorkProfile.id}:${task.id}`} task={task} controller={controller} sessions={queue.code} workBusy={status.running} />
+    {task.work?.notification && <details className="task-disclosure" open={subscription !== undefined || unsubscribing}><summary>Conversation notifications</summary>
+      <p>Done handles the current request. Unsubscribe stops following the conversation without changing this task or closing the source.</p>
+      {subscription?.status === 'confirmed' ? <p role="status">Unsubscribed on GitHub {date(subscription.confirmedAt ?? null)}. Direct mentions, team mentions and review requests can still notify you.</p>
+        : <><button className="secondary" disabled={unsubscribing} onClick={() => { setUnsubscribeError(''); setConfirmUnsubscribe(true); }}>
+          {unsubscribing ? 'Unsubscribing...' : subscription ? 'Retry unsubscribe on GitHub' : 'Unsubscribe on GitHub'}</button>
+          {subscription && !unsubscribing && <p className="task-detail-notice" role="status">
+            {subscription.error || 'Unsubscribe is not confirmed. Retry explicitly; this app never resends it automatically.'}
+          </p>}</>}
+    </details>}
     {confirmUnsubscribe && <Modal title="Unsubscribe on GitHub" close={() => { if (!unsubscribing) setConfirmUnsubscribe(false); }}>
       <p>Stop following this conversation on GitHub? Your task, Done status and notes will stay unchanged.</p>
       <p>Direct mentions, team mentions and review requests can still notify you again.</p>
@@ -512,7 +540,8 @@ export function TaskApp({ controller, queue, remote }: {
           </div>}
         </main>
         {selected ? <TaskDetail key={`${state.activeWorkProfile.id}:${selected.id}`} task={selected} reason={reasons.get(selected.id)}
-          queue={queue} controller={controller} remote={remote} close={() => setSelection(null)} batchProgress={batchProgress}
+          rank={state.work.ranking?.orderedIds.includes(selected.id) ? positions.get(selected.id) : undefined}
+          queue={queue} controller={controller} close={() => setSelection(null)} batchProgress={batchProgress}
           styleAssessment={styleAssessments.values.get(selected.id)} stylesLoading={styleAssessments.loading} stylesError={styleAssessments.error} />
           : <aside className="task-detail task-detail-empty" aria-label="Task details"><h2>Select a task</h2><p>See why it ranks here, read its source, and keep your notes alongside.</p></aside>}
       </div>

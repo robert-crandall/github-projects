@@ -7,6 +7,7 @@ import { snapshotSchema } from '../src/platform/native.ts';
 import { assessmentBatch } from './assessment-fixture.ts';
 import { rankInput } from '../src/work/engine.ts';
 import { taskAgent, taskAgentJobs } from '../service/src/work-agents.ts';
+import { savedAssessmentSchema } from '../service/src/work-assessment.ts';
 
 test.use({ referenceWorkspace: false });
 
@@ -285,11 +286,11 @@ test('work styles show automatic pills, preserve corrections and filter without 
   await expect(rows).toHaveCount(1);
   await expect(rows.first().locator('.task-rank')).toHaveText('3');
   await rows.first().locator('.task-row').click();
+  await showStyles(page);
   const detail = page.getByRole('region', { name: 'Task work styles' });
   await detail.getByLabel('Deep focus', { exact: true }).check();
   await expect(detail).toContainText('Your choices');
-  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  await assessTask(page);
   await expect(detail.getByLabel('Quick wins', { exact: true })).toBeChecked();
   await expect(detail.getByLabel('Deep focus', { exact: true })).toBeChecked();
   await persisted(page);
@@ -306,11 +307,13 @@ test('work styles show automatic pills, preserve corrections and filter without 
   await page.getByRole('button', { name: /^Done/ }).click();
   await expect(rows).toHaveCount(1);
   await rows.first().locator('.task-row').click();
+  await showStyles(page);
   await detail.getByRole('button', { name: 'Use Copilot assignments' }).click();
   await expect(rows).toHaveCount(0);
   await filters.getByRole('button', { name: 'All styles' }).click();
   await expect(rows).toHaveCount(1);
   await rows.first().locator('.task-row').click();
+  await showStyles(page);
   await expect(detail).toContainText('Copilot found no matching styles');
   await page.setViewportSize({ width: 390, height: 844 });
   await detail.scrollIntoViewIfNeeded();
@@ -395,6 +398,7 @@ test('prioritization refreshes PR readiness while retaining the saved judgment a
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
   await expect(current).toContainText('CI: passing');
+  await page.getByRole('tab', { name: 'Assessment', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Assessment', exact: true })).toContainText('Was a draft when assessed');
   await page.screenshot({ path: testInfo.outputPath('readiness-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -422,6 +426,7 @@ test('code sessions run only explicitly, retain partial outcomes, and keep edits
   await page.goto('/');
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
   const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await panel.locator('details > summary').first().click();
   await expect(panel.getByRole('button', { name: 'Review PR', exact: true })).toBeEnabled();
   expect(native.requests).toHaveLength(0);
   native.holdCode = gate();
@@ -461,6 +466,7 @@ test('not-inspected and source-changed are honest, reruns retain history, cancel
   await page.goto('/');
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
   const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await panel.locator('details > summary').first().click();
   await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
   await expect(panel).toContainText('No source-code lines were inspected. No code review or approval was completed.');
   await expect(panel).toContainText('No code coverage obtained.');
@@ -489,6 +495,7 @@ test('restoring a workspace keeps every Copilot action disabled until the old co
   native.backups.set(backupId, structuredClone(native.saved));
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
   const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await panel.locator('details > summary').first().click();
   const held = native.holdCode = gate();
   try {
     await panel.getByRole('button', { name: 'Review PR', exact: true }).click();
@@ -527,6 +534,7 @@ test('implementation result save failure retries without model replay and prior-
   await page.goto('/');
   await page.locator('.task-row').filter({ hasText: 'Inspect source safely' }).click();
   const panel = page.getByRole('region', { name: 'Code sessions', exact: true });
+  await panel.locator('details > summary').first().click();
   native.codeRuns.failUpdate = true;
   await panel.getByRole('button', { name: 'Assess implementation' }).click();
   await expect(panel).toContainText('Result not saved');
@@ -547,6 +555,17 @@ async function add(page: Page, title: string) {
   await dialog.getByLabel('What do you need to do?').fill(title);
   await dialog.getByRole('button', { name: 'Add task', exact: true }).click();
   await persisted(page);
+}
+async function assessTask(page: Page) {
+  const history = await page.getByRole('tab', { name: 'History', exact: true }).getAttribute('aria-selected') === 'true';
+  await page.getByRole('tab', { name: 'Assessment', exact: true }).click();
+  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  if (history) await page.getByRole('tab', { name: 'History', exact: true }).click();
+}
+async function showStyles(page: Page) {
+  await page.getByRole('tab', { name: 'Assessment', exact: true }).click();
+  await page.getByRole('region', { name: 'Task work styles' }).locator('summary').click();
 }
 async function run(page: Page) {
   await page.getByRole('button', { name: 'Run now', exact: true }).click();
@@ -685,6 +704,7 @@ test('configurable agents run independently with named roles, durable ratings an
   expect(native.state.work.ranking).toBeNull();
   expect(native.assessments.entries).toHaveLength(2);
   await page.locator('.task-row').filter({ hasText: 'First manual task' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
   await expect(history).toContainText('unknown - No implementation evidence is supplied.');
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
@@ -711,8 +731,7 @@ test('configurable agents run independently with named roles, durable ratings an
   expect(native.assessments.entries).toHaveLength(2);
   await openRunDetails(page);
   await expect(page.getByRole('region', { name: 'Run progress' })).toContainText('No tasks to assess in this run');
-  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  await assessTask(page);
   expect(native.assessments.entries).toHaveLength(3);
   await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath('agents-history-desktop.png') });
@@ -733,6 +752,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   native.failRank = true;
   await run(page);
   await page.locator('.task-row').filter({ hasText: 'Write the proposal' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   await expect(history).toContainText('Assessment of Write the proposal');
@@ -748,7 +768,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   await run(page);
   await expect(history.getByRole('status')).toHaveText('Outdated: task content changed');
   expect(native.assessments.values(first.id)).toHaveLength(1);
-  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await assessTask(page);
   await expect(history).toContainText('Assessment of Write the updated proposal');
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   const versions = [...native.assessments.values(first.id)];
@@ -767,6 +787,7 @@ test('assessment history stays readable after order failure, edits, Done and rel
   await page.reload();
   await page.getByRole('button', { name: /^Done/ }).click();
   await page.locator('.task-row').filter({ hasText: 'Write the updated proposal' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(2);
   await page.getByRole('button', { name: 'Reopen task', exact: true }).click();
   await persisted(page);
@@ -778,12 +799,14 @@ test('assessment age never expires its reusable judgment', async ({ page, native
   await add(page, 'Keep this assessment');
   await run(page);
   await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
   const version = native.assessments.values(native.state.tasks.find(task => task.title === 'Keep this assessment')!.id)[0]!;
   native.now = version.assessment.reevaluateAt;
   await page.clock.setFixedTime(new Date(native.now));
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Keep this assessment' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
   await runAction(page, 'Run prioritizer');
   await expect(page.getByRole('button', { name: 'More run actions', exact: true })).toBeEnabled();
@@ -800,7 +823,7 @@ test('latest assessment selection follows saved logical order after the clock mo
   native.now = '2026-09-11T16:00:00.000Z';
   await page.clock.setFixedTime(new Date(native.now));
   await page.locator('.task-row').filter({ hasText: 'Clock-safe history' }).click();
-  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await assessTask(page);
   await expect.poll(() => native.assessments.values(original.id).length).toBe(2);
   const versions = [...native.assessments.values(original.id)];
   expect(versions).toHaveLength(2);
@@ -808,6 +831,7 @@ test('latest assessment selection follows saved logical order after the clock mo
   expect(versions[1]!.sequence).toBeGreaterThan(versions[0]!.sequence!);
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Clock-safe history' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
   await expect(history.getByLabel('Assessment version')).toHaveValue(versions[1]!.resultId);
   await expect(history.getByRole('status')).toHaveText('Current for saved task content');
@@ -826,6 +850,7 @@ test('paged history remains readable and exportable without embedding results in
   native.assessments.append('default', Array.from({ length: 45 }, () => ({ ...first, resultId: crypto.randomUUID() })), native.state);
   await page.reload();
   await page.locator('.task-row').filter({ hasText: 'Paged history' }).click();
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
   const history = page.getByRole('region', { name: 'Assessment', exact: true });
   await expect(history.getByLabel('Assessment version').locator('option')).toHaveCount(20);
   await page.getByRole('button', { name: 'Older assessments', exact: true }).click();
@@ -1181,8 +1206,7 @@ test('unknown source state stays visible instead of silently removing work', asy
     notes: '',
   });
   await page.locator('.task-row').first().click();
-  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  await assessTask(page);
   const assessment = native.requests.filter(request => request.op === 'work.assess').at(-1);
   if (assessment?.op !== 'work.assess') throw new Error('Assessment request missing');
   expect(assessment.input.tasks).toHaveLength(1);
@@ -1364,6 +1388,7 @@ test('unsubscribe confirms separately from Done and survives relaunch', async ({
   await page.getByRole('button', { name: 'Mark done', exact: true }).click();
   await persisted(page);
   const before = structuredClone(native.state.tasks[0]!);
+  await page.getByText('Conversation notifications', { exact: true }).click();
   await page.getByRole('button', { name: 'Unsubscribe on GitHub', exact: true }).click();
   const modal = page.getByRole('dialog', { name: 'Unsubscribe on GitHub' });
   await expect(modal).toContainText('Your task, Done status and notes will stay unchanged.');
@@ -1395,6 +1420,7 @@ test('failed unsubscribe remains visible and requires explicit retry after relau
   await run(page);
   await page.locator('.task-row').first().click();
   native.failWrite = true;
+  await page.getByText('Conversation notifications', { exact: true }).click();
   await page.getByRole('button', { name: 'Unsubscribe on GitHub', exact: true }).click();
   const modal = page.getByRole('dialog', { name: 'Unsubscribe on GitHub' });
   await modal.getByRole('button', { name: 'Unsubscribe', exact: true }).click();
@@ -1706,8 +1732,7 @@ test('selected assessor and detail assessor save only requested judgments withou
   expect(native.assessments.entries.map(value => value.id)).toEqual([id]);
   expect(native.state.work.ranking).toEqual(priorOrder);
   await page.locator('.task-row').filter({ hasText: 'Assigned issue' }).click();
-  await page.getByRole('button', { name: 'Assess task', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  await assessTask(page);
   expect(native.requests.map(request => request.op)).toEqual(['work.assess', 'work.assess']);
   expect(native.requests[1]).toMatchObject({ input: { tasks: [{ id: native.state.tasks.find(task => task.title === 'Assigned issue')!.id }] } });
   expect(native.state.tasks.find(task => task.id === id)).toMatchObject({ status: 'done', notes: 'Keep concurrent assessment notes' });
@@ -2017,4 +2042,145 @@ test('source sidebar remains keyboard accessible and scrolls without overflowing
   await expect(page.getByRole('button', { name: 'Close task details', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Close task details', exact: true }).click();
   await expect(page.locator('.task-main')).toBeVisible();
+});
+
+
+test('notes-first reasoning tabs isolate latest judgments from paged history and support keyboard navigation', async ({ page, native }, testInfo) => {
+  assessmentTasks(native, 2);
+  const state = native.state;
+  state.work.settings.workStyles = [{ id: 'review', name: 'Code review', description: 'Read a bounded change and give feedback.' }];
+  state.work.ranking = {
+    orderedIds: state.tasks.map(task => task.id),
+    reasons: [{ id: 'task-0', reason: 'Unblocks the release. Other work can wait.' }], rankedAt: native.now,
+  };
+  native.saved.snapshot = snapshotSchema.parse({ formatVersion: 1, reminders: [], workspace: { version: 1, state, scroll: {} } });
+  const first = (await assessmentBatch(rankInput(state), native.now)).assessments[0]!;
+  first.assessment.impact = { rating: 'high', rationale: 'Original broad scope.' };
+  first.assessment.importance = 'Original importance';
+  first.assessment.workStyleIds = ['review'];
+  const latest = structuredClone(first);
+  latest.resultId = crypto.randomUUID();
+  latest.assessment.impact = { rating: 'low', rationale: 'Latest bounded scope.' };
+  latest.assessment.importance = 'Latest importance';
+  latest.assessment.uncertainty = 'Long but readable context. '.repeat(14);
+  native.assessments.append('default', [
+    ...Array.from({ length: 24 }, () => ({ ...first, resultId: crypto.randomUUID() })), latest,
+  ], state);
+  await page.goto('/');
+  await page.locator('.task-row').filter({ hasText: 'Assessment task 1' }).click();
+  const detail = page.getByRole('complementary', { name: 'Task details' });
+  const tabs = detail.getByRole('tablist', { name: 'Reasoning view' });
+  const panel = detail.getByRole('tabpanel');
+  const notes = detail.getByRole('textbox', { name: 'Task notes', exact: true });
+  await expect(tabs.getByRole('tab', { name: 'Overview' })).toHaveAttribute('aria-selected', 'true');
+  await expect(panel).toHaveAccessibleName('Overview');
+  await expect(detail.getByText('Rank #1', { exact: true })).toBeVisible();
+  await expect(panel).toContainText('Unblocks the release. Other work can wait.');
+  await expect(panel.locator('.work-style-pill')).toHaveText(['Impact low', 'Visibility unknown', 'Effort unknown', 'Work style · Code review']);
+  expect((await notes.boundingBox())!.y + (await notes.boundingBox())!.height)
+    .toBeLessThan((await detail.getByRole('heading', { name: 'Why this order' }).boundingBox())!.y);
+  await notes.fill('Working notes survive every analysis view.');
+  await tabs.getByRole('tab', { name: 'Overview' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.getByRole('tab', { name: 'Assessment' })).toBeFocused();
+  await expect(panel).toHaveAccessibleName('Assessment');
+  await expect(panel).toContainText('Latest importance');
+  await expect(panel).toContainText('Urgency and blockers are historical judgments, not live source status.');
+  await expect(panel.getByText('Latest bounded scope.', { exact: true })).toBeHidden();
+  await panel.getByText('Impact - low', { exact: true }).click();
+  await expect(panel.getByText('Latest bounded scope.', { exact: true })).toBeVisible();
+  await expect(panel.getByLabel('Assessment version')).toHaveCount(0);
+  expect(await panel.evaluate(element => element.scrollHeight > element.clientHeight && element.clientHeight <= 560)).toBe(true);
+  await tabs.getByRole('tab', { name: 'Assessment' }).focus();
+  await page.keyboard.press('End');
+  await expect(tabs.getByRole('tab', { name: 'History' })).toBeFocused();
+  await expect(panel).toHaveAccessibleName('History');
+  await expect(panel.getByLabel('Assessment version').locator('option')).toHaveCount(20);
+  await panel.getByLabel('Assessment version').selectOption(native.assessments.entries[10]!.resultId);
+  await expect(panel).toContainText('Original importance');
+  await expect(panel).toContainText('Historical result.');
+  await panel.getByRole('button', { name: 'Older assessments' }).click();
+  await expect(panel.getByLabel('Assessment version').locator('option')).toHaveCount(5);
+  await tabs.getByRole('tab', { name: 'History' }).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.getByRole('tab', { name: 'Overview' })).toBeFocused();
+  await expect(panel.locator('.work-style-pill').first()).toHaveText('Impact low');
+  await page.keyboard.press('ArrowLeft');
+  await expect(tabs.getByRole('tab', { name: 'History' })).toBeFocused();
+  await expect(panel.getByLabel('Assessment version').locator('option')).toHaveCount(5);
+  await tabs.getByRole('tab', { name: 'Assessment' }).click();
+  await expect(panel).toContainText('Latest importance');
+  await expect(panel).not.toContainText('Original importance');
+  await expect(notes).toHaveValue('Working notes survive every analysis view.');
+  await tabs.getByRole('tab', { name: 'Assessment' }).focus();
+  await page.keyboard.press('Home');
+  await expect(tabs.getByRole('tab', { name: 'Overview' })).toBeFocused();
+  await page.screenshot({ path: testInfo.outputPath('notes-first-overview-desktop.png') });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await tabs.getByRole('tab', { name: 'Assessment' }).click();
+  await expect(panel).toContainText('Latest importance');
+  await panel.focus();
+  await panel.evaluate(element => { element.scrollTop = 0; });
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => panel.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(844 * .65 + 1);
+  await page.screenshot({ path: testInfo.outputPath('notes-first-assessment-narrow.png') });
+  await persisted(page);
+  await page.reload();
+  await page.locator('.task-row').filter({ hasText: 'Assessment task 1' }).click();
+  await expect(notes).toHaveValue('Working notes survive every analysis view.');
+  await expect(panel).toHaveAccessibleName('Overview');
+  await page.getByRole('button', { name: 'Close task details' }).click();
+  await page.locator('.task-row').filter({ hasText: 'Assessment task 2' }).click();
+  await expect(panel).toHaveAccessibleName('Overview');
+  await expect(panel).toContainText('No saved assessment yet.');
+  expect(native.requests).toEqual([]);
+  expect(native.calls.filter(call => call.startsWith('conversation_'))).toEqual([]);
+});
+
+test('reasoning preserves ranking and notes through history read errors with no configured styles', async ({ page, native }) => {
+  assessmentTasks(native, 1);
+  native.failAssessmentRead = true;
+  await page.goto('/');
+  await page.locator('.task-row').first().click();
+  const panel = page.getByRole('tabpanel');
+  await expect(panel.getByRole('alert')).toContainText('unavailable');
+  await expect(panel).toContainText('Not ranked yet.');
+  await expect(panel.locator('.work-style-pill')).toHaveCount(0);
+  await page.getByLabel('Task notes').fill('Notes still work when assessment storage is unavailable.');
+  await page.getByRole('tab', { name: 'Assessment', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  native.failAssessmentRead = false;
+  await panel.getByRole('button', { name: 'Retry history' }).click();
+  await expect(panel).toContainText('No saved assessment yet.');
+  await expect(panel.getByRole('alert')).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Assess task', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Assess task', exact: true })).toBeEnabled();
+  await expect(panel).toContainText('Latest saved assessment');
+  await page.getByRole('tab', { name: 'Overview', exact: true }).click();
+  await expect(panel.locator('.work-style-pill')).toHaveText(['Impact unknown', 'Visibility unknown', 'Effort unknown']);
+  await persisted(page);
+  expect(native.state.tasks[0]!.notes).toBe('Notes still work when assessment storage is unavailable.');
+  expect(native.requests.map(request => request.op)).toEqual(['work.assess']);
+});
+
+test('legacy assessments label absent ratings without inventing current judgments', async ({ page, native }) => {
+  assessmentTasks(native, 1);
+  const seed = (await assessmentBatch(rankInput(native.state), native.now)).assessments[0]!;
+  const { agent, workStyles, assessment: { impact, visibility, effort, workStyleIds, ...assessment }, ...envelope } = seed;
+  native.assessments.append('default', [savedAssessmentSchema.parse({ ...envelope, assessmentVersion: 'work-assessment-v2', assessment })], native.state);
+  await page.goto('/');
+  await page.locator('.task-row').first().click();
+  const panel = page.getByRole('tabpanel');
+  await expect(panel.locator('.work-style-pill')).toHaveText(['Impact Not recorded', 'Visibility Not recorded', 'Effort Not recorded']);
+  await page.getByRole('tab', { name: 'Assessment', exact: true }).click();
+  await panel.getByText('Impact - Not recorded', { exact: true }).click();
+  await expect(panel.locator('details[open]').getByText('Not recorded in this assessment format.', { exact: true })).toBeVisible();
+  await expect(panel).toContainText('Assessment of Assessment task 1');
+  await page.getByRole('tab', { name: 'History', exact: true }).click();
+  await expect(panel.getByLabel('Assessment version').locator('option')).toHaveCount(1);
+  await panel.getByText('Assessment provenance', { exact: true }).click();
+  await expect(panel).toContainText('Legacy task assessor');
+  expect(native.requests).toEqual([]);
 });

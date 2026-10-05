@@ -98,7 +98,7 @@ test('v3 history stays readable without invented styles; v4 retains original sty
   const current = storedAssessmentSchema.parse({ ...assessment, sequence: 2 });
   expect(renderToStaticMarkup(createElement(AssessmentHistory, {
     task: { ...task, assessments: [current] }, profileId: 'default', settings: state.work.settings,
-  }))).toContain('Quick wins, Deep focus');
+  }))).toContain('Quick wins: Small, clear tasks with little context switching.; Deep focus: Work that needs uninterrupted concentration.');
 });
 
 test('canonical duplicates retain current manual corrections from both source rows', () => {

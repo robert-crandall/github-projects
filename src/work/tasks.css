@@ -98,6 +98,26 @@ button.work-style-pill[aria-pressed="true"] { border-color: var(--accent); backg
 .task-detail section h3 { font-size: 14px; margin-bottom: 8px; }
 .task-detail section > p, .task-detail-notice { font-size: 13px; color: var(--secondary); }
 .task-detail-notice { margin-top: 16px; }
+.task-notes .field-help { margin-top: 8px; }
+.reasoning-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.reasoning-tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--border); }
+.reasoning-tabs button { padding: 10px 0; color: var(--secondary); border-radius: 0; border-bottom: 2px solid transparent; }
+.reasoning-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.task-detail .reasoning-panel { margin-top: 0; padding: 18px 0 8px; min-height: min(210px, 65dvh); max-height: min(560px, 65dvh); overflow-y: auto; overflow-wrap: anywhere; scrollbar-gutter: stable; font-size: 13px; }
+.reasoning-panel:focus-visible, .reasoning-tabs button:focus-visible, .task-detail summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.reasoning-panel .field-help { margin-top: 8px; }
+.reasoning-panel .assessment-pills { margin: 16px 0; }
+.assessment-pills .work-style-pill { gap: 5px; }
+.assessment-pills .work-style-pill > span { color: var(--secondary); }
+.assessment-pills .task-style-pill { border-color: var(--accent); color: var(--accent); }
+.assessment-rating { border-top: 1px solid var(--border); }
+.task-style-details { margin: 18px 0; border-top: 1px solid var(--border); }
+.task-style-details summary, .task-disclosure > summary { cursor: pointer; padding: 12px 0; font-size: 13px; }
+.task-style-choice { flex-wrap: wrap; }
+.task-style-choice .field-help { flex-basis: 100%; margin: 0 0 0 24px; }
+.task-disclosure { border-top: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }
+.task-disclosure > p { color: var(--secondary); margin: 8px 0 12px; }
+.task-disclosure textarea { margin: 8px 0 16px; }
 .task-assessment { font-size: 13px; overflow-wrap: anywhere; }
 .task-assessment dl { margin: 16px 0; }
 .task-assessment dt { font-weight: 600; margin-top: 12px; }
