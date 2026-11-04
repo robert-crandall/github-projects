@@ -15,12 +15,13 @@ import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import { assessmentIdentity, workStyleIdsSchema } from '../../service/src/work-styles.ts';
 import { CodeSessions } from './code-sessions.ts';
 import { githubReference } from '../../service/src/references.ts';
+import type { CopilotProjectItem } from '../../service/src/copilot-projects.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type CollectionProgress = {
   id: string; name: string; state: 'waiting' | 'collecting' | 'done' | 'failed' | 'not-run'; diagnostics: string[];
 };
-export type RunKind = 'pipeline' | 'assess' | 'prioritize';
+export type RunKind = 'pipeline' | 'collect' | 'assess' | 'prioritize';
 export type RunProgress = {
   startedAt: number; finishedAt: number | null; sources: CollectionProgress[]; kind?: RunKind;
   assessment?: { total: number; saved: number; batches: number };
@@ -30,6 +31,7 @@ export type WorkQueueSnapshot = {
   phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'refreshing-state' | 'checking-assessments' | 'assessing' | 'cancelling' | 'cancelled' | 'ranking' | 'saving' | 'error';
   progress: RunProgress | null; error: string; warnings: string[]; connections?: WorkConnections;
   unsubscribing: string[];
+  copilotProjects?: CopilotProjectItem[];
 };
 
 class AssessmentCancelled extends Error {}
@@ -211,7 +213,155 @@ export class WorkQueue {
     catch (error) { this.publish({ error: message(error) }); }
   }
 
+  async listCopilotProjects(): Promise<CopilotProjectItem[]> {
+    try {
+      const result = await this.service.call('copilotProjects.list', {});
+      this.publish({ copilotProjects: result.projects });
+      return result.projects;
+    } catch {
+      return this.status.copilotProjects ?? [];
+    }
+  }
+
+  async dismiss(id: string): Promise<void> {
+    const task = this.controller.state.tasks.find(item => item.id === id);
+    if (!task) throw new Error('This task no longer exists.');
+    const notification = task.work?.notification;
+    const email = task.work?.email;
+    this.complete(id);
+    await this.controller.flush();
+    if (notification) {
+      try {
+        await this.service.call('github.acknowledge', {
+          operationId: crypto.randomUUID(),
+          threadId: notification.threadId,
+          reference: notification.reference,
+          notificationUpdatedAt: notification.updatedAt,
+          displayedEvidenceIds: [],
+        });
+      } catch (error) {
+        this.publish({ warnings: [...this.status.warnings, `Marked Done locally; GitHub notification acknowledge failed: ${message(error)}`] });
+      }
+    }
+    if (email) {
+      try {
+        await this.service.call('gmail.archive', {
+          operationId: crypto.randomUUID(),
+          threadId: email.threadId,
+          messageId: email.messageId,
+          markRead: true,
+        });
+      } catch (error) {
+        this.publish({ warnings: [...this.status.warnings, `Marked Done locally; Gmail archive failed: ${message(error)}`] });
+      }
+    }
+  }
+
+  async dispatchToCopilotProjects(
+    id: string,
+    options: { title?: string; prompt: string; projectId?: string; projectName?: string; markDone?: boolean },
+  ): Promise<{ projectId: string; projectName: string; requestId: string }> {
+    const task = this.controller.state.tasks.find(item => item.id === id);
+    if (!task) throw new Error('This task no longer exists.');
+    const result = await this.service.call('copilotProjects.dispatch', {
+      operationId: crypto.randomUUID(),
+      title: options.title?.trim() || task.title,
+      prompt: options.prompt,
+      ...(task.work?.reference?.repo ? { repo: task.work.reference.repo } : {}),
+      ...(task.work?.action ? { action: task.work.action } : {}),
+      ...(options.projectId ? { projectId: options.projectId } : {}),
+      ...(options.projectName ? { projectName: options.projectName } : {}),
+    });
+    const shouldMarkDone = options.markDone ?? (this.controller.state.work.settings.copilotProjects?.autoCompleteOnDispatch ?? true);
+    if (shouldMarkDone) {
+      await this.dismiss(id);
+    }
+    return result;
+  }
+
+  async assignToMe(id: string, markDone = true): Promise<{ assignee: string; repo: string; number: number }> {
+    const task = this.controller.state.tasks.find(item => item.id === id);
+    if (!task?.work?.reference) throw new Error('This task does not have a GitHub issue or PR reference.');
+    const result = await this.service.call('github.assign', {
+      operationId: crypto.randomUUID(),
+      reference: task.work.reference,
+    });
+    if (markDone) await this.dismiss(id);
+    return {
+      assignee: result.assignee,
+      repo: result.reference.repo,
+      number: result.reference.number,
+    };
+  }
+
+  async unsubscribeAndDismiss(id: string): Promise<void> {
+    await this.unsubscribe(id);
+    this.complete(id);
+    await this.controller.flush();
+  }
+
+  async archiveEmail(id: string): Promise<void> {
+    const task = this.controller.state.tasks.find(item => item.id === id);
+    if (!task?.work?.email) throw new Error('This task does not have Gmail message metadata.');
+    await this.service.call('gmail.archive', {
+      operationId: crypto.randomUUID(),
+      threadId: task.work.email.threadId,
+      messageId: task.work.email.messageId,
+      markRead: true,
+    });
+    this.complete(id);
+    await this.controller.flush();
+  }
+
+  async createGmailctlFilter(
+    id: string,
+    options: {
+      from?: string;
+      list?: string;
+      subject?: string;
+      archive?: boolean;
+      markRead?: boolean;
+      deleteIt?: boolean;
+      note?: string;
+      apply?: boolean;
+      configPath?: string;
+    },
+  ): Promise<{ configPath: string; ruleSnippet: string; applied: boolean }> {
+    const task = this.controller.state.tasks.find(item => item.id === id);
+    const configuredPath = options.configPath?.trim()
+      || this.controller.state.work.settings.copilotProjects?.gmailctlConfigPath?.trim();
+    const result = await this.service.call('gmailctl.addFilter', {
+      operationId: crypto.randomUUID(),
+      ...(options.from ? { from: options.from } : {}),
+      ...(options.list ? { list: options.list } : {}),
+      ...(options.subject ? { subject: options.subject } : {}),
+      archive: options.archive ?? true,
+      markRead: options.markRead ?? true,
+      deleteIt: options.deleteIt ?? false,
+      apply: options.apply ?? false,
+      ...(configuredPath ? { configPath: configuredPath } : {}),
+    });
+    if (task?.work?.email) {
+      try {
+        await this.service.call('gmail.archive', {
+          operationId: crypto.randomUUID(),
+          threadId: task.work.email.threadId,
+          messageId: task.work.email.messageId,
+          markRead: true,
+        });
+      } catch {
+        // Filter was created; archiving the existing thread is best-effort.
+      }
+    }
+    if (task) {
+      this.complete(id);
+      await this.controller.flush();
+    }
+    return result;
+  }
+
   run(): Promise<void> { return this.start(new Date()); }
+  collectSources(): Promise<void> { return this.start(new Date(), 'collect'); }
   runAssessor(taskIds?: readonly string[]): Promise<void> { return this.start(new Date(), 'assess', taskIds); }
   runPrioritizer(): Promise<void> { return this.start(new Date(), 'prioritize'); }
   cancelAssessor(): Promise<void> {
@@ -253,7 +403,7 @@ export class WorkQueue {
     this.targetCancelled = false;
     this.publish({ running: true, cancelRequested: false, phase: 'preparing', error: '', warnings: [], progress: {
       startedAt: Date.now(), finishedAt: null, kind,
-      sources: settings.streams.filter(stream => kind === 'pipeline' && stream.enabled)
+      sources: settings.streams.filter(stream => (kind === 'pipeline' || kind === 'collect') && stream.enabled)
         .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
     } });
     const running = this.execute(now, settings, kind, selectedIds);
@@ -267,17 +417,17 @@ export class WorkQueue {
   private assertWorkspace(generation: number): void {
     if (generation !== this.controller.assessmentGeneration) throw new Error('The workspace was replaced during this run. Its previous results cannot change the restored workspace.');
   }
-  private async persist(batch: WorkCollection, profileId: string, generation: number): Promise<void> {
+  private async persist(batch: WorkCollection, profileId: string, generation: number, reopenDone = true): Promise<void> {
     this.assertWorkspace(generation);
     this.update(current => {
       this.assertProfile(current, profileId);
       // This run's reads are serialized and generation-fenced; a clock correction cannot make a fresh reply older.
-      return reconcileWork(current, batch, new Date(), true);
+      return reconcileWork(current, batch, new Date(), true, { reopenDone });
     });
     await this.controller.flush();
   }
 
-  private async refreshState(profileId: string, generation: number, observed: ReadonlySet<string> = new Set()): Promise<string[]> {
+  private async refreshState(profileId: string, generation: number, observed: ReadonlySet<string> = new Set(), reopenDone = true): Promise<string[]> {
     const urls = [...new Set(this.controller.state.tasks.filter(task =>
       task.status === 'open' && task.work && githubReference(task.work.url),
     ).map(task => canonicalSource(task.work!.url)))].filter(url => !observed.has(url));
@@ -295,7 +445,7 @@ export class WorkQueue {
       if (result.candidates.length || !exactIds(requested.map(canonicalSource), result.observations.map(value => canonicalSource(value.url)))) {
         throw new Error('Source refresh did not return exactly the requested sources. The previous order is retained.');
       }
-      await this.persist(result, profileId, generation);
+      await this.persist(result, profileId, generation, reopenDone);
       warnings.push(...result.warnings);
     }
     return warnings;
@@ -317,7 +467,7 @@ export class WorkQueue {
     return tasks;
   }
 
-  private async intake(profileId: string, generation: number): Promise<void> {
+  private async intake(profileId: string, generation: number, reopenDone = true): Promise<void> {
     const seen = new Set<string>();
     for (let page = 0; page < 20; page += 1) {
       const intake = await this.service.call('work.intake', {});
@@ -328,7 +478,7 @@ export class WorkQueue {
       if (intake.items.length) {
         await this.persist({
           candidates: intake.items.map(item => item.candidate), observations: [], warnings: [], collectedAt: new Date().toISOString(),
-        }, profileId, generation);
+        }, profileId, generation, reopenDone);
         this.assertWorkspace(generation);
         const ack = await this.service.call('work.ackIntake', { ids });
         if (!exactIds(ids, ack.ids)) throw new Error('Task intake acknowledgement did not match the saved items.');
@@ -523,13 +673,14 @@ export class WorkQueue {
     let scannedSettings = '';
     let completionWritten = false;
     try {
+      const reopenDone = kind !== 'collect';
       this.update(current => {
         previousCompletedAt = current.work.lastCompletedAt;
-        return kind === 'pipeline' ? { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } } : current;
+        return (kind === 'pipeline' || kind === 'collect') ? { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } } : current;
       });
       await this.controller.flush();
       await this.controller.retryAssessments();
-      if (kind !== 'pipeline') {
+      if (kind === 'assess' || kind === 'prioritize') {
         const input = { ...rankInput(this.controller.state), profileId };
         if (kind === 'assess') {
           if (selectedIds) input.tasks = input.tasks.filter(task => selectedIds.has(task.id));
@@ -558,7 +709,7 @@ export class WorkQueue {
       scannedSettings = sourceSettings(settings);
       const streams = settings.streams.filter(stream => stream.enabled);
       this.publish({ phase: 'intake' });
-      try { await this.intake(profileId, generation); }
+      try { await this.intake(profileId, generation, reopenDone); }
       catch (error) {
         if (this.controller.getSnapshot().persistence.error) throw error;
         errors.push(`Task intake: ${message(error)}`);
@@ -572,9 +723,11 @@ export class WorkQueue {
         this.sourceProgress(stream.id, { state: 'collecting' });
         const diagnostics: string[] = [];
         let failed = false;
-        const knownUrls = [...new Set(this.controller.state.tasks
-          .filter(task => task.status === 'open' && task.work && githubReference(task.work.url))
-          .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
+        const knownUrls = stream.kind === 'gmail'
+          ? []
+          : [...new Set(this.controller.state.tasks
+            .filter(task => task.status === 'open' && task.work && githubReference(task.work.url))
+            .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
         for (let offset = 0; offset < Math.max(knownUrls.length, 1); offset += 100) {
           this.assertProfile(this.controller.state, profileId);
           const pendingUrls = knownUrls.slice(offset, offset + 100).filter(url => !observed.has(canonicalSource(url)));
@@ -583,6 +736,7 @@ export class WorkQueue {
             const result = await this.service.call('work.collect', {
               stream, model: settings.model, since: collectionCursor, knownUrls: pendingUrls,
               observeOnly: offset > 0,
+              ...(kind === 'collect' ? { skipModelExtraction: true } : {}),
             });
             if (result.coveredThrough) {
               const boundary = Date.parse(result.coveredThrough);
@@ -592,7 +746,7 @@ export class WorkQueue {
               }
               if (boundary < Date.parse(coveredThrough)) coveredThrough = result.coveredThrough;
             }
-            await this.persist(result, profileId, generation);
+            await this.persist(result, profileId, generation, reopenDone);
             for (const observation of result.observations) observed.add(canonicalSource(observation.url));
             const coverage = (result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`);
             warnings.push(...coverage);
@@ -616,11 +770,13 @@ export class WorkQueue {
       }
       this.publish({ warnings: [...warnings] });
       try {
-        warnings.push(...await this.refreshState(profileId, generation, observed));
-        const input = { ...rankInput(this.controller.state), profileId };
-        const tasks = await this.unassessed(input, profileId, generation);
-        const assessments = await this.assess({ ...input, tasks }, generation);
-        warnings.push(...await this.prioritize(input, generation, assessments));
+        warnings.push(...await this.refreshState(profileId, generation, observed, reopenDone));
+        if (kind === 'pipeline') {
+          const input = { ...rankInput(this.controller.state), profileId };
+          const tasks = await this.unassessed(input, profileId, generation);
+          const assessments = await this.assess({ ...input, tasks }, generation);
+          warnings.push(...await this.prioritize(input, generation, assessments));
+        }
       }
       catch (error) {
         if (error instanceof AssessmentCancelled) throw error;

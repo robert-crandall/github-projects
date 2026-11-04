@@ -21,6 +21,11 @@ export function createHandler(github = new GitHubService(), copilot = new Copilo
       case 'github.conversation': return github.conversation(request.input, signal);
       case 'github.acknowledge': return github.write('acknowledge', request.input, signal);
       case 'github.unsubscribe': return github.write('unsubscribe', request.input, signal);
+      case 'github.assign': return github.assign(request.input, signal);
+      case 'copilotProjects.list': return work.listCopilotProjects(signal);
+      case 'copilotProjects.dispatch': return work.dispatchCopilotProject(request.input, signal);
+      case 'gmail.archive': return work.archiveGmail(request.input, signal);
+      case 'gmailctl.addFilter': return work.addGmailctlFilter(request.input, signal);
       case 'copilot.triage': return copilot.triage(request.input, signal);
       case 'copilot.interpretCapture': return copilot.interpretCapture(request.input, signal);
       case 'copilot.reconsider': return copilot.reconsider(request.input, signal);

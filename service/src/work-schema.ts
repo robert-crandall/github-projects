@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { taskAgents, taskAgentsSchema } from './work-agents.ts';
 import { codeAgents, codeAgentsSchema } from './code-agents.ts';
-import { referenceSchema } from './references.ts';
+import { referenceSchema, idSchema } from './references.ts';
 import { savedAssessmentSchema } from './work-assessment.ts';
 import { workStylesSchema, workStyleIdsSchema } from './work-styles.ts';
 
@@ -27,8 +27,18 @@ export const workUnsubscribeSchema = z.strictObject({
   status: z.enum(['pending', 'unconfirmed', 'confirmed']),
   error: z.string().max(1000), confirmedAt: time.optional(),
 });
+export const workEmailMetadataSchema = z.strictObject({
+  messageId: z.string().trim().min(1).max(200),
+  threadId: z.string().trim().min(1).max(200).optional(),
+  from: z.string().trim().min(1).max(500),
+  senderEmail: z.string().trim().max(320).optional(),
+  subject: z.string().trim().max(1000).optional(),
+  listId: z.string().trim().max(500).optional(),
+  unsubscribeUrl: url.optional(),
+  snippet: z.string().max(4000).optional(),
+});
 export const workEvidenceSchema = z.strictObject({
-  id, source: z.enum(['github', 'slack', 'manual', 'mcp', 'copilot']),
+  id, source: z.enum(['github', 'slack', 'gmail', 'manual', 'mcp', 'copilot']),
   streamId: id, at: time, url, summary: z.string().min(1).max(2000),
 });
 export const workSourceContextSchema = z.strictObject({
@@ -60,10 +70,33 @@ export const workMetadataSchema = z.strictObject({
   pullRequest: pullRequestStateSchema.optional(),
   notification: workNotificationSchema.optional(),
   unsubscribe: workUnsubscribeSchema.optional(),
+  email: workEmailMetadataSchema.optional(),
 });
+export const defaultActionPrompts = {
+  review: 'Review {{url}} ({{title}}). Check the diff, tests, and edge cases, then summarize your findings.',
+  implement: 'Work on {{url}} ({{title}}). Investigate the issue, implement the fix in a new worktree, run tests, and prepare a PR.',
+  fix: 'Investigate and fix {{url}} ({{title}}). Reproduce or trace the failure, implement a minimal fix, and verify with tests.',
+  'follow-up': 'Investigate {{url}} ({{title}}) and help me take the next action.',
+} as const;
+export const copilotProjectsPromptsSchema = z.strictObject({
+  review: z.string().trim().min(1).max(4000).default(defaultActionPrompts.review),
+  implement: z.string().trim().min(1).max(4000).default(defaultActionPrompts.implement),
+  fix: z.string().trim().min(1).max(4000).default(defaultActionPrompts.fix),
+  'follow-up': z.string().trim().min(1).max(4000).default(defaultActionPrompts['follow-up']),
+});
+export const copilotProjectsSettingsSchema = z.strictObject({
+  defaultProject: z.string().trim().max(200).default(''),
+  autoCompleteOnDispatch: z.boolean().default(true),
+  gmailctlConfigPath: z.string().trim().max(1000).default('~/repos/documents/gmailctl/config.jsonnet'),
+  prompts: copilotProjectsPromptsSchema.default(() => ({ ...defaultActionPrompts })),
+});
+export type CopilotProjectsSettings = z.infer<typeof copilotProjectsSettingsSchema>;
+export function copilotProjectsSettings(settings?: { copilotProjects?: CopilotProjectsSettings }): CopilotProjectsSettings {
+  return copilotProjectsSettingsSchema.parse(settings?.copilotProjects ?? {});
+}
 export const workstreamSchema = z.strictObject({
   id, name: z.string().trim().min(1).max(100), enabled: z.boolean(),
-  kind: z.enum(['github', 'github-notifications', 'slack', 'mcp']),
+  kind: z.enum(['github', 'github-notifications', 'gmail', 'slack', 'mcp']),
   query: z.string().trim().min(1).max(4000),
   action: workActionSchema,
   server: z.string().max(200),
@@ -78,6 +111,7 @@ const savedWorkSettingsSchema = z.strictObject({
   agents: taskAgentsSchema.optional(),
   codeAgents: codeAgentsSchema.optional(),
   workStyles: workStylesSchema.optional(),
+  copilotProjects: copilotProjectsSettingsSchema.optional(),
   streams: z.array(workstreamSchema).max(30),
   schedule: z.strictObject({ enabled: z.boolean(), everyMinutes: z.number().int().min(5).max(1440) }),
 });
@@ -93,7 +127,7 @@ export const workStateSchema = z.strictObject({
   settings: workSettingsSchema,
   sourceFilter: z.strictObject({
     selectedSources: z.array(z.string().min(1).max(4000)).nullable(),
-    collapsedProviders: z.array(z.enum(['github', 'slack', 'mcp'])),
+    collapsedProviders: z.array(z.enum(['github', 'gmail', 'slack', 'mcp'])),
   }).optional(),
   styleFilter: workStyleIdsSchema.nullable().optional(),
   ranking: workRankingSchema.nullable(),
@@ -107,6 +141,7 @@ export const workCandidateSchema = z.strictObject({
   action: workActionSchema, url,
   evidence: z.array(workEvidenceSchema).min(1).max(200),
   notification: workNotificationSchema.optional(),
+  email: workEmailMetadataSchema.optional(),
 });
 export const workObservationSchema = z.strictObject({
   url, state: z.enum(['open', 'queued', 'closed', 'merged', 'unknown']),
@@ -121,6 +156,7 @@ export const workCollectInputSchema = z.strictObject({
   knownUrls: z.array(url).max(100).default([]),
   observeOnly: z.boolean().default(false),
   stateOnly: z.boolean().optional(),
+  skipModelExtraction: z.boolean().optional(),
 }).refine(input => !input.stateOnly || input.observeOnly, 'State-only requests must observe saved sources without collecting.');
 export const workCollectOutputSchema = z.strictObject({
   candidates: z.array(workCandidateSchema).max(200),
@@ -165,6 +201,7 @@ export const workIntakeOutputSchema = z.strictObject({
 });
 export const workIntakeAckSchema = z.strictObject({ ids: z.array(id).max(200) });
 
+export type WorkEmailMetadata = z.infer<typeof workEmailMetadataSchema>;
 export type WorkAction = z.infer<typeof workActionSchema>;
 export type WorkEvidence = z.infer<typeof workEvidenceSchema>;
 export type WorkSourceContext = z.infer<typeof workSourceContextSchema>;
@@ -181,11 +218,31 @@ export function isGitHubStream(stream: { kind: string }): boolean {
   return stream.kind === 'github' || stream.kind === 'github-notifications';
 }
 
+export function isDirectStream(stream: { kind: string }): boolean {
+  return isGitHubStream(stream) || stream.kind === 'gmail';
+}
+
 export function notificationWorkstream(): Workstream {
   return {
     id: crypto.randomUUID(), name: 'GitHub notifications', enabled: true,
     kind: 'github-notifications', query: 'Inspect updated notifications for actionable requests addressed to me.',
     action: 'follow-up', server: '', tools: [],
+  };
+}
+
+export function gmailWorkstream(): Workstream {
+  return {
+    id: crypto.randomUUID(), name: 'Personal Gmail inbox', enabled: true,
+    kind: 'gmail', query: 'in:inbox is:unread -category:promotions -category:social',
+    action: 'follow-up', server: '', tools: [],
+  };
+}
+
+export function budgetWorkstream(): Workstream {
+  return {
+    id: crypto.randomUUID(), name: 'Budget unexpected charges', enabled: false,
+    kind: 'mcp', query: 'Flag unexpected, duplicate, or uncategorized charges over $50 from the last 7 days that need review.',
+    action: 'follow-up', server: 'budget', tools: [],
   };
 }
 
@@ -208,3 +265,130 @@ export function defaultWorkState(): WorkState {
     ranking: null, lastStartedAt: null, lastCompletedAt: null, collectionCursor: null, lastError: '',
   };
 }
+
+export const copilotProjectItemSchema = z.strictObject({
+  id: z.string().min(1).max(100),
+  name: z.string().min(1).max(200),
+  state: z.string().min(1).max(50),
+  sessions: z.number().int().nonnegative(),
+  active: z.boolean(),
+});
+
+export const copilotProjectsListOutputSchema = z.strictObject({
+  available: z.boolean(),
+  projects: z.array(copilotProjectItemSchema).max(200),
+});
+
+export const MAX_COPILOT_PROJECTS_PROMPT_BYTES = 8_192;
+
+export const copilotProjectsDispatchInputSchema = z.strictObject({
+  operationId: idSchema,
+  projectId: z.string().trim().max(200).optional(),
+  projectName: z.string().trim().max(200).optional(),
+  repo: z.string().trim().max(200).optional(),
+  action: workActionSchema.optional(),
+  title: z.string().trim().min(1).max(300),
+  prompt: z.string().trim().min(1).max(MAX_COPILOT_PROJECTS_PROMPT_BYTES)
+    .refine(val => new TextEncoder().encode(val).length <= MAX_COPILOT_PROJECTS_PROMPT_BYTES,
+      `Prompt must be at most ${MAX_COPILOT_PROJECTS_PROMPT_BYTES} UTF-8 bytes.`),
+  host: z.string().trim().max(200).optional(),
+});
+
+export const copilotProjectsDispatchResultSchema = z.strictObject({
+  operationId: idSchema,
+  requestId: z.uuid(),
+  projectId: z.string().min(1).max(200),
+  projectName: z.string().min(1).max(200),
+  status: z.literal('confirmed'),
+  confirmedAt: time,
+});
+
+export const gmailArchiveInputSchema = z.strictObject({
+  operationId: idSchema,
+  messageId: z.string().trim().min(1).max(200),
+  threadId: z.string().trim().min(1).max(200).optional(),
+  markRead: z.boolean().default(true),
+});
+
+export const gmailArchiveResultSchema = z.strictObject({
+  operationId: idSchema,
+  messageId: z.string().min(1).max(200),
+  threadId: z.string().min(1).max(200),
+  status: z.literal('confirmed'),
+  confirmedAt: time,
+});
+
+export const gmailctlFilterInputSchema = z.strictObject({
+  operationId: idSchema,
+  from: z.string().trim().max(320).optional(),
+  list: z.string().trim().max(320).optional(),
+  subject: z.string().trim().max(300).optional(),
+  archive: z.boolean().default(true),
+  markRead: z.boolean().default(true),
+  deleteIt: z.boolean().default(false),
+  apply: z.boolean().default(false),
+  configPath: z.string().trim().max(500).optional(),
+});
+
+export const gmailctlFilterResultSchema = z.strictObject({
+  operationId: idSchema,
+  configPath: z.string().min(1).max(500),
+  ruleSnippet: z.string().min(1).max(2_000),
+  applied: z.boolean(),
+  status: z.literal('confirmed'),
+  confirmedAt: time,
+});
+
+export type CopilotProjectItem = z.infer<typeof copilotProjectItemSchema>;
+export type CopilotProjectsListOutput = z.infer<typeof copilotProjectsListOutputSchema>;
+export type CopilotProjectsDispatchInput = z.infer<typeof copilotProjectsDispatchInputSchema>;
+export type CopilotProjectsDispatchResult = z.infer<typeof copilotProjectsDispatchResultSchema>;
+export type GmailArchiveInput = z.infer<typeof gmailArchiveInputSchema>;
+export type GmailArchiveResult = z.infer<typeof gmailArchiveResultSchema>;
+export type GmailctlFilterInput = z.infer<typeof gmailctlFilterInputSchema>;
+export type GmailctlFilterResult = z.infer<typeof gmailctlFilterResultSchema>;
+
+export function selectCopilotProject(
+  projects: CopilotProjectItem[],
+  options: {
+    projectId?: string;
+    projectName?: string;
+    repo?: string;
+    action?: string;
+    allowFallback?: boolean;
+  },
+): { id: string; name: string } | undefined {
+  const wantedId = options.projectId?.trim();
+  if (wantedId) {
+    const byId = projects.find(project => project.id.toLowerCase() === wantedId.toLowerCase());
+    if (byId) return { id: byId.id, name: byId.name };
+    const byName = projects.find(project => project.name.toLowerCase() === wantedId.toLowerCase());
+    if (byName) return { id: byName.id, name: byName.name };
+    if (options.allowFallback !== false) return { id: wantedId, name: options.projectName?.trim() || wantedId };
+  }
+  const wantedName = options.projectName?.trim();
+  if (wantedName) {
+    const exact = projects.find(project => project.name.toLowerCase() === wantedName.toLowerCase());
+    if (exact) return { id: exact.id, name: exact.name };
+  }
+  if (options.action === 'review') {
+    const reviewProject = projects.find(project =>
+      project.name.toLowerCase() === 'pr reviews' || /\breview\s*prs?\b|\bprs?\s*reviews?\b/i.test(project.name),
+    );
+    if (reviewProject) return { id: reviewProject.id, name: reviewProject.name };
+  }
+  const repoShort = options.repo?.split('/').at(-1)?.trim().toLowerCase();
+  if (repoShort) {
+    const byRepo = projects.find(project => project.name.toLowerCase() === repoShort);
+    if (byRepo) return { id: byRepo.id, name: byRepo.name };
+    const prefixRepo = projects.find(project =>
+      project.name.toLowerCase().startsWith(repoShort) || repoShort.startsWith(project.name.toLowerCase()),
+    );
+    if (prefixRepo) return { id: prefixRepo.id, name: prefixRepo.name };
+  }
+  if (options.allowFallback === false) return undefined;
+  const active = projects.find(project => project.active) ?? projects[0];
+  return active ? { id: active.id, name: active.name } : undefined;
+}
+
+

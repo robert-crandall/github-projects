@@ -124,6 +124,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
     ? second.work.notification : first.work.notification;
   const unsubscribe = [first.work.unsubscribe, second.work.unsubscribe].find(intent => intent && intent.status !== 'confirmed')
     ?? first.work.unsubscribe ?? second.work.unsubscribe;
+  const email = second.work.email ?? first.work.email;
   const status = first.status === 'open' || second.status === 'open' ? 'open' : 'done';
   const completedAt = status === 'done' && (!first.completedAt || !second.completedAt) ? undefined
     : [first.completedAt, second.completedAt].filter((at): at is string => !!at)
@@ -146,6 +147,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
       handledEvidenceIds: [...new Set([...first.work.handledEvidenceIds, ...second.work.handledEvidenceIds])],
       availability: observation.availability, availabilityReason: observation.availabilityReason,
       availabilityObservedAt: observation.availabilityObservedAt, notification, unsubscribe,
+      ...(email ? { email } : {}),
       ...(observation.pullRequest ? { pullRequest: observation.pullRequest } : {}),
       context: context?.context, contextObservedAt: context?.contextObservedAt ?? context?.availabilityObservedAt,
     }),
@@ -208,8 +210,15 @@ export function consolidateWorkTasks(state: AppState): AppState {
   };
 }
 
-/** Completion belongs to the owner; collection can only reopen on unseen, newer actionable evidence. */
-export function reconcileWork(state: AppState, collection: WorkCollection, now: string | Date, authoritative = false): AppState {
+/** Completion belongs to the owner; collection can only reopen on unseen, newer actionable evidence when reopenDone is enabled. */
+export function reconcileWork(
+  state: AppState,
+  collection: WorkCollection,
+  now: string | Date,
+  authoritative = false,
+  options: { reopenDone?: boolean } = {},
+): AppState {
+  const allowReopen = options.reopenDone ?? true;
   const batch = workCollectOutputSchema.parse(collection);
   state = consolidateWorkTasks(state);
   const createdAt = timestamp(now);
@@ -246,15 +255,18 @@ export function reconcileWork(state: AppState, collection: WorkCollection, now: 
       ...(linked?.context ? { context: linked.context } : {}),
       ...(linked?.contextObservedAt ? { contextObservedAt: linked.contextObservedAt } : {}),
       ...(linked?.unsubscribe ? { unsubscribe: linked.unsubscribe } : {}),
+      ...(linked?.email ? { email: linked.email } : {}),
     };
     const reference = sourceReference(base, [candidate.url]);
+    const email = candidate.email ?? base.email;
     const work = workMetadataSchema.parse(observe({
       ...base, identity, url, evidence: mergeEvidence(base.evidence, candidate.evidence),
       ...(reference ? { reference } : {}),
+      ...(email ? { email } : {}),
       ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
     }, observation, contexts.get(url), authoritative));
     const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
-    const reopen = previous?.status === 'done' && previous.completedAt !== undefined
+    const reopen = allowReopen && previous?.status === 'done' && previous.completedAt !== undefined
       && work.availability === 'actionable'
       && candidate.evidence.some(evidence => !known.has(evidence.id)
         && Date.parse(evidence.at) > Date.parse(previous.completedAt!));
@@ -275,14 +287,21 @@ export function completeWorkTask(state: AppState, id: string, now: string | Date
   const task = state.tasks.find(task => task.id === id);
   if (!task) throw new Error('This task no longer exists.');
   if (task.status === 'done') return state;
+  const tasks = state.tasks.map(task => task.id !== id ? task : {
+    ...task, status: 'done' as const, completedAt,
+    ...(task.work ? { work: workMetadataSchema.parse({
+      ...task.work, handledEvidenceIds: [...new Set([...task.work.handledEvidenceIds, ...task.work.evidence.map(evidence => evidence.id)])],
+    }) } : {}),
+  });
+  let selectedKey = state.selectedKey;
+  if (selectedKey === `a:${id}`) {
+    const active = rankedTasks({ ...state, tasks });
+    selectedKey = active[0] ? `a:${active[0].id}` : null;
+  }
   return {
     ...state,
-    tasks: state.tasks.map(task => task.id !== id ? task : {
-      ...task, status: 'done', completedAt,
-      ...(task.work ? { work: workMetadataSchema.parse({
-        ...task.work, handledEvidenceIds: [...new Set([...task.work.handledEvidenceIds, ...task.work.evidence.map(evidence => evidence.id)])],
-      }) } : {}),
-    }),
+    selectedKey,
+    tasks,
   };
 }
 

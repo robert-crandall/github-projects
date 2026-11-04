@@ -45,7 +45,13 @@ const eventSchema = z.object({
 type Event = z.infer<typeof eventSchema>;
 type Source = z.infer<typeof sourceSchema>;
 type Notification = NonNullable<WorkCandidate['notification']>;
-type Target = { ref: Reference; matched: boolean; notification?: Notification };
+type Target = {
+  ref: Reference;
+  matched: boolean;
+  notification?: Notification;
+  notificationReason?: string;
+  notificationUnread?: boolean;
+};
 const notificationSourceLimit = Math.floor(200 / githubWorkActionSchema.options.length);
 const notificationWindowProbes = 32;
 const notificationSchema = z.object({
@@ -333,9 +339,17 @@ export class WorkGitHub {
           const ref = reference(url);
           const existing = urls.get(url);
           if (!existing?.notification || Date.parse(notification.updated_at) > Date.parse(existing.notification.updatedAt)) {
-            urls.set(url, { ref, matched: true, notification: {
-              threadId: notification.id, reference: ref, updatedAt: notification.updated_at,
-            } });
+            urls.set(url, {
+              ref,
+              matched: true,
+              notification: {
+                threadId: notification.id,
+                reference: ref,
+                updatedAt: notification.updated_at,
+              },
+              notificationReason: notification.reason,
+              notificationUnread: notification.unread,
+            });
           }
         } catch {
           warnings.push(`Notification ${notification.id}: invalid GitHub subject identity; no source URL was followed.`);
@@ -631,13 +645,46 @@ export class WorkGitHub {
             const actions: Workstream['action'][] = ['review'];
             if (source.assignees?.some(user => same(user.login, viewer))) actions.push('implement');
             if (sourceRef.kind === 'pr' && source.user && same(source.user.login, viewer)) actions.push('fix', 'merge');
+            let emittedForNotification = false;
             for (const action of actions) {
               const inferredStream = { ...stream, action, query: [...teams].map(team => `team-review-requested:${team}`).join(' ') };
               const evidence = this.evidence(source, graph, sourceEvents, sourceRef, inferredStream, viewer, url, warnings, coverageInfo);
               if (evidence.length > 200) coverageInfo.push(`${sourceRef.repo}#${sourceRef.number}: ${action} evidence is capped at 200 events.`);
-              if (evidence.length) candidates.push({ title: source.title, action, url, evidence: evidence.slice(-200) });
+              if (evidence.length) {
+                candidates.push({ title: source.title, action, url, evidence: evidence.slice(-200) });
+                emittedForNotification = true;
+              }
             }
-            requestInputs.push(context);
+            if (!input.skipModelExtraction) {
+              requestInputs.push(context);
+            } else if (!emittedForNotification && urls.get(url)?.notificationUnread) {
+              const target = urls.get(url)!;
+              if (target.notificationReason !== 'ci_activity' && target.notificationReason !== 'state_change') {
+                const fallbackAction: Workstream['action'] = sourceRef.kind === 'issue'
+                  ? 'implement'
+                  : source.user && same(source.user.login, viewer)
+                    ? 'fix'
+                    : 'review';
+                const reasonLabel = target.notificationReason || 'notification';
+                const latestComment = context.messages.at(-1);
+                const summaryText = latestComment?.body?.trim()
+                  ? `${latestComment.author ? `@${latestComment.author}: ` : ''}${latestComment.body.trim().replace(/\s+/g, ' ').slice(0, 240)}`
+                  : `Unread GitHub notification (${reasonLabel}) on ${sourceRef.repo}#${sourceRef.number}.`;
+                candidates.push({
+                  title: source.title,
+                  action: fallbackAction,
+                  url,
+                  evidence: [{
+                    id: identity(sourceRef, 'notification', target.notification?.threadId ?? source.id),
+                    source: 'github',
+                    streamId: stream.id,
+                    at: target.notification?.updatedAt ?? source.updated_at ?? source.created_at,
+                    url: latestComment?.sourceUrl ?? url,
+                    summary: summaryText,
+                  }],
+                });
+              }
+            }
           } else {
             const evidence = this.evidence(source, graph, events, ref, stream, viewer, url, warnings, coverageInfo);
             if (evidence.length > 200) warnings.push(`${ref.repo}#${ref.number}: evidence is capped at 200 events.`);
@@ -645,7 +692,7 @@ export class WorkGitHub {
               title: source.title, action: stream.action, url, evidence: evidence.slice(-200),
             });
           }
-          if (!notificationStream && stream.action === 'reply') {
+          if (!notificationStream && stream.action === 'reply' && !input.skipModelExtraction) {
             // Model extraction is serialized after parallel source reads below.
             replyInputs.push({ source, events, url, ref });
           }

@@ -1,9 +1,14 @@
 import type { WorkEvidence, WorkSettings } from '../../service/src/work-schema.ts';
 import type { Task } from '../types.ts';
 
-export const sourceProviders = ['github', 'slack', 'mcp'] as const;
+export const sourceProviders = ['github', 'gmail', 'slack', 'mcp'] as const;
 export type SourceProvider = typeof sourceProviders[number];
-export const providerNames = { github: 'GitHub', slack: 'Slack', mcp: 'MCP' };
+export const providerNames: Record<SourceProvider, string> = {
+  github: 'GitHub',
+  gmail: 'Gmail',
+  slack: 'Slack',
+  mcp: 'MCP / Budget',
+};
 export type TaskSource = { id: string; name: string; provider?: SourceProvider; detail?: string };
 
 const streamKey = (provider: SourceProvider, id: string) => JSON.stringify([provider, id]);

@@ -1,6 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import { ArrowLeft, Plus, Trash2 } from 'lucide-react';
-import { githubWorkActionSchema, isGitHubStream, notificationWorkstream, workSettingsSchema, type WorkSettings, type Workstream } from '../../service/src/work-schema.ts';
+import {
+  budgetWorkstream, copilotProjectsSettings, githubWorkActionSchema, gmailWorkstream,
+  isDirectStream, notificationWorkstream, workSettingsSchema, type WorkSettings, type Workstream,
+} from '../../service/src/work-schema.ts';
 import type { WorkQueue } from './controller.ts';
 import { Appearance } from '../themes/Appearance.tsx';
 import { taskAgents, taskAgentJobs, type TaskAgent } from '../../service/src/work-agents.ts';
@@ -42,7 +45,7 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
       setError(parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join(' '));
       return;
     }
-    const invalidMcp = parsed.data.streams.find(stream => stream.enabled && !isGitHubStream(stream)
+    const invalidMcp = parsed.data.streams.find(stream => stream.enabled && !isDirectStream(stream)
       && (!stream.server.trim() || !stream.tools.length || stream.tools.includes('*')));
     if (invalidMcp) { setError(`${invalidMcp.name}: choose a server and name its allowed read tools. Wildcards are not allowed.`); return; }
     try { queue.saveSettings(parsed.data, nextName); }
@@ -136,9 +139,17 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
         <p>Keep backlog searches for assigned work and projects. Notifications find requests those searches miss, including mentions.</p>
         <label className="task-model">Collection model (optional)<input value={draft.model} maxLength={100}
           placeholder="Use the SDK default" onChange={event => change({ ...draft, model: event.target.value })} /></label>
-        {!draft.streams.some(stream => stream.kind === 'github-notifications') && <button type="button" className="secondary"
-          disabled={draft.streams.length >= 30} onClick={() => change({ ...draft, streams: [...draft.streams, notificationWorkstream()] })}>
-          <Plus size={15} />Add GitHub notifications</button>}
+        <div className="task-source-presets" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
+          {!draft.streams.some(stream => stream.kind === 'github-notifications') && <button type="button" className="secondary"
+            disabled={draft.streams.length >= 30} onClick={() => change({ ...draft, streams: [...draft.streams, notificationWorkstream()] })}>
+            <Plus size={15} />Add GitHub notifications</button>}
+          {!draft.streams.some(stream => stream.kind === 'gmail') && <button type="button" className="secondary"
+            disabled={draft.streams.length >= 30} onClick={() => change({ ...draft, streams: [...draft.streams, gmailWorkstream()] })}>
+            <Plus size={15} />Add Personal Gmail</button>}
+          {!draft.streams.some(stream => stream.name === budgetWorkstream().name) && <button type="button" className="secondary"
+            disabled={draft.streams.length >= 30} onClick={() => change({ ...draft, streams: [...draft.streams, budgetWorkstream()] })}>
+            <Plus size={15} />Add Budget / Monarch / YNAB</button>}
+        </div>
         <div className="task-streams">{draft.streams.map((stream, index) => <fieldset key={stream.id} className="task-stream">
           <legend>Source {index + 1}</legend>
           <div className="task-stream-top"><label className="checkbox-label"><input type="checkbox" checked={stream.enabled}
@@ -150,19 +161,23 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
             onChange={event => streamChange(stream.id, { name: event.target.value })} /></label>
             <label>Source type<select value={stream.kind} onChange={event => streamChange(stream.id, event.target.value === 'github-notifications'
               ? { kind: 'github-notifications', query: notificationWorkstream().query, action: 'follow-up', server: '', tools: [] }
+              : event.target.value === 'gmail'
+                ? { kind: 'gmail', query: gmailWorkstream().query, action: 'follow-up', server: '', tools: [] }
               : event.target.value === 'slack' && !stream.tools.some(tool => tool.trim())
                 ? { kind: 'slack', tools: [...slackReadTools] }
               : { kind: event.target.value as Workstream['kind'] })}>
               <option value="github">GitHub search</option><option value="github-notifications">GitHub notifications</option>
-              <option value="slack">Slack through MCP</option><option value="mcp">MCP search</option>
+              <option value="gmail">Personal Gmail</option><option value="slack">Slack through MCP</option><option value="mcp">MCP search (YNAB / Monarch / custom)</option>
             </select></label></div>
           {stream.kind === 'github-notifications' ? <p className="field-help">
             Inspect issue and PR notifications updated since the last successful run, whether read or unread.
             The first scan covers 30 days. Copilot identifies actual requests before adding tasks; ordinary activity does not reopen Done.
-          </p> : <><label>{stream.kind === 'github' ? 'GitHub query' : 'What should Copilot look for?'}
+          </p> : <><label>{stream.kind === 'github' ? 'GitHub query' : stream.kind === 'gmail' ? 'Gmail search query' : 'What should Copilot look for?'}
             <textarea rows={2} value={stream.query} maxLength={4000} placeholder={stream.kind === 'github'
               ? 'is:pr is:open archived:false user-review-requested:@me'
-              : 'Find requests for me in the team channel. Read the thread and extract only work I need to do.'}
+              : stream.kind === 'gmail'
+                ? 'in:inbox is:unread -category:promotions -category:social'
+                : 'Find requests for me in the team channel. Read the thread and extract only work I need to do.'}
             onChange={event => streamChange(stream.id, { query: event.target.value })} /></label>
           <label>{stream.kind === 'github' ? 'Action to take on matches' : 'Default action'}
             <select value={stream.action} onChange={event => streamChange(stream.id, { action: event.target.value as Workstream['action'] })}>
@@ -171,13 +186,67 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
               {actions.filter(([value]) => stream.kind !== 'github' || githubWorkActionSchema.safeParse(value).success)
                 .map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select></label></>}
-          {!isGitHubStream(stream) && <div className="task-field-pair"><label>MCP server name<input value={stream.server}
+          {!isDirectStream(stream) && <div className="task-field-pair"><label>MCP server name<input value={stream.server}
             placeholder="slack" onChange={event => streamChange(stream.id, { server: event.target.value })} /></label>
             <label>Allowed read tools, comma-separated<input value={stream.tools.join(',')}
               placeholder={stream.kind === 'slack' ? slackReadTools.join(', ') : 'search_messages, get_thread'}
               onChange={event => streamChange(stream.id, { tools: event.target.value.split(',') })} /></label></div>}
         </fieldset>)}</div>
         <p className="field-help">A source result is evidence, not a new task ID. Matching the same PR in two searches will not duplicate its review.</p>
+      </section>
+      <section aria-labelledby="copilot-projects-heading"><h2 id="copilot-projects-heading">Copilot Projects dispatch</h2>
+        <p>Send any task directly into a new <code>Copilot Projects</code> session with custom instructions.</p>
+        <div className="task-field-pair">
+          <label className="task-model">Default Copilot project (name or ID, optional)<input
+            value={copilotProjectsSettings(draft).defaultProject} maxLength={120}
+            placeholder="Auto-match from repository or PR Reviews"
+            onChange={event => change({
+              ...draft, copilotProjects: { ...copilotProjectsSettings(draft), defaultProject: event.target.value },
+            })} /></label>
+          <label className="task-model">gmailctl config path<input
+            value={copilotProjectsSettings(draft).gmailctlConfigPath} maxLength={300}
+            placeholder="~/repos/documents/gmailctl/config.jsonnet"
+            onChange={event => change({
+              ...draft, copilotProjects: { ...copilotProjectsSettings(draft), gmailctlConfigPath: event.target.value },
+            })} /></label>
+        </div>
+        <label className="checkbox-label"><input type="checkbox"
+          checked={copilotProjectsSettings(draft).autoCompleteOnDispatch}
+          onChange={event => change({
+            ...draft, copilotProjects: { ...copilotProjectsSettings(draft), autoCompleteOnDispatch: event.target.checked },
+          })} />Dismiss item automatically after sending to Copilot Projects</label>
+        <label>Default PR review instructions<textarea rows={2} maxLength={4000}
+          value={copilotProjectsSettings(draft).prompts.review}
+          onChange={event => change({
+            ...draft, copilotProjects: {
+              ...copilotProjectsSettings(draft),
+              prompts: { ...copilotProjectsSettings(draft).prompts, review: event.target.value },
+            },
+          })} /></label>
+        <label>Default issue instructions<textarea rows={2} maxLength={4000}
+          value={copilotProjectsSettings(draft).prompts.implement}
+          onChange={event => change({
+            ...draft, copilotProjects: {
+              ...copilotProjectsSettings(draft),
+              prompts: { ...copilotProjectsSettings(draft).prompts, implement: event.target.value },
+            },
+          })} /></label>
+        <label>Default fix instructions<textarea rows={2} maxLength={4000}
+          value={copilotProjectsSettings(draft).prompts.fix}
+          onChange={event => change({
+            ...draft, copilotProjects: {
+              ...copilotProjectsSettings(draft),
+              prompts: { ...copilotProjectsSettings(draft).prompts, fix: event.target.value },
+            },
+          })} /></label>
+        <label>Default follow-up / Gmail instructions<textarea rows={2} maxLength={4000}
+          value={copilotProjectsSettings(draft).prompts['follow-up']}
+          onChange={event => change({
+            ...draft, copilotProjects: {
+              ...copilotProjectsSettings(draft),
+              prompts: { ...copilotProjectsSettings(draft).prompts, 'follow-up': event.target.value },
+            },
+          })} /></label>
       </section>
       <section aria-labelledby="schedule-heading"><h2 id="schedule-heading">Run on a schedule</h2>
         <label className="checkbox-label"><input type="checkbox" checked={draft.schedule.enabled}
