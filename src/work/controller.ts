@@ -604,6 +604,9 @@ export class WorkQueue {
       this.publish({ phase: 'assessing' });
       this.assertWorkspace(assessmentGeneration);
       this.assertProfile(this.controller.state, input.profileId);
+      const existingIds = new Set(this.controller.state.tasks.map(task => task.id));
+      pending = pending.filter(task => existingIds.has(task.id));
+      if (!pending.length) break;
       if (selected) {
         if (JSON.stringify(assessmentIdentity(this.controller.state.work.settings))
           !== JSON.stringify(assessmentIdentity(input))) {

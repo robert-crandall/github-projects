@@ -2628,3 +2628,22 @@ test('start and final save failures never imply a completed run', async () => {
   expect(mock.saved().work.lastCompletedAt).toBeNull();
   expect(mock.queue.getSnapshot().error).toContain('Disk unavailable');
 });
+
+test('removing a stream quarantines pending or in-flight assessments for pruned tasks instead of blocking future runs', async () => {
+  const stream = { ...defaultWorkState().settings.streams[0]!, id: 'github-stream' };
+  const saved = reconcileWork(initial(), collection(), before);
+  saved.work.settings.streams = [stream];
+  const mock = await fixture(saved);
+  mock.history.fail = true;
+  await mock.queue.run();
+  expect(mock.workspace.getSnapshot().assessmentPending).toHaveLength(1);
+  mock.queue.saveSettings({ ...mock.workspace.state.work.settings, streams: [] });
+  await mock.workspace.flush();
+  expect(mock.workspace.state.tasks).toEqual([]);
+  expect(mock.workspace.getSnapshot().assessmentPending).toEqual([]);
+  expect(mock.workspace.getSnapshot().assessmentQuarantined).toHaveLength(1);
+  mock.history.fail = false;
+  await mock.queue.run();
+  expect(mock.queue.getSnapshot().error).toBe('');
+});
+
