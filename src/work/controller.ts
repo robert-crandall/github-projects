@@ -237,18 +237,38 @@ export class WorkQueue {
       assertCurrent();
       const task = this.controller.state.tasks.find(item => item.id === id);
       if (!task) throw new Error('This task no longer exists.');
-      const { notification, email } = task.work ?? {};
+      const { notification, acknowledge: previousAck, email } = task.work ?? {};
       this.complete(id);
       await this.controller.flush();
       assertCurrent();
-      if (notification) {
+      if (notification && previousAck?.status !== 'confirmed') {
+        const source = canonicalSource(task.work!.url);
+        const intent: NonNullable<WorkMetadata['acknowledge']> = {
+          operationId: previousAck?.operationId ?? crypto.randomUUID(),
+          notification: previousAck?.notification ?? notification, status: 'pending', error: '',
+        };
+        const updateAck = (next: NonNullable<WorkMetadata['acknowledge']>) => this.update(current => ({
+          ...current, tasks: current.tasks.map(item => item.work && canonicalSource(item.work.url) === source
+            && (!item.work.acknowledge || item.work.acknowledge.operationId === intent.operationId)
+            ? { ...item, work: { ...item.work, acknowledge: next } } : item),
+        }));
         try {
-          await this.service.call('github.acknowledge', {
-            operationId: crypto.randomUUID(), threadId: notification.threadId,
-            reference: notification.reference, notificationUpdatedAt: notification.updatedAt, displayedEvidenceIds: [],
+          updateAck(intent);
+          await this.controller.flush();
+          assertCurrent();
+          const result = await this.service.call('github.acknowledge', {
+            operationId: intent.operationId, threadId: intent.notification.threadId,
+            reference: intent.notification.reference, notificationUpdatedAt: intent.notification.updatedAt, displayedEvidenceIds: [],
           });
+          assertCurrent();
+          updateAck({ ...intent, status: 'confirmed', confirmedAt: result.confirmedAt });
+          await this.controller.flush();
         } catch (error) {
-          this.publish({ warnings: [...this.status.warnings, `Marked Done locally; GitHub notification acknowledge failed: ${message(error)}`] });
+          const detail = `Marked Done locally; GitHub notification acknowledge failed: ${message(error)}`.slice(0, 1000);
+          updateAck({ ...intent, status: 'unconfirmed', error: detail });
+          try { await this.controller.flush(); } catch (saveError) { this.controller.report(saveError); }
+          this.publish({ warnings: [...this.status.warnings, detail] });
+          throw new Error(detail);
         }
       }
       if (email) {
@@ -257,7 +277,9 @@ export class WorkQueue {
             operationId: crypto.randomUUID(), threadId: email.threadId, messageId: email.messageId, markRead: true,
           });
         } catch (error) {
-          this.publish({ warnings: [...this.status.warnings, `Marked Done locally; Gmail archive failed: ${message(error)}`] });
+          const detail = `Marked Done locally; Gmail archive failed: ${message(error)}`.slice(0, 1000);
+          this.publish({ warnings: [...this.status.warnings, detail] });
+          throw new Error(detail);
         }
       }
     });
@@ -274,8 +296,10 @@ export class WorkQueue {
       const task = this.controller.state.tasks.find(item => item.id === id);
       if (!task) throw new Error('This task no longer exists.');
       const resolvedTitle = options.title?.trim() || task.title;
+      const defaultProject = this.controller.state.work.settings.copilotProjects?.defaultProject.trim() || undefined;
+      const resolvedProjectName = options.projectName || (!options.projectId ? defaultProject : undefined);
       const intentKey = JSON.stringify([
-        this.controller.state.activeWorkProfile.id, id, resolvedTitle, options.prompt, options.projectId ?? '', options.projectName ?? '',
+        this.controller.state.activeWorkProfile.id, id, resolvedTitle, options.prompt, options.projectId ?? '', resolvedProjectName ?? '',
       ]);
       const operationId = this.pendingDispatchIds.get(intentKey) ?? crypto.randomUUID();
       this.pendingDispatchIds.set(intentKey, operationId);
@@ -284,7 +308,7 @@ export class WorkQueue {
         ...(task.work?.reference?.repo ? { repo: task.work.reference.repo } : {}),
         ...(task.work?.action ? { action: task.work.action } : {}),
         ...(options.projectId ? { projectId: options.projectId } : {}),
-        ...(options.projectName ? { projectName: options.projectName } : {}),
+        ...(resolvedProjectName ? { projectName: resolvedProjectName } : {}),
       });
       assertCurrent();
       if (options.markDone ?? (this.controller.state.work.settings.copilotProjects?.autoCompleteOnDispatch ?? true)) {

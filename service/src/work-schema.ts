@@ -69,6 +69,7 @@ export const workMetadataSchema = z.strictObject({
   contextObservedAt: time.optional(),
   pullRequest: pullRequestStateSchema.optional(),
   notification: workNotificationSchema.optional(),
+  acknowledge: workUnsubscribeSchema.optional(),
   unsubscribe: workUnsubscribeSchema.optional(),
   email: workEmailMetadataSchema.optional(),
 });
@@ -376,6 +377,8 @@ export function selectCopilotProject(
   }
   const wantedName = options.projectName?.trim();
   if (wantedName) {
+    const byId = projects.find(project => project.id.toLowerCase() === wantedName.toLowerCase());
+    if (byId) return { id: byId.id, name: byId.name };
     const exact = projects.find(project => project.name.toLowerCase() === wantedName.toLowerCase());
     if (exact) return { id: exact.id, name: exact.name };
   }

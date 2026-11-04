@@ -583,15 +583,19 @@ export class WorkGmail {
     const ruleSnippet = buildGmailctlRuleSnippet(value);
     const writeStep = this.filterWriteQueue.then(async () => {
       checkAbort(signal);
-      const original = await readFile(configPath, 'utf8').catch(() => {
+      let writeTargetPath = configPath;
+      try {
+        writeTargetPath = realpathSync(configPath);
+      } catch { /* Use configPath directly if realpath resolution fails. */ }
+      const original = await readFile(writeTargetPath, 'utf8').catch(() => {
         throw new ServiceError('invalid_input');
       });
       const updated = insertGmailctlRuleIntoJsonnet(original, ruleSnippet);
       if (updated !== original) {
-        const tmpPath = join(dirname(configPath), `.config.jsonnet.${randomUUID()}.tmp`);
+        const tmpPath = join(dirname(writeTargetPath), `.config.jsonnet.${randomUUID()}.tmp`);
         try {
           await writeFile(tmpPath, updated, { encoding: 'utf8', mode: 0o600 });
-          await rename(tmpPath, configPath);
+          await rename(tmpPath, writeTargetPath);
         } catch (error) {
           await rm(tmpPath, { force: true }).catch(() => {});
           throw error;

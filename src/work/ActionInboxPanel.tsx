@@ -65,9 +65,9 @@ export function buildCopilotDispatchPrompt(
 export function guessProjectId(task: Task, projects: CopilotProjectItem[], settings: WorkSettings): string {
   const configured = copilotProjectsSettings(settings).defaultProject.trim();
   const ref = task.work?.reference;
-  const action = ref?.kind === 'pr' ? 'review' : task.work?.action;
+  const action = task.work?.action ?? (ref?.kind === 'pr' ? 'review' : undefined);
   return selectCopilotProject(projects, {
-    ...(configured ? { projectId: configured, projectName: configured } : {}),
+    ...(configured ? { projectName: configured } : {}),
     ...(ref?.repo ? { repo: ref.repo } : {}),
     ...(action ? { action } : {}),
     allowFallback: false,
@@ -148,9 +148,11 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
     </div>}
 
     <div className="button-row" style={{ flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
-      {task.status === 'open' && <button type="button" className="primary" disabled={busyAction !== null}
-        onClick={() => void runAction('Dismiss', () => queue.dismiss(task.id), true)}>
-        <CheckCircle2 size={15} />{isGmail ? 'Done & Archive' : hasNotification ? 'Done & Acknowledge' : 'Done & Dismiss'}
+      {(task.status === 'open' || (hasNotification && task.work?.acknowledge?.status !== 'confirmed')) && <button type="button" className="primary" disabled={busyAction !== null}
+        onClick={() => void runAction('Dismiss', () => queue.dismiss(task.id), task.status === 'open')}>
+        <CheckCircle2 size={15} />{task.status === 'done'
+          ? (task.work?.acknowledge?.status === 'unconfirmed' ? 'Retry Acknowledge' : 'Acknowledge Notification')
+          : isGmail ? 'Done & Archive' : hasNotification ? 'Done & Acknowledge' : 'Done & Dismiss'}
       </button>}
 
       {hasGitHubRef && <button type="button" className="secondary" disabled={busyAction !== null}
@@ -251,9 +253,11 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
       <div className="button-row" style={{ marginTop: '8px' }}>
         <button type="button" className="primary" disabled={busyAction !== null || !prompt.trim() || promptTooLong}
           onClick={() => void runAction('Send to Copilot Projects', async () => {
+            const configuredDefault = cpSettings.defaultProject.trim();
             const dispatched = await queue.dispatchToCopilotProjects(task.id, {
               prompt,
               projectId: projectId || undefined,
+              projectName: !projectId && configuredDefault ? configuredDefault : undefined,
               title: task.title.slice(0, 120),
               markDone: markDoneAfterDispatch,
             });
@@ -268,6 +272,7 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
       </div>
     </div>
 
+    {task.work?.acknowledge?.status === 'unconfirmed' && task.work.acknowledge.error && <p className="task-error" role="alert">{task.work.acknowledge.error}</p>}
     {statusMessage && <p className="task-detail-notice" role="status">{statusMessage}</p>}
     {errorMessage && <p className="task-error" role="alert">{errorMessage}</p>}
   </section>;

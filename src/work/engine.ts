@@ -122,6 +122,8 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
   const notification = !first.work.notification || (second.work.notification
     && Date.parse(second.work.notification.updatedAt) > Date.parse(first.work.notification.updatedAt))
     ? second.work.notification : first.work.notification;
+  const acknowledge = [first.work.acknowledge, second.work.acknowledge].find(intent => intent && intent.status !== 'confirmed')
+    ?? first.work.acknowledge ?? second.work.acknowledge;
   const unsubscribe = [first.work.unsubscribe, second.work.unsubscribe].find(intent => intent && intent.status !== 'confirmed')
     ?? first.work.unsubscribe ?? second.work.unsubscribe;
   const email = second.work.email ?? first.work.email;
@@ -146,7 +148,7 @@ function mergeTasks(first: Task & { work: WorkMetadata }, second: Task & { work:
       evidence: mergeEvidence(first.work.evidence, second.work.evidence),
       handledEvidenceIds: [...new Set([...first.work.handledEvidenceIds, ...second.work.handledEvidenceIds])],
       availability: observation.availability, availabilityReason: observation.availabilityReason,
-      availabilityObservedAt: observation.availabilityObservedAt, notification, unsubscribe,
+      availabilityObservedAt: observation.availabilityObservedAt, notification, acknowledge, unsubscribe,
       ...(email ? { email } : {}),
       ...(observation.pullRequest ? { pullRequest: observation.pullRequest } : {}),
       context: context?.context, contextObservedAt: context?.contextObservedAt ?? context?.availabilityObservedAt,
@@ -254,6 +256,7 @@ export function reconcileWork(
       availabilityObservedAt: linked?.availabilityObservedAt,
       ...(linked?.context ? { context: linked.context } : {}),
       ...(linked?.contextObservedAt ? { contextObservedAt: linked.contextObservedAt } : {}),
+      ...(linked?.acknowledge ? { acknowledge: linked.acknowledge } : {}),
       ...(linked?.unsubscribe ? { unsubscribe: linked.unsubscribe } : {}),
       ...(linked?.email ? { email: linked.email } : {}),
     };
@@ -265,9 +268,7 @@ export function reconcileWork(
       ...(email ? { email } : {}),
       ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
     }, observation, contexts.get(url), authoritative));
-    const known = new Set(previous?.status === 'done'
-      ? base.handledEvidenceIds
-      : [...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
+    const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
     const reopen = allowReopen && previous?.status === 'done' && previous.completedAt !== undefined
       && work.availability === 'actionable'
       && candidate.evidence.some(evidence => !known.has(evidence.id)

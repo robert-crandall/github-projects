@@ -133,5 +133,31 @@ describe('Action Inbox reconciliation and prompt builder', () => {
       { id: 'proj-2', name: 'PR Reviews', state: 'idle', sessions: 1, active: false },
     ], settings);
     expect(projectId).toBe('proj-2');
+
+    const fixPrState = reconcileWork(emptyWorkspace('2026-04-06T12:00:00Z', 'UTC'), {
+      collectedAt: '2026-04-06T12:00:00.000Z',
+      candidates: [{
+        title: 'Fix CI on octo/github#102',
+        action: 'fix',
+        url: 'https://github.com/octo/github/pull/102',
+        evidence: [{
+          id: 'ev2',
+          source: 'github',
+          streamId: 'github-notifications',
+          summary: 'CI failing on octo/github#102',
+          url: 'https://github.com/octo/github/pull/102',
+          at: '2026-04-06T11:58:00.000Z',
+        }],
+      }],
+      observations: [
+        { url: 'https://github.com/octo/github/pull/102', state: 'open', reference: { repo: 'octo/github', number: 102, kind: 'pr' }, observedAt: '2026-04-06T12:00:00.000Z', reason: '' },
+      ],
+      warnings: [],
+    }, '2026-04-06T12:00:00.000Z');
+    const fixTask = fixPrState.tasks[0]!;
+    expect(guessProjectId(fixTask, [
+      { id: 'proj-1', name: 'github', state: 'running', sessions: 2, active: false },
+      { id: 'proj-2', name: 'PR Reviews', state: 'idle', sessions: 1, active: true },
+    ], settings)).toBe('proj-1');
   });
 });

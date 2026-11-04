@@ -701,9 +701,33 @@ export class WorkGitHub {
               title: source.title, action: stream.action, url, evidence: evidence.slice(-200),
             });
           }
-          if (!notificationStream && stream.action === 'reply' && !input.skipModelExtraction) {
-            // Model extraction is serialized after parallel source reads below.
-            replyInputs.push({ source, events, url, ref });
+          if (!notificationStream && stream.action === 'reply') {
+            if (!input.skipModelExtraction) {
+              // Model extraction is serialized after parallel source reads below.
+              replyInputs.push({ source, events, url, ref });
+            } else {
+              const comments = events.filter(event => event.event === 'commented' && event.body && (event.id ?? event.node_id) && event.created_at);
+              const latestComment = comments.at(-1);
+              const commentAuthor = latestComment?.user?.login ?? latestComment?.actor?.login;
+              const summaryText = latestComment?.body?.trim()
+                ? `${commentAuthor ? `@${commentAuthor}: ` : ''}${latestComment.body.trim().replace(/\s+/g, ' ').slice(0, 240)}`
+                : `GitHub search match (${stream.name}) on ${ref.repo}#${ref.number}.`;
+              candidates.push({
+                title: source.title,
+                action: 'reply',
+                url,
+                evidence: [{
+                  id: latestComment
+                    ? identity(ref, latestComment.event, latestComment.id ?? latestComment.node_id!)
+                    : identity(ref, 'search', `${source.id}:${source.updated_at ?? source.created_at}`),
+                  source: 'github',
+                  streamId: stream.id,
+                  at: latestComment?.created_at ?? source.updated_at ?? source.created_at,
+                  url: latestComment?.html_url ?? url,
+                  summary: summaryText,
+                }],
+              });
+            }
           }
         } catch (error) {
           checkAbort(signal);
