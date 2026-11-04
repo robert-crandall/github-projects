@@ -27,6 +27,7 @@ import { TaskAssessmentHistory, type ReasoningView } from './AssessmentHistory.t
 import { CodeSessionPanel } from './CodeSessionPanel.tsx';
 import { codeJob } from './code-sessions.ts';
 import { CodeBatchProgress } from './CodeBatchProgress.tsx';
+import { ActionInboxPanel } from './ActionInboxPanel.tsx';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -34,6 +35,7 @@ function date(value: string | null) {
 }
 function source(task: Task) {
   if (!task.work) return 'Manual task';
+  if (task.work.email) return `gmail · ${task.work.email.from}`;
   const url = new URL(task.work.url);
   return `${[...new Set(task.work.evidence.map(item => item.source))].join(' + ')} · ${url.hostname === 'github.com' ? url.pathname.slice(1).replace(/\/(?:pull|issues)\//, '#') : url.hostname}`;
 }
@@ -73,6 +75,8 @@ function RunActions({ running, disabled, invoke, queue }: {
       aria-label="More run actions" aria-expanded={open} aria-controls="task-run-options"
       onClick={() => setOpen(value => !value)}><ChevronDown size={15} /></button>
     <div id="task-run-options" className="task-run-options" hidden={!open}>
+      <button disabled={disabled} onClick={() => choose(() => queue.collectSources())} aria-describedby="run-collect-help">Check sources</button>
+      <p id="run-collect-help">Collect GitHub notifications, searches, and Gmail without running agents.</p>
       <button disabled={disabled} onClick={() => choose(() => queue.runAssessor())} aria-describedby="run-assessor-help">Run assessor</button>
       <p id="run-assessor-help">Fill missing judgments without changing the order.</p>
       <button disabled={disabled} onClick={() => choose(() => queue.runPrioritizer())} aria-describedby="run-prioritizer-help">Run prioritizer</button>
@@ -126,8 +130,9 @@ function NewProfile({ queue, currentName, close, created }: {
     </form>
   </Modal>;
 }
-function TaskDetail({ task, reason, rank, queue, controller, close, batchProgress, styleAssessment, stylesLoading, stylesError }: {
+function TaskDetail({ task, reason, rank, queue, controller, close, onDismissed, batchProgress, styleAssessment, stylesLoading, stylesError }: {
   task: Task; reason?: string; rank?: number; queue: WorkQueue; controller: DesktopWorkspace; close: () => void;
+  onDismissed?: () => void;
   batchProgress: ReactNode;
   styleAssessment?: SavedAssessment; stylesLoading: boolean; stylesError: string;
 }) {
@@ -159,6 +164,8 @@ function TaskDetail({ task, reason, rank, queue, controller, close, batchProgres
       {task.work && <button className="secondary" onClick={() => run(() => controller.platform.launchWebUrl(task.work!.url))}><ExternalLink size={14} />Open source</button>}
     </div>
     {task.status === 'done' && <p className="task-detail-notice">Done {date(task.completedAt ?? null)}. Only a fresh actionable request can bring this task back.</p>}
+    <ActionInboxPanel task={task} settings={controller.state.work.settings} queue={queue}
+      onDismissed={onDismissed ?? close} onOpenUrl={url => run(() => controller.platform.launchWebUrl(url))} />
     {task.work?.availability !== undefined && task.work.availability !== 'actionable' && <p className="task-detail-notice">{task.work.availabilityReason}</p>}
     {task.work?.reference?.kind === 'pr' && <section aria-label="Current PR status"><h3>Current PR status</h3>
       {task.work.pullRequest ? <>
@@ -346,7 +353,7 @@ export function TaskApp({ controller, queue, remote }: {
   const runError = run.error || (run.running ? '' : state.work.lastError);
   const error = saved.persistence.error || saved.assessmentError || saved.codeError || saved.operationError || (settings ? runError : '');
   const runDetails = [...new Set([...run.warnings, ...runError.split('\n').filter(Boolean)])];
-  const profileBusy = run.running || run.unsubscribing.length > 0;
+  const profileBusy = run.running || run.unsubscribing.length > 0 || Boolean(run.activeActions);
   const ranked = rankedTasks(state);
   const done = state.tasks.filter(task => task.status === 'done');
   const waiting = state.tasks.filter(task => task.status === 'open' && task.work?.availability === 'waiting');
@@ -541,7 +548,13 @@ export function TaskApp({ controller, queue, remote }: {
         </main>
         {selected ? <TaskDetail key={`${state.activeWorkProfile.id}:${selected.id}`} task={selected} reason={reasons.get(selected.id)}
           rank={state.work.ranking?.orderedIds.includes(selected.id) ? positions.get(selected.id) : undefined}
-          queue={queue} controller={controller} close={() => setSelection(null)} batchProgress={batchProgress}
+          queue={queue} controller={controller} close={() => setSelection(null)}
+          onDismissed={() => {
+            const idx = visible.findIndex(item => item.id === selected.id);
+            const next = visible[idx + 1] ?? visible[idx - 1];
+            setSelection(current => current === selected.id ? (next?.id ?? null) : current);
+          }}
+          batchProgress={batchProgress}
           styleAssessment={styleAssessments.values.get(selected.id)} stylesLoading={styleAssessments.loading} stylesError={styleAssessments.error} />
           : <aside className="task-detail task-detail-empty" aria-label="Task details"><h2>Select a task</h2><p>See why it ranks here, read its source, and keep your notes alongside.</p></aside>}
       </div>

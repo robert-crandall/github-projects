@@ -6,6 +6,8 @@ export { idSchema, repoSchema, referenceSchema } from './references.ts';
 import {
   workCollectInputSchema, workCollectOutputSchema, workConnectionsSchema,
   workIntakeAckSchema, workIntakeOutputSchema, workRankInputSchema, workRankOutputSchema,
+  copilotProjectsDispatchInputSchema, copilotProjectsDispatchResultSchema, copilotProjectsListOutputSchema,
+  gmailArchiveInputSchema, gmailArchiveResultSchema, gmailctlFilterInputSchema, gmailctlFilterResultSchema,
 } from './work-schema.ts';
 
 export const LIMITS = {
@@ -95,6 +97,18 @@ export const writeInputSchema = z.strictObject({
 });
 export const writeResultSchema = writeInputSchema.extend({
   action: z.enum(['acknowledge', 'unsubscribe']), confirmedAt: time,
+  status: z.literal('confirmed'),
+});
+export const assignInputSchema = z.strictObject({
+  operationId: idSchema,
+  reference: referenceSchema,
+  assignee: loginSchema.optional(),
+});
+export const assignResultSchema = z.strictObject({
+  operationId: idSchema,
+  reference: referenceSchema,
+  assignee: loginSchema,
+  confirmedAt: time,
   status: z.literal('confirmed'),
 });
 export const conversationStreamSchema = z.enum(['description', 'comments', 'reviews', 'inline']);
@@ -196,6 +210,11 @@ export const requestSchema = z.discriminatedUnion('op', [
   z.strictObject({ ...envelope, op: z.literal('github.conversation'), input: conversationInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('github.acknowledge'), input: writeInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('github.unsubscribe'), input: writeInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('github.assign'), input: assignInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('copilotProjects.list'), input: empty }),
+  z.strictObject({ ...envelope, op: z.literal('copilotProjects.dispatch'), input: copilotProjectsDispatchInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('gmail.archive'), input: gmailArchiveInputSchema }),
+  z.strictObject({ ...envelope, op: z.literal('gmailctl.addFilter'), input: gmailctlFilterInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.triage'), input: triageInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.interpretCapture'), input: captureInputSchema }),
   z.strictObject({ ...envelope, op: z.literal('copilot.reconsider'), input: reconsiderInputSchema }),
@@ -214,6 +233,11 @@ export const resultSchemas = {
   'github.conversation': conversationPageSchema,
   'github.acknowledge': writeResultSchema,
   'github.unsubscribe': writeResultSchema,
+  'github.assign': assignResultSchema,
+  'copilotProjects.list': copilotProjectsListOutputSchema,
+  'copilotProjects.dispatch': copilotProjectsDispatchResultSchema,
+  'gmail.archive': gmailArchiveResultSchema,
+  'gmailctl.addFilter': gmailctlFilterResultSchema,
   'copilot.triage': triageOutputSchema,
   'copilot.interpretCapture': captureOutputSchema,
   'copilot.reconsider': reconsiderOutputSchema,

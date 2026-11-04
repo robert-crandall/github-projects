@@ -24,7 +24,7 @@ const response = (body: unknown, headers: Record<string, string> = {}, status = 
 class FakeApi implements GitHubApi {
   calls: { method: string; path: string; body?: unknown }[] = [];
   overrides = new Map<string, ApiResponse | ServiceError>();
-  async request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', path: string, _signal: AbortSignal, body?: { ignored: true } | { query: string }) {
+  async request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', path: string, _signal: AbortSignal, body?: { ignored: true } | { query: string } | { assignees: string[] } | { content: string }) {
     this.calls.push({ method, path, body });
     const override = this.overrides.get(`${method} ${path}`);
     if (override instanceof Error) throw override;
@@ -35,6 +35,10 @@ class FakeApi implements GitHubApi {
     if (method === 'GET' && /^\/notifications\/threads\/\d+$/.test(path)) return response(notification(path.split('/').at(-1)));
     if (method === 'GET' && path.endsWith('/subscription')) return response({ subscribed: true, ignored: false });
     if (path.endsWith('/pulls/12')) return response(pending);
+    if (method === 'POST' && path.endsWith('/assignees')) {
+      const assignees = body && 'assignees' in body ? body.assignees.map(login => ({ login })) : [{ login: viewer }];
+      return response({ assignees });
+    }
     if (method === 'POST' && path === '/graphql') return response({ data: { repository: { pullRequest: {
       state: 'OPEN', updatedAt: at(20), mergeQueueEntry: null,
     } } } });
@@ -501,5 +505,30 @@ describe('explicit GitHub writes (mocked only)', () => {
       code: 1, stdout: 'HTTP/2.0 403 Forbidden\r\nX-RateLimit-Remaining: 0\r\n\r\n{"message":"private body and token"}',
     }), async () => '/synthetic/gh');
     await expect(api.request('GET', '/user', signal())).rejects.toMatchObject({ dto: { code: 'rate_limit' } });
+  });
+  test('assign defaults to viewer, deduplicates by operation ID, and verifies returned assignees', async () => {
+    const api = new FakeApi();
+    const service = new GitHubService(api);
+    const first = await service.assign({ operationId: 'assign-1', reference }, signal());
+    expect(first).toMatchObject({
+      operationId: 'assign-1',
+      reference,
+      assignee: viewer,
+      status: 'confirmed',
+    });
+    expect(api.calls.at(-1)).toEqual({
+      method: 'POST',
+      path: '/repos/sample/provider/issues/12/assignees',
+      body: { assignees: [viewer] },
+    });
+    expect(await service.assign({ operationId: 'assign-1', reference }, signal())).toEqual(first);
+    expect(api.calls.filter(call => call.path.endsWith('/assignees'))).toHaveLength(1);
+    await expect(
+      service.assign({ operationId: 'assign-1', reference, assignee: 'other-user' }, signal()),
+    ).rejects.toMatchObject({ dto: { code: 'invalid_input' } });
+    api.overrides.set('POST /repos/sample/provider/issues/12/assignees', response({ assignees: [] }));
+    await expect(
+      service.assign({ operationId: 'assign-2', reference }, signal()),
+    ).rejects.toMatchObject({ dto: { code: 'access' } });
   });
 });

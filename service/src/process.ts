@@ -6,7 +6,7 @@ import { isAbsolute, join } from 'node:path';
 import { ServiceError, checkAbort } from './errors.ts';
 import { LIMITS } from './schema.ts';
 
-export async function executable(name: 'gh' | 'copilot'): Promise<string> {
+export async function executable(name: 'gh' | 'copilot' | 'copilot-projects' | 'gmailctl'): Promise<string> {
   // Finder-launched apps may have a minimal PATH. Never search cwd or accept a renderer path.
   const directories = [
     ...(process.env.PATH ?? '').split(':').filter(isAbsolute),

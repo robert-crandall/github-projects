@@ -74,9 +74,14 @@ fn validate_request(request: &Value) -> Result<(&str, &str)> {
                 | "github.conversation"
                 | "github.acknowledge"
                 | "github.unsubscribe"
+                | "github.assign"
                 | "copilot.triage"
                 | "copilot.interpretCapture"
                 | "copilot.reconsider"
+                | "copilotProjects.list"
+                | "copilotProjects.dispatch"
+                | "gmail.archive"
+                | "gmailctl.addFilter"
                 | "work.collect"
                 | "work.assess"
                 | "work.rank"
@@ -414,9 +419,16 @@ mod tests {
 
     #[test]
     fn rejects_unknown_operations_and_malformed_envelopes() {
-        assert!(
-            validate_request(&json!({"v":1,"id":"one","op":"github.refresh","input":{}})).is_ok()
-        );
+        for op in [
+            "github.refresh",
+            "github.assign",
+            "copilotProjects.list",
+            "copilotProjects.dispatch",
+            "gmail.archive",
+            "gmailctl.addFilter",
+        ] {
+            assert!(validate_request(&json!({"v":1,"id":"one","op":op,"input":{}})).is_ok());
+        }
         for value in [
             json!({"v":1,"id":"one","op":"shell","input":{"command":"whoami"}}),
             json!({"v":1,"id":"one","op":"github.refresh","input":{},"path":"/tmp"}),

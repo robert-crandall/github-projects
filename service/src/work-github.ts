@@ -45,7 +45,13 @@ const eventSchema = z.object({
 type Event = z.infer<typeof eventSchema>;
 type Source = z.infer<typeof sourceSchema>;
 type Notification = NonNullable<WorkCandidate['notification']>;
-type Target = { ref: Reference; matched: boolean; notification?: Notification };
+type Target = {
+  ref: Reference;
+  matched: boolean;
+  notification?: Notification;
+  notificationReason?: string;
+  notificationUnread?: boolean;
+};
 const notificationSourceLimit = Math.floor(200 / githubWorkActionSchema.options.length);
 const notificationWindowProbes = 32;
 const notificationSchema = z.object({
@@ -294,7 +300,12 @@ export class WorkGitHub {
     if (malformed) warnings.push(`${ref.repo}#${ref.number}: some source events could not be validated.`);
     return events.sort((a, b) => (a.created_at ?? a.submitted_at ?? '').localeCompare(b.created_at ?? b.submitted_at ?? ''));
   }
-  private async notifications(since: string | null, collectedAt: string, signal: AbortSignal): Promise<{
+  private async notifications(
+    since: string | null,
+    collectedAt: string,
+    signal: AbortSignal,
+    unreadOnly = false,
+  ): Promise<{
     urls: Map<string, Target>; warnings: string[]; coverageInfo: string[]; coveredThrough?: string;
   }> {
     const scanStart = Date.parse(collectedAt);
@@ -308,7 +319,7 @@ export class WorkGitHub {
       const before = new Date(upperSecond * 1000).toISOString();
       // Only accept a complete first page. Offset pagination can skip unchanged rows
       // when other notifications are deleted or updated between requests.
-      const response = await this.api(`/notifications?all=true&per_page=50&page=1&since=${encodeURIComponent(boundary)}&before=${encodeURIComponent(before)}`, signal);
+      const response = await this.api(`/notifications?all=${unreadOnly ? 'false' : 'true'}&per_page=50&page=1&since=${encodeURIComponent(boundary)}&before=${encodeURIComponent(before)}`, signal);
       const rows = parse(z.array(z.unknown()).max(50), response.body);
       const urls = new Map<string, Target>();
       const warnings: string[] = [];
@@ -333,9 +344,17 @@ export class WorkGitHub {
           const ref = reference(url);
           const existing = urls.get(url);
           if (!existing?.notification || Date.parse(notification.updated_at) > Date.parse(existing.notification.updatedAt)) {
-            urls.set(url, { ref, matched: true, notification: {
-              threadId: notification.id, reference: ref, updatedAt: notification.updated_at,
-            } });
+            urls.set(url, {
+              ref,
+              matched: true,
+              notification: {
+                threadId: notification.id,
+                reference: ref,
+                updatedAt: notification.updated_at,
+              },
+              notificationReason: notification.reason,
+              notificationUnread: notification.unread,
+            });
           }
         } catch {
           warnings.push(`Notification ${notification.id}: invalid GitHub subject identity; no source URL was followed.`);
@@ -502,7 +521,7 @@ export class WorkGitHub {
     const collectedAt = this.now().toISOString();
     const accountResponse = (await this.api('/user', signal)).body;
     const viewer = parse(z.object({ login: loginSchema }), accountResponse).login;
-    const cache = stream.kind === 'github' && !input.observeOnly ? this.cache : null;
+    const cache = stream.kind === 'github' && !input.observeOnly && !input.skipModelExtraction ? this.cache : null;
     const accountSchema = z.object({ id: z.number().int().positive().safe(), login: loginSchema });
     const account = cache ? parse(accountSchema, accountResponse) : undefined;
     const cacheKey = cacheHash([1, 'github.com', account, stream, input.model]);
@@ -521,7 +540,7 @@ export class WorkGitHub {
     const coverageInfo: string[] = [];
     const notificationStream = stream.kind === 'github-notifications';
     const discovery = notificationStream && !input.observeOnly
-      ? await this.notifications(input.since, collectedAt, signal) : undefined;
+      ? await this.notifications(input.since, collectedAt, signal, Boolean(input.skipModelExtraction)) : undefined;
     const urls = discovery?.urls ?? new Map<string, Target>();
     warnings.push(...discovery?.warnings ?? []);
     coverageInfo.push(...discovery?.coverageInfo ?? []);
@@ -631,13 +650,50 @@ export class WorkGitHub {
             const actions: Workstream['action'][] = ['review'];
             if (source.assignees?.some(user => same(user.login, viewer))) actions.push('implement');
             if (sourceRef.kind === 'pr' && source.user && same(source.user.login, viewer)) actions.push('fix', 'merge');
+            let emittedForNotification = false;
             for (const action of actions) {
               const inferredStream = { ...stream, action, query: [...teams].map(team => `team-review-requested:${team}`).join(' ') };
               const evidence = this.evidence(source, graph, sourceEvents, sourceRef, inferredStream, viewer, url, warnings, coverageInfo);
               if (evidence.length > 200) coverageInfo.push(`${sourceRef.repo}#${sourceRef.number}: ${action} evidence is capped at 200 events.`);
-              if (evidence.length) candidates.push({ title: source.title, action, url, evidence: evidence.slice(-200) });
+              if (evidence.length) {
+                candidates.push({ title: source.title, action, url, evidence: evidence.slice(-200) });
+                emittedForNotification = true;
+              }
             }
-            requestInputs.push(context);
+            if (!input.skipModelExtraction) {
+              requestInputs.push(context);
+            } else if (!emittedForNotification && urls.get(url)?.notificationUnread) {
+              const target = urls.get(url)!;
+              if (target.notificationReason !== 'ci_activity' && target.notificationReason !== 'state_change') {
+                const fallbackAction: Workstream['action'] = sourceRef.kind === 'issue'
+                  ? 'implement'
+                  : source.user && same(source.user.login, viewer)
+                    ? 'fix'
+                    : 'review';
+                const reasonLabel = target.notificationReason || 'notification';
+                const latestComment = context.messages.at(-1);
+                const summaryText = latestComment?.body?.trim()
+                  ? `${latestComment.author ? `@${latestComment.author}: ` : ''}${latestComment.body.trim().replace(/\s+/g, ' ').slice(0, 240)}`
+                  : `Unread GitHub notification (${reasonLabel}) on ${sourceRef.repo}#${sourceRef.number}.`;
+                candidates.push({
+                  title: source.title,
+                  action: fallbackAction,
+                  url,
+                  evidence: [{
+                    id: identity(
+                      sourceRef,
+                      'notification',
+                      `${target.notification?.threadId ?? source.id}:${target.notification?.updatedAt ?? source.updated_at ?? source.created_at}`,
+                    ),
+                    source: 'github',
+                    streamId: stream.id,
+                    at: target.notification?.updatedAt ?? source.updated_at ?? source.created_at,
+                    url: latestComment?.sourceUrl ?? url,
+                    summary: summaryText,
+                  }],
+                });
+              }
+            }
           } else {
             const evidence = this.evidence(source, graph, events, ref, stream, viewer, url, warnings, coverageInfo);
             if (evidence.length > 200) warnings.push(`${ref.repo}#${ref.number}: evidence is capped at 200 events.`);
@@ -646,8 +702,32 @@ export class WorkGitHub {
             });
           }
           if (!notificationStream && stream.action === 'reply') {
-            // Model extraction is serialized after parallel source reads below.
-            replyInputs.push({ source, events, url, ref });
+            if (!input.skipModelExtraction) {
+              // Model extraction is serialized after parallel source reads below.
+              replyInputs.push({ source, events, url, ref });
+            } else {
+              const comments = events.filter(event => event.event === 'commented' && event.body && (event.id ?? event.node_id) && event.created_at);
+              const latestComment = comments.at(-1);
+              const commentAuthor = latestComment?.user?.login ?? latestComment?.actor?.login;
+              const summaryText = latestComment?.body?.trim()
+                ? `${commentAuthor ? `@${commentAuthor}: ` : ''}${latestComment.body.trim().replace(/\s+/g, ' ').slice(0, 240)}`
+                : `GitHub search match (${stream.name}) on ${ref.repo}#${ref.number}.`;
+              candidates.push({
+                title: source.title,
+                action: 'reply',
+                url,
+                evidence: [{
+                  id: latestComment
+                    ? identity(ref, latestComment.event, latestComment.id ?? latestComment.node_id!)
+                    : identity(ref, 'search', `${source.id}:${source.updated_at ?? source.created_at}`),
+                  source: 'github',
+                  streamId: stream.id,
+                  at: latestComment?.created_at ?? source.updated_at ?? source.created_at,
+                  url: latestComment?.html_url ?? url,
+                  summary: summaryText,
+                }],
+              });
+            }
           }
         } catch (error) {
           checkAbort(signal);

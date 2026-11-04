@@ -5,15 +5,17 @@ import { executable, run, type Runner } from './process.ts';
 import { readConversation } from './conversation.ts';
 import {
   LIMITS, loginSchema, referenceSchema, repoSchema, threadIdSchema, teamSchema, refreshSchema,
-  writeInputSchema, writeResultSchema,
+  writeInputSchema, writeResultSchema, assignInputSchema, assignResultSchema,
   type ConversationInput, type Diagnostic, type Evidence, type Reference, type Thread,
 } from './schema.ts';
 
 export type ApiResponse = { status: number; headers: Record<string, string>; body: unknown; bytes?: number };
+export type GitHubRequestBody = { ignored: true } | { query: string } | { assignees: [string] };
 export interface GitHubApi {
-  request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: { ignored: true } | { query: string }): Promise<ApiResponse>;
+  request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: GitHubRequestBody): Promise<ApiResponse>;
 }
 const repoPath = '[A-Za-z0-9][A-Za-z0-9-]{0,99}/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}';
+const assigneesRoute = new RegExp(`^/repos/${repoPath}/issues/[1-9]\\d{0,15}/assignees$`);
 const getRoute = new RegExp(
   `^(?:/user|/user/teams\\?per_page=100&page=[1-9]\\d{0,5}|/notifications\\?all=true&per_page=50&page=[12]`
   + `|/notifications/threads/[1-9]\\d{0,19}(?:/subscription)?`
@@ -34,10 +36,14 @@ function allowedStateQuery(query: string): boolean {
 }
 export class GhApi implements GitHubApi {
   constructor(private readonly runner: Runner = run, private readonly resolve = executable) {}
-  async request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: { ignored: true } | { query: string }): Promise<ApiResponse> {
+  async request(method: 'GET' | 'DELETE' | 'PUT' | 'POST', endpoint: string, signal: AbortSignal, body?: GitHubRequestBody): Promise<ApiResponse> {
     const allowed = method === 'GET' ? getRoute.test(endpoint) && body === undefined
       : method === 'DELETE' ? /^\/notifications\/threads\/[1-9]\d{0,19}$/.test(endpoint) && body === undefined
-      : method === 'POST' ? endpoint === '/graphql' && body && Object.keys(body).length === 1 && 'query' in body && allowedStateQuery(body.query)
+      : method === 'POST' ? (
+        (endpoint === '/graphql' && body && Object.keys(body).length === 1 && 'query' in body && allowedStateQuery(body.query))
+        || (assigneesRoute.test(endpoint) && body && Object.keys(body).length === 1 && 'assignees' in body
+          && Array.isArray(body.assignees) && body.assignees.length === 1 && loginSchema.safeParse(body.assignees[0]).success)
+      )
       : /^\/notifications\/threads\/[1-9]\d{0,19}\/subscription$/.test(endpoint) && body && Object.keys(body).length === 1 && 'ignored' in body && body.ignored === true;
     if (!allowed) throw new ServiceError('invalid_input');
     const args = ['api', '--hostname', 'github.com', '--include', '--method', method,
@@ -246,6 +252,9 @@ export class GitHubService {
   private readonly refreshBudgetMs: number;
   private readonly writes = new Map<string, {
     context: string; result: Promise<z.infer<typeof writeResultSchema>>;
+  }>();
+  private readonly assigns = new Map<string, {
+    context: string; result: Promise<z.infer<typeof assignResultSchema>>;
   }>();
   constructor(private readonly api: GitHubApi = new GhApi(), options: { refreshBudgetMs?: number } = {}) {
     this.refreshBudgetMs = z.number().int().positive().max(LIMITS.refreshMs).parse(options.refreshBudgetMs ?? LIMITS.refreshMs);
@@ -520,5 +529,44 @@ export class GitHubService {
       if (!subscription.ignored) throw new ServiceError('invalid_output');
     }
     return writeResultSchema.parse({ ...value, action, status: 'confirmed', confirmedAt: new Date().toISOString() });
+  }
+  async assign(input: z.infer<typeof assignInputSchema>, signal: AbortSignal) {
+    const parsed = assignInputSchema.safeParse(input);
+    if (!parsed.success) throw new ServiceError('invalid_input');
+    const value = parsed.data;
+    const context = JSON.stringify(value);
+    const existing = this.assigns.get(value.operationId);
+    if (existing) {
+      if (existing.context !== context) throw new ServiceError('invalid_input');
+      return existing.result;
+    }
+    if (this.assigns.size >= 4096) throw new ServiceError('limit');
+    const result = this.performAssign(value, signal);
+    this.assigns.set(value.operationId, { context, result });
+    try { return await result; }
+    catch (error) { this.assigns.delete(value.operationId); throw error; }
+  }
+  private async performAssign(value: z.infer<typeof assignInputSchema>, signal: AbortSignal) {
+    checkAbort(signal);
+    const assignee = value.assignee ?? (await this.connection(signal)).viewer;
+    const endpoint = `/repos/${value.reference.repo}/issues/${value.reference.number}/assignees`;
+    const response = await this.api.request('POST', endpoint, signal, { assignees: [assignee] });
+    if (response.status !== 200 && response.status !== 201) {
+      requireStatus(response);
+    }
+    const assigned = parse(
+      z.object({ assignees: z.array(z.object({ login: loginSchema })).default([]) }),
+      response.body,
+    );
+    if (!assigned.assignees.some(user => same(user.login, assignee))) {
+      throw new ServiceError('access');
+    }
+    return assignResultSchema.parse({
+      operationId: value.operationId,
+      reference: value.reference,
+      assignee,
+      status: 'confirmed',
+      confirmedAt: new Date().toISOString(),
+    });
   }
 }

@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import {
-  defaultWorkState, workRankOutputSchema, workSettingsSchema, workStateSchema,
+  defaultWorkState, hasMatchingAcknowledge, isDirectStream, workRankOutputSchema, workSettingsSchema, workStateSchema,
   type workConnectionsSchema, type WorkCollection, type WorkMetadata, type WorkRankInput, type WorkSettings,
 } from '../../service/src/work-schema.ts';
 import { ServiceCallError, ServiceClient } from '../platform/service.ts';
@@ -15,12 +15,13 @@ import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import { assessmentIdentity, workStyleIdsSchema } from '../../service/src/work-styles.ts';
 import { CodeSessions } from './code-sessions.ts';
 import { githubReference } from '../../service/src/references.ts';
+import type { CopilotProjectItem } from '../../service/src/copilot-projects.ts';
 
 export type WorkConnections = z.infer<typeof workConnectionsSchema>;
 export type CollectionProgress = {
   id: string; name: string; state: 'waiting' | 'collecting' | 'done' | 'failed' | 'not-run'; diagnostics: string[];
 };
-export type RunKind = 'pipeline' | 'assess' | 'prioritize';
+export type RunKind = 'pipeline' | 'collect' | 'assess' | 'prioritize';
 export type RunProgress = {
   startedAt: number; finishedAt: number | null; sources: CollectionProgress[]; kind?: RunKind;
   assessment?: { total: number; saved: number; batches: number };
@@ -30,6 +31,8 @@ export type WorkQueueSnapshot = {
   phase: 'idle' | 'preparing' | 'intake' | 'collecting' | 'refreshing-state' | 'checking-assessments' | 'assessing' | 'cancelling' | 'cancelled' | 'ranking' | 'saving' | 'error';
   progress: RunProgress | null; error: string; warnings: string[]; connections?: WorkConnections;
   unsubscribing: string[];
+  activeActions?: number;
+  copilotProjects?: CopilotProjectItem[];
 };
 
 class AssessmentCancelled extends Error {}
@@ -51,6 +54,7 @@ export class WorkQueue {
   private cancellation?: Promise<void>;
   private cancellationError?: unknown;
   private targetCancelled = false;
+  private activeActions = 0;
   private status: WorkQueueSnapshot;
 
   constructor(private readonly controller: DesktopWorkspace, private readonly service = new ServiceClient()) {
@@ -92,7 +96,7 @@ export class WorkQueue {
         ...renameWorkProfile(current, profileName), work: {
           ...current.work, settings: saved,
           styleFilter: retained?.length ? retained : null,
-          ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null } : {}),
+          ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null, directCollectionCursor: null } : {}),
         },
       };
     });
@@ -116,9 +120,16 @@ export class WorkQueue {
     });
   }
   private assertProfileIdle(): void {
-    if (this.status.running || this.status.unsubscribing.length) {
+    if (this.status.running || this.status.unsubscribing.length || this.activeActions > 0) {
       throw new Error('Wait for the current run or unsubscribe to finish before changing work profiles.');
     }
+  }
+  private async withAction<T>(fn: (assertCurrent: () => void) => Promise<T>): Promise<T> {
+    if (this.status.running) throw new Error('Wait for the current run to finish before running a quick action.');
+    const { id: profileId } = this.controller.state.activeWorkProfile, generation = this.controller.assessmentGeneration;
+    this.publish({ activeActions: ++this.activeActions });
+    try { return await fn(() => { this.assertWorkspace(generation); this.assertProfile(this.controller.state, profileId); }); }
+    finally { this.publish({ activeActions: (this.activeActions = Math.max(0, this.activeActions - 1)) }); }
   }
   switchProfile(id: string): void {
     this.assertProfileIdle();
@@ -211,7 +222,186 @@ export class WorkQueue {
     catch (error) { this.publish({ error: message(error) }); }
   }
 
+  async listCopilotProjects(): Promise<CopilotProjectItem[]> {
+    try {
+      const result = await this.service.call('copilotProjects.list', {});
+      this.publish({ copilotProjects: result.projects });
+      return result.projects;
+    } catch {
+      return this.status.copilotProjects ?? [];
+    }
+  }
+
+  async dismiss(id: string): Promise<void> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const task = this.controller.state.tasks.find(item => item.id === id);
+      if (!task) throw new Error('This task no longer exists.');
+      const { notification, acknowledge: previousAck, email } = task.work ?? {};
+      const reusableAck = hasMatchingAcknowledge(notification, previousAck) ? previousAck : undefined;
+      this.complete(id);
+      await this.controller.flush();
+      assertCurrent();
+      if (notification && reusableAck?.status !== 'confirmed') {
+        const source = canonicalSource(task.work!.url);
+        const previousOpId = previousAck?.operationId;
+        const intent: NonNullable<WorkMetadata['acknowledge']> = {
+          operationId: reusableAck?.operationId ?? crypto.randomUUID(),
+          notification: reusableAck?.notification ?? notification, status: 'pending', error: '',
+        };
+        const updateAck = (next: NonNullable<WorkMetadata['acknowledge']>) => {
+          assertCurrent();
+          this.update(current => ({
+            ...current, tasks: current.tasks.map(item => item.work && canonicalSource(item.work.url) === source
+              && (!item.work.acknowledge || item.work.acknowledge.operationId === intent.operationId || item.work.acknowledge.operationId === previousOpId)
+              ? { ...item, work: { ...item.work, acknowledge: next } } : item),
+          }));
+        };
+        try {
+          updateAck(intent);
+          await this.controller.flush();
+          assertCurrent();
+          const result = await this.service.call('github.acknowledge', {
+            operationId: intent.operationId, threadId: intent.notification.threadId,
+            reference: intent.notification.reference, notificationUpdatedAt: intent.notification.updatedAt, displayedEvidenceIds: [],
+          });
+          updateAck({ ...intent, status: 'confirmed', confirmedAt: result.confirmedAt });
+          await this.controller.flush();
+        } catch (error) {
+          assertCurrent();
+          const detail = `Marked Done locally; GitHub notification acknowledge failed: ${message(error)}`.slice(0, 1000);
+          updateAck({ ...intent, status: 'unconfirmed', error: detail });
+          try { await this.controller.flush(); } catch (saveError) { this.controller.report(saveError); }
+          this.publish({ warnings: [...this.status.warnings, detail] });
+          throw new Error(detail);
+        }
+      }
+      if (email) {
+        try {
+          await this.service.call('gmail.archive', {
+            operationId: crypto.randomUUID(), threadId: email.threadId, messageId: email.messageId, markRead: true,
+          });
+        } catch (error) {
+          const detail = `Marked Done locally; Gmail archive failed: ${message(error)}`.slice(0, 1000);
+          this.publish({ warnings: [...this.status.warnings, detail] });
+          throw new Error(detail);
+        }
+      }
+    });
+  }
+
+  private readonly pendingDispatchIds = new Map<string, string>();
+
+  async dispatchToCopilotProjects(
+    id: string,
+    options: { title?: string; prompt: string; projectId?: string; projectName?: string; markDone?: boolean },
+  ): Promise<{ projectId: string; projectName: string; requestId: string }> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const task = this.controller.state.tasks.find(item => item.id === id);
+      if (!task) throw new Error('This task no longer exists.');
+      const resolvedTitle = options.title?.trim() || task.title;
+      const defaultProject = this.controller.state.work.settings.copilotProjects?.defaultProject.trim() || undefined;
+      const resolvedProjectName = options.projectName || (!options.projectId ? defaultProject : undefined);
+      const intentKey = JSON.stringify([
+        this.controller.state.activeWorkProfile.id, id, resolvedTitle, options.prompt, options.projectId ?? '', resolvedProjectName ?? '',
+      ]);
+      const operationId = this.pendingDispatchIds.get(intentKey) ?? crypto.randomUUID();
+      this.pendingDispatchIds.set(intentKey, operationId);
+      const result = await this.service.call('copilotProjects.dispatch', {
+        operationId, title: resolvedTitle, prompt: options.prompt,
+        ...(task.work?.reference?.repo ? { repo: task.work.reference.repo } : {}),
+        ...(task.work?.action ? { action: task.work.action } : {}),
+        ...(options.projectId ? { projectId: options.projectId } : {}),
+        ...(resolvedProjectName ? { projectName: resolvedProjectName } : {}),
+      });
+      assertCurrent();
+      if (options.markDone ?? (this.controller.state.work.settings.copilotProjects?.autoCompleteOnDispatch ?? true)) {
+        await this.dismiss(id);
+      }
+      this.pendingDispatchIds.delete(intentKey);
+      return result;
+    });
+  }
+
+  async assignToMe(id: string, markDone = true): Promise<{ assignee: string; repo: string; number: number }> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const task = this.controller.state.tasks.find(item => item.id === id);
+      if (!task?.work?.reference) throw new Error('This task does not have a GitHub issue or PR reference.');
+      const result = await this.service.call('github.assign', { operationId: crypto.randomUUID(), reference: task.work.reference });
+      assertCurrent();
+      if (markDone) await this.dismiss(id);
+      return { assignee: result.assignee, repo: result.reference.repo, number: result.reference.number };
+    });
+  }
+
+  async unsubscribeAndDismiss(id: string): Promise<void> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      await this.unsubscribe(id);
+      assertCurrent();
+      this.complete(id);
+      await this.controller.flush();
+    });
+  }
+
+  async archiveEmail(id: string): Promise<void> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const task = this.controller.state.tasks.find(item => item.id === id);
+      if (!task?.work?.email) throw new Error('This task does not have Gmail message metadata.');
+      await this.service.call('gmail.archive', {
+        operationId: crypto.randomUUID(), threadId: task.work.email.threadId, messageId: task.work.email.messageId, markRead: true,
+      });
+      assertCurrent();
+      this.complete(id);
+      await this.controller.flush();
+    });
+  }
+
+  async createGmailctlFilter(
+    id: string,
+    options: {
+      from?: string; list?: string; subject?: string; archive?: boolean;
+      markRead?: boolean; deleteIt?: boolean; note?: string; apply?: boolean;
+    },
+  ): Promise<{ configPath: string; ruleSnippet: string; applied: boolean }> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const task = this.controller.state.tasks.find(item => item.id === id);
+      const shouldArchive = options.archive ?? true, shouldMarkRead = options.markRead ?? true;
+      const result = await this.service.call('gmailctl.addFilter', {
+        operationId: crypto.randomUUID(),
+        ...(options.from ? { from: options.from } : {}),
+        ...(options.list ? { list: options.list } : {}),
+        ...(options.subject ? { subject: options.subject } : {}),
+        archive: shouldArchive, markRead: shouldMarkRead, deleteIt: options.deleteIt ?? false, apply: options.apply ?? false,
+      });
+      assertCurrent();
+      if (task?.work?.email && (shouldArchive || shouldMarkRead)) {
+        try {
+          await this.service.call('gmail.archive', {
+            operationId: crypto.randomUUID(), threadId: task.work.email.threadId,
+            messageId: task.work.email.messageId, archive: shouldArchive, markRead: shouldMarkRead,
+          });
+        } catch (error) {
+          const detail = `Filter created, but Gmail archive failed: ${message(error)}`.slice(0, 1000);
+          this.publish({ warnings: [...this.status.warnings, detail] });
+          throw new Error(detail);
+        }
+      }
+      assertCurrent();
+      if (this.controller.state.tasks.some(item => item.id === id) && (shouldArchive || shouldMarkRead)) {
+        this.complete(id);
+        await this.controller.flush();
+      }
+      return result;
+    });
+  }
+
   run(): Promise<void> { return this.start(new Date()); }
+  collectSources(): Promise<void> { return this.start(new Date(), 'collect'); }
   runAssessor(taskIds?: readonly string[]): Promise<void> { return this.start(new Date(), 'assess', taskIds); }
   runPrioritizer(): Promise<void> { return this.start(new Date(), 'prioritize'); }
   cancelAssessor(): Promise<void> {
@@ -242,6 +432,7 @@ export class WorkQueue {
 
   private start(now: Date, kind: RunKind = 'pipeline', taskIds?: readonly string[]): Promise<void> {
     if (this.status.running) return this.active ?? Promise.resolve();
+    if (this.activeActions > 0) return Promise.reject(new Error('Wait for the current action before starting a Copilot run.'));
     if (this.code.busy) return Promise.reject(new Error('Wait for the code job before starting another Copilot run.'));
     const selectedIds = taskIds && new Set(taskIds);
     if (selectedIds && !rankInput(this.controller.state).tasks.some(task => selectedIds.has(task.id))) {
@@ -253,7 +444,7 @@ export class WorkQueue {
     this.targetCancelled = false;
     this.publish({ running: true, cancelRequested: false, phase: 'preparing', error: '', warnings: [], progress: {
       startedAt: Date.now(), finishedAt: null, kind,
-      sources: settings.streams.filter(stream => kind === 'pipeline' && stream.enabled)
+      sources: settings.streams.filter(stream => stream.enabled && (kind === 'pipeline' || (kind === 'collect' && isDirectStream(stream))))
         .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
     } });
     const running = this.execute(now, settings, kind, selectedIds);
@@ -267,17 +458,17 @@ export class WorkQueue {
   private assertWorkspace(generation: number): void {
     if (generation !== this.controller.assessmentGeneration) throw new Error('The workspace was replaced during this run. Its previous results cannot change the restored workspace.');
   }
-  private async persist(batch: WorkCollection, profileId: string, generation: number): Promise<void> {
+  private async persist(batch: WorkCollection, profileId: string, generation: number, reopenDone = true): Promise<void> {
     this.assertWorkspace(generation);
     this.update(current => {
       this.assertProfile(current, profileId);
       // This run's reads are serialized and generation-fenced; a clock correction cannot make a fresh reply older.
-      return reconcileWork(current, batch, new Date(), true);
+      return reconcileWork(current, batch, new Date(), true, { reopenDone });
     });
     await this.controller.flush();
   }
 
-  private async refreshState(profileId: string, generation: number, observed: ReadonlySet<string> = new Set()): Promise<string[]> {
+  private async refreshState(profileId: string, generation: number, observed: ReadonlySet<string> = new Set(), reopenDone = true): Promise<string[]> {
     const urls = [...new Set(this.controller.state.tasks.filter(task =>
       task.status === 'open' && task.work && githubReference(task.work.url),
     ).map(task => canonicalSource(task.work!.url)))].filter(url => !observed.has(url));
@@ -295,7 +486,7 @@ export class WorkQueue {
       if (result.candidates.length || !exactIds(requested.map(canonicalSource), result.observations.map(value => canonicalSource(value.url)))) {
         throw new Error('Source refresh did not return exactly the requested sources. The previous order is retained.');
       }
-      await this.persist(result, profileId, generation);
+      await this.persist(result, profileId, generation, reopenDone);
       warnings.push(...result.warnings);
     }
     return warnings;
@@ -317,7 +508,7 @@ export class WorkQueue {
     return tasks;
   }
 
-  private async intake(profileId: string, generation: number): Promise<void> {
+  private async intake(profileId: string, generation: number, reopenDone = true): Promise<void> {
     const seen = new Set<string>();
     for (let page = 0; page < 20; page += 1) {
       const intake = await this.service.call('work.intake', {});
@@ -328,7 +519,7 @@ export class WorkQueue {
       if (intake.items.length) {
         await this.persist({
           candidates: intake.items.map(item => item.candidate), observations: [], warnings: [], collectedAt: new Date().toISOString(),
-        }, profileId, generation);
+        }, profileId, generation, reopenDone);
         this.assertWorkspace(generation);
         const ack = await this.service.call('work.ackIntake', { ids });
         if (!exactIds(ids, ack.ids)) throw new Error('Task intake acknowledgement did not match the saved items.');
@@ -519,17 +710,19 @@ export class WorkQueue {
     const warnings: string[] = [];
     let previousCompletedAt: string | null | undefined;
     let previousCursor: string | null = null;
+    let previousDirectCursor: string | null | undefined;
     let coveredThrough = now.toISOString();
     let scannedSettings = '';
     let completionWritten = false;
     try {
+      const reopenDone = kind !== 'collect';
       this.update(current => {
         previousCompletedAt = current.work.lastCompletedAt;
-        return kind === 'pipeline' ? { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } } : current;
+        return (kind === 'pipeline' || kind === 'collect') ? { ...current, work: { ...current.work, lastStartedAt: now.toISOString() } } : current;
       });
       await this.controller.flush();
       await this.controller.retryAssessments();
-      if (kind !== 'pipeline') {
+      if (kind === 'assess' || kind === 'prioritize') {
         const input = { ...rankInput(this.controller.state), profileId };
         if (kind === 'assess') {
           if (selectedIds) input.tasks = input.tasks.filter(task => selectedIds.has(task.id));
@@ -554,15 +747,18 @@ export class WorkQueue {
         await this.controller.flush();
         return;
       }
-      const { collectionCursor } = this.controller.state.work;
+      const { collectionCursor, directCollectionCursor } = this.controller.state.work;
+      const sinceCursor = kind === 'collect' ? (directCollectionCursor ?? collectionCursor) : collectionCursor;
       scannedSettings = sourceSettings(settings);
-      const streams = settings.streams.filter(stream => stream.enabled);
-      this.publish({ phase: 'intake' });
-      try { await this.intake(profileId, generation); }
-      catch (error) {
-        if (this.controller.getSnapshot().persistence.error) throw error;
-        errors.push(`Task intake: ${message(error)}`);
-        this.publish({ error: errors.join('\n') });
+      const streams = settings.streams.filter(stream => stream.enabled && (kind !== 'collect' || isDirectStream(stream)));
+      if (kind !== 'collect') {
+        this.publish({ phase: 'intake' });
+        try { await this.intake(profileId, generation, true); }
+        catch (error) {
+          if (this.controller.getSnapshot().persistence.error) throw error;
+          errors.push(`Task intake: ${message(error)}`);
+          this.publish({ error: errors.join('\n') });
+        }
       }
       const observed = new Set<string>();
       for (const stream of streams) {
@@ -572,27 +768,30 @@ export class WorkQueue {
         this.sourceProgress(stream.id, { state: 'collecting' });
         const diagnostics: string[] = [];
         let failed = false;
-        const knownUrls = [...new Set(this.controller.state.tasks
-          .filter(task => task.status === 'open' && task.work && githubReference(task.work.url))
-          .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
+        const knownUrls = stream.kind === 'gmail'
+          ? []
+          : [...new Set(this.controller.state.tasks
+            .filter(task => task.status === 'open' && task.work && githubReference(task.work.url))
+            .map(task => task.work!.url))].filter(url => !observed.has(canonicalSource(url)));
         for (let offset = 0; offset < Math.max(knownUrls.length, 1); offset += 100) {
           this.assertProfile(this.controller.state, profileId);
           const pendingUrls = knownUrls.slice(offset, offset + 100).filter(url => !observed.has(canonicalSource(url)));
           if (offset > 0 && !pendingUrls.length) continue;
           try {
             const result = await this.service.call('work.collect', {
-              stream, model: settings.model, since: collectionCursor, knownUrls: pendingUrls,
+              stream, model: settings.model, since: sinceCursor, knownUrls: pendingUrls,
               observeOnly: offset > 0,
+              ...(kind === 'collect' ? { skipModelExtraction: true } : {}),
             });
             if (result.coveredThrough) {
               const boundary = Date.parse(result.coveredThrough);
               if (boundary > Math.min(now.getTime(), Date.parse(result.collectedAt))
-                || (collectionCursor && boundary <= Date.parse(collectionCursor))) {
+                || (sinceCursor && boundary <= Date.parse(sinceCursor))) {
                 throw new Error('The source returned an invalid scan boundary. Previous coverage is retained.');
               }
               if (boundary < Date.parse(coveredThrough)) coveredThrough = result.coveredThrough;
             }
-            await this.persist(result, profileId, generation);
+            await this.persist(result, profileId, generation, reopenDone);
             for (const observation of result.observations) observed.add(canonicalSource(observation.url));
             const coverage = (result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`);
             warnings.push(...coverage);
@@ -616,11 +815,13 @@ export class WorkQueue {
       }
       this.publish({ warnings: [...warnings] });
       try {
-        warnings.push(...await this.refreshState(profileId, generation, observed));
-        const input = { ...rankInput(this.controller.state), profileId };
-        const tasks = await this.unassessed(input, profileId, generation);
-        const assessments = await this.assess({ ...input, tasks }, generation);
-        warnings.push(...await this.prioritize(input, generation, assessments));
+        warnings.push(...await this.refreshState(profileId, generation, observed, reopenDone));
+        if (kind === 'pipeline') {
+          const input = { ...rankInput(this.controller.state), profileId };
+          const tasks = await this.unassessed(input, profileId, generation);
+          const assessments = await this.assess({ ...input, tasks }, generation);
+          warnings.push(...await this.prioritize(input, generation, assessments));
+        }
       }
       catch (error) {
         if (error instanceof AssessmentCancelled) throw error;
@@ -634,11 +835,17 @@ export class WorkQueue {
           errors.push('Source settings changed during the run. Run again to collect the saved sources.');
         }
         previousCursor = current.work.collectionCursor;
+        previousDirectCursor = current.work.directCollectionCursor;
         completionWritten = errors.length === 0;
         return {
           ...current, work: {
             ...current.work, lastError: errors.join('\n').slice(0, 4000),
-            ...(completionWritten ? { lastCompletedAt: new Date().toISOString(), collectionCursor: coveredThrough } : {}),
+            ...(completionWritten ? {
+              lastCompletedAt: new Date().toISOString(),
+              ...(kind === 'pipeline'
+                ? { collectionCursor: coveredThrough, directCollectionCursor: coveredThrough }
+                : { directCollectionCursor: coveredThrough }),
+            } : {}),
           },
         };
       });
@@ -656,6 +863,8 @@ export class WorkQueue {
             ...(completionWritten ? { lastCompletedAt: previousCompletedAt ?? null } : {}),
             ...(completionWritten && sourceSettings(current.work.settings) === scannedSettings
               && current.work.collectionCursor === coveredThrough ? { collectionCursor: previousCursor } : {}),
+            ...(completionWritten && sourceSettings(current.work.settings) === scannedSettings
+              && current.work.directCollectionCursor === coveredThrough ? { directCollectionCursor: previousDirectCursor } : {}),
           },
         }));
         await this.controller.flush();

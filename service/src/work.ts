@@ -1,24 +1,34 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { CopilotService } from './copilot.ts';
+import { CopilotProjectsService } from './copilot-projects.ts';
 import { checkAbort, ServiceError } from './errors.ts';
 import { WorkGitHub } from './work-github.ts';
+import { WorkGmail } from './work-gmail.ts';
 import { WorkIntake } from './work-intake.ts';
 import { canonicalGithubUrl, McpConnections, normalizeWorkUrl, sourceTime } from './work-mcp.ts';
 import { isGitHubStream, workCollectInputSchema, workCollectOutputSchema, type WorkCandidate } from './work-schema.ts';
 
 export class WorkService {
   private readonly github: Pick<WorkGitHub, 'collect' | 'observe'>;
+  private readonly gmail: WorkGmail;
+  private readonly copilotProjects: CopilotProjectsService;
   private readonly copilot: CopilotService;
   private readonly connections: McpConnections;
   private readonly intake: WorkIntake;
   private readonly now: () => Date;
   constructor(options: {
-    github?: Pick<WorkGitHub, 'collect' | 'observe'>; copilot?: CopilotService; connections?: McpConnections;
+    github?: Pick<WorkGitHub, 'collect' | 'observe'>;
+    gmail?: WorkGmail;
+    copilotProjects?: CopilotProjectsService;
+    copilot?: CopilotService;
+    connections?: McpConnections;
     intake?: WorkIntake; now?: () => Date;
   } = {}) {
     this.copilot = options.copilot ?? new CopilotService();
     this.github = options.github ?? new WorkGitHub({ copilot: this.copilot });
+    this.gmail = options.gmail ?? new WorkGmail();
+    this.copilotProjects = options.copilotProjects ?? new CopilotProjectsService();
     this.connections = options.connections ?? new McpConnections();
     this.intake = options.intake ?? new WorkIntake();
     this.now = options.now ?? (() => new Date());
@@ -41,7 +51,19 @@ export class WorkService {
       });
     }
     if (isGitHubStream(input.stream)) return this.github.collect(input, signal);
+    if (input.stream.kind === 'gmail') return this.gmail.collect(input, signal);
     const collectedAt = this.now().toISOString();
+    if (input.skipModelExtraction) {
+      return workCollectOutputSchema.parse({
+        candidates: [],
+        observations: [],
+        collectedAt,
+        warnings: [],
+        coverageInfo: [
+          `${input.stream.name}: skipped agent extraction during direct source check.`,
+        ],
+      });
+    }
     const server = await this.connections.selected(input.stream);
     checkAbort(signal);
     const result = await this.copilot.collectMcp(input.stream, input.model, server, input.since, signal);
@@ -85,6 +107,10 @@ export class WorkService {
   }
   rank: CopilotService['rankWork'] = (input, signal) => this.copilot.rankWork(input, signal);
   assess: CopilotService['assessWork'] = (input, signal) => this.copilot.assessWork(input, signal);
+  listCopilotProjects: CopilotProjectsService['list'] = signal => this.copilotProjects.list(signal);
+  dispatchCopilotProject: CopilotProjectsService['dispatch'] = (input, signal) => this.copilotProjects.dispatch(input, signal);
+  archiveGmail: WorkGmail['archive'] = (input, signal) => this.gmail.archive(input, signal);
+  addGmailctlFilter: WorkGmail['addGmailctlFilter'] = (input, signal) => this.gmail.addGmailctlFilter(input, signal);
   listConnections() { return this.connections.list(); }
   pendingIntake() { return this.intake.pending(); }
   ackIntake(input: unknown) { return this.intake.ack(input); }
