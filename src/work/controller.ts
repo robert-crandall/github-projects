@@ -502,11 +502,23 @@ export class WorkQueue {
     this.assertWorkspace(generation);
     this.update(current => {
       this.assertProfile(current, profileId);
-      // This run's reads are serialized and generation-fenced; a clock correction cannot make a fresh reply older.
-      const reconciled = reconcileWork(current, batch, new Date(), true, { reopenDone });
-      if (!scannedStreamIds || scannedStreamIds.size === 0) return reconciled;
       const currentIds = new Set(current.work.settings.streams.map(stream => stream.id));
-      const removedDuringRun = new Set([...scannedStreamIds].filter(id => !currentIds.has(id)));
+      const removedDuringRun = scannedStreamIds && scannedStreamIds.size > 0
+        ? new Set([...scannedStreamIds].filter(id => !currentIds.has(id)))
+        : new Set<string>();
+      const effectiveBatch = removedDuringRun.size > 0
+        ? {
+          ...batch,
+          candidates: batch.candidates
+            .map(candidate => ({
+              ...candidate,
+              evidence: candidate.evidence.filter(evidence => !removedDuringRun.has(evidence.streamId)),
+            }))
+            .filter(candidate => candidate.evidence.length > 0),
+        }
+        : batch;
+      // This run's reads are serialized and generation-fenced; a clock correction cannot make a fresh reply older.
+      const reconciled = reconcileWork(current, effectiveBatch, new Date(), true, { reopenDone });
       return removedDuringRun.size > 0 ? pruneUnconfiguredStreams(reconciled, removedDuringRun) : reconciled;
     });
     await this.controller.flush();
