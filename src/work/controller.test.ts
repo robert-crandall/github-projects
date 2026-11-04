@@ -2689,3 +2689,161 @@ test('startup pruning backs up before cleaning active and parked profiles and sk
   expect(mock.log.filter(item => item === 'workspace_create_backup').length).toBe(backupsBefore + 1);
 });
 
+describe('batch triage actions', () => {
+  test('archiveEmailBatch archives multiple Gmail tasks and marks them done', async () => {
+    const saved = reconcileWork(initial(), {
+      ...collection(),
+      candidates: ['m1', 'm2'].map(id => ({
+        ...candidate(`gmail:${id}`, 'gmail'),
+        url: `https://mail.google.com/mail/u/0/#inbox/${id}`,
+        action: 'reply' as const,
+        email: {
+          messageId: `msg-${id}`,
+          threadId: `thr-${id}`,
+          from: 'UPS <mcinfo@ups.com>',
+          senderEmail: 'mcinfo@ups.com',
+          subject: `Subject ${id}`,
+          snippet: '',
+        },
+      })),
+    }, before);
+    const mock = await fixture(saved, request => {
+      if (request.op === 'gmail.archive') return {
+        operationId: request.input.operationId,
+        messageId: request.input.messageId,
+        threadId: request.input.threadId ?? request.input.messageId,
+        status: 'confirmed',
+        confirmedAt: before,
+      };
+    });
+
+    const ids = mock.workspace.state.tasks.map(task => task.id);
+    const result = await mock.queue.archiveEmailBatch(ids);
+    await mock.workspace.flush();
+
+    expect(result).toEqual({ archived: 2, failed: 0 });
+    expect(mock.requests.filter(request => request.op === 'gmail.archive')).toHaveLength(2);
+    expect(mock.saved().tasks.map(task => task.status)).toEqual(['done', 'done']);
+  });
+
+  test('createGmailctlFilterBatch deduplicates sender rules, applies once on the final rule, and archives tasks', async () => {
+    const saved = reconcileWork(initial(), {
+      ...collection(),
+      candidates: [
+        { id: 'm1', from: 'Promo <promo@example.com>', senderEmail: 'promo@example.com' },
+        { id: 'm2', from: 'Promo <promo@example.com>', senderEmail: 'promo@example.com' },
+        { id: 'm3', from: 'Digest <digest@example.com>', senderEmail: 'digest@example.com' },
+      ].map(item => ({
+        ...candidate(`gmail:${item.id}`, 'gmail'),
+        url: `https://mail.google.com/mail/u/0/#inbox/${item.id}`,
+        action: 'reply' as const,
+        email: {
+          messageId: `msg-${item.id}`,
+          threadId: `thr-${item.id}`,
+          from: item.from,
+          senderEmail: item.senderEmail,
+          subject: `Deal ${item.id}`,
+          snippet: '',
+        },
+      })),
+    }, before);
+    const mock = await fixture(saved, request => {
+      if (request.op === 'gmailctl.addFilter') return {
+        operationId: request.input.operationId,
+        configPath: '/tmp/config.jsonnet',
+        ruleSnippet: `{ filter: { from: "${request.input.from}" }, actions: { archive: true, markRead: true } }`,
+        applied: Boolean(request.input.apply),
+        status: 'confirmed',
+        confirmedAt: before,
+      };
+      if (request.op === 'gmail.archive') return {
+        operationId: request.input.operationId,
+        messageId: request.input.messageId,
+        threadId: request.input.threadId ?? request.input.messageId,
+        status: 'confirmed',
+        confirmedAt: before,
+      };
+    });
+
+    const ids = mock.workspace.state.tasks.map(task => task.id);
+    const result = await mock.queue.createGmailctlFilterBatch(ids, { archive: true, markRead: true, apply: true });
+    await mock.workspace.flush();
+
+    expect(result).toEqual({ filterCount: 2, archivedCount: 3, applied: true, configPath: '/tmp/config.jsonnet' });
+    const filterCalls = mock.requests.filter(request => request.op === 'gmailctl.addFilter');
+    expect(filterCalls).toHaveLength(2);
+    expect(filterCalls.map(call => ({ from: call.input.from, apply: call.input.apply }))).toEqual([
+      { from: 'promo@example.com', apply: false },
+      { from: 'digest@example.com', apply: true },
+    ]);
+    expect(mock.requests.filter(request => request.op === 'gmail.archive')).toHaveLength(3);
+    expect(mock.saved().tasks.every(task => task.status === 'done')).toBe(true);
+  });
+
+  test('dismissBatch handles mixed manual/Gmail/GitHub selections and reports partial remote failures after attempting all tasks', async () => {
+    const base = initial();
+    const withManual = {
+      ...base,
+      tasks: [
+        ...base.tasks,
+        { id: 'manual-1', title: 'Manual task', notes: '', status: 'open' as const, createdAt: before },
+      ],
+    };
+    const saved = reconcileWork(withManual, {
+      ...collection(),
+      candidates: [
+        {
+          ...candidate('gmail:m1', 'gmail'),
+          url: 'https://mail.google.com/mail/u/0/#inbox/m1',
+          action: 'reply' as const,
+          email: {
+            messageId: 'msg-m1',
+            threadId: 'thr-m1',
+            from: 'UPS <mcinfo@ups.com>',
+            senderEmail: 'mcinfo@ups.com',
+            subject: 'Delivery update',
+            snippet: '',
+          },
+        },
+        {
+          ...candidate('github:n1', 'github'),
+          url: 'https://github.com/owner/repo/pull/42',
+          action: 'review' as const,
+          notification: {
+            threadId: '4242',
+            reference: { repo: 'owner/repo', number: 42, kind: 'pr' as const },
+            updatedAt: before,
+          },
+        },
+      ],
+    }, before);
+
+    const mock = await fixture(saved, request => {
+      if (request.op === 'gmail.archive') {
+        throw new Error('Gmail archive failed');
+      }
+      if (request.op === 'github.acknowledge') return {
+        operationId: request.input.operationId,
+        threadId: request.input.threadId,
+        target: request.input.target,
+        status: 'confirmed',
+        confirmedAt: before,
+      };
+    });
+
+    const ids = mock.workspace.state.tasks.map(task => task.id);
+    await expect(mock.queue.dismissBatch(ids)).rejects.toThrow('Gmail archive failed');
+    await mock.workspace.flush();
+
+    expect(mock.requests.map(request => request.op)).toEqual(['gmail.archive', 'github.acknowledge']);
+    const manualTask = mock.saved().tasks.find(task => task.id === 'manual-1')!;
+    const githubTask = mock.saved().tasks.find(task => task.work?.notification?.threadId === '4242')!;
+    const gmailTask = mock.saved().tasks.find(task => task.work?.email?.messageId === 'msg-m1')!;
+    expect(manualTask.status).toBe('done');
+    expect(githubTask.status).toBe('done');
+    expect(githubTask.work?.acknowledge?.status).toBe('confirmed');
+    expect(gmailTask.status).toBe('done');
+  });
+});
+
+

@@ -253,7 +253,7 @@ export function reconcileWork(
       identity, action: candidate.action, url, evidence: [], handledEvidenceIds: [],
       availability: linked?.availability ?? (affirmative ? 'actionable' : 'unknown'),
       availabilityReason: linked?.availabilityReason ?? (affirmative ? 'The source supplied an action.' : 'The source state has not been confirmed.'),
-      availabilityObservedAt: linked?.availabilityObservedAt,
+      ...(linked?.availabilityObservedAt ? { availabilityObservedAt: linked.availabilityObservedAt } : {}),
       ...(linked?.context ? { context: linked.context } : {}),
       ...(linked?.contextObservedAt ? { contextObservedAt: linked.contextObservedAt } : {}),
       ...(linked?.acknowledge ? { acknowledge: linked.acknowledge } : {}),

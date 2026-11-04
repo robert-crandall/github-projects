@@ -445,6 +445,154 @@ export class WorkQueue {
     });
   }
 
+  async dismissBatch(ids: readonly string[]): Promise<{ completed: number; failed: number }> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const uniqueIds = [...new Set(ids)];
+      let completed = 0;
+      const errors: string[] = [];
+      for (const id of uniqueIds) {
+        assertCurrent();
+        if (!this.controller.state.tasks.some(item => item.id === id && item.status === 'open')) continue;
+        try {
+          await this.dismiss(id);
+          completed += 1;
+        } catch (error) {
+          assertCurrent();
+          errors.push(message(error));
+        }
+      }
+      if (errors.length > 0) {
+        throw new Error(`Completed ${completed} of ${completed + errors.length} tasks. ${errors[0]}`);
+      }
+      return { completed, failed: 0 };
+    });
+  }
+
+  async archiveEmailBatch(ids: readonly string[]): Promise<{ archived: number; failed: number }> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const uniqueIds = [...new Set(ids)];
+      let archived = 0;
+      const errors: string[] = [];
+      for (const id of uniqueIds) {
+        assertCurrent();
+        const task = this.controller.state.tasks.find(item => item.id === id && item.status === 'open');
+        if (!task?.work?.email) {
+          if (task?.work?.evidence.some(item => item.source === 'gmail')) {
+            errors.push(`"${task.title}" has no Gmail message metadata. Collect it again before archiving.`);
+          }
+          continue;
+        }
+        try {
+          await this.archiveEmail(id);
+          archived += 1;
+        } catch (error) {
+          assertCurrent();
+          errors.push(message(error));
+        }
+      }
+      if (errors.length > 0) {
+        const detail = `Archived ${archived} of ${archived + errors.length} emails. ${errors[0]}`.slice(0, 1000);
+        this.publish({ warnings: [...this.status.warnings, detail] });
+        throw new Error(detail);
+      }
+      return { archived, failed: 0 };
+    });
+  }
+
+  async createGmailctlFilterBatch(
+    ids: readonly string[],
+    options: { archive?: boolean; markRead?: boolean; deleteIt?: boolean; apply?: boolean } = {},
+  ): Promise<{ filterCount: number; archivedCount: number; applied: boolean; configPath: string }> {
+    return this.withAction(async assertCurrent => {
+      assertCurrent();
+      const uniqueIds = [...new Set(ids)];
+      const gmailTasks = uniqueIds
+        .map(id => this.controller.state.tasks.find(item => item.id === id && item.status === 'open'))
+        .filter((task): task is NonNullable<typeof task> => Boolean(
+          task?.work?.email || task?.work?.evidence.some(item => item.source === 'gmail'),
+        ));
+      if (gmailTasks.some(task => !task.work?.email)) {
+        throw new Error('Some selected Gmail tasks have no message metadata. Collect them again before filtering.');
+      }
+
+      const rules = new Map<string, { from?: string; list?: string }>();
+      for (const task of gmailTasks) {
+        const from = task.work?.email?.senderEmail?.trim().toLowerCase();
+        const list = task.work?.email?.listId?.trim().toLowerCase();
+        if (from) {
+          rules.set(`from:${from}`, { from });
+        } else if (list) {
+          rules.set(`list:${list}`, { list });
+        }
+      }
+      if (rules.size === 0) {
+        throw new Error('Select at least one Gmail task with a sender address or mailing list.');
+      }
+
+      const shouldArchive = options.archive ?? true;
+      const shouldMarkRead = options.markRead ?? true;
+      const shouldApply = options.apply ?? false;
+      const ruleEntries = [...rules.values()];
+      let configPath = '';
+      let applied = false;
+
+      for (let index = 0; index < ruleEntries.length; index += 1) {
+        assertCurrent();
+        const rule = ruleEntries[index]!;
+        const isLast = index === ruleEntries.length - 1;
+        const result = await this.service.call('gmailctl.addFilter', {
+          operationId: crypto.randomUUID(),
+          ...(rule.from ? { from: rule.from } : {}),
+          ...(rule.list ? { list: rule.list } : {}),
+          archive: shouldArchive,
+          markRead: shouldMarkRead,
+          deleteIt: options.deleteIt ?? false,
+          apply: shouldApply && isLast,
+        });
+        configPath = result.configPath;
+        applied = applied || result.applied;
+      }
+
+      let archivedCount = 0;
+      const archiveErrors: string[] = [];
+      if (shouldArchive || shouldMarkRead) {
+        for (const task of gmailTasks) {
+          assertCurrent();
+          const email = task.work?.email;
+          if (!email) continue;
+          try {
+            await this.service.call('gmail.archive', {
+              operationId: crypto.randomUUID(),
+              threadId: email.threadId,
+              messageId: email.messageId,
+              archive: shouldArchive,
+              markRead: shouldMarkRead,
+            });
+            assertCurrent();
+            if (this.controller.state.tasks.some(item => item.id === task.id)) {
+              this.complete(task.id);
+            }
+            archivedCount += 1;
+          } catch (error) {
+            assertCurrent();
+            archiveErrors.push(message(error));
+          }
+        }
+        await this.controller.flush();
+      }
+
+      if (archiveErrors.length > 0) {
+        const detail = `Created ${ruleEntries.length} gmailctl filter${ruleEntries.length === 1 ? '' : 's'}, but ${archiveErrors.length} email archive${archiveErrors.length === 1 ? '' : 's'} failed: ${archiveErrors[0]}`.slice(0, 1000);
+        this.publish({ warnings: [...this.status.warnings, detail] });
+        throw new Error(detail);
+      }
+
+      return { filterCount: ruleEntries.length, archivedCount, applied, configPath };
+    });
+  }
+
   run(): Promise<void> { return this.start(new Date()); }
   collectSources(): Promise<void> { return this.start(new Date(), 'collect'); }
   runAssessor(taskIds?: readonly string[]): Promise<void> { return this.start(new Date(), 'assess', taskIds); }

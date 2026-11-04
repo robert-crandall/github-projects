@@ -28,6 +28,7 @@ import { CodeSessionPanel } from './CodeSessionPanel.tsx';
 import { codeJob } from './code-sessions.ts';
 import { CodeBatchProgress } from './CodeBatchProgress.tsx';
 import { ActionInboxPanel } from './ActionInboxPanel.tsx';
+import { classifyTaskActionGroup, groupTasksByAction, isGmailTask, type ActionGroupId } from './action-groups.ts';
 import './tasks.css';
 
 function date(value: string | null) {
@@ -296,6 +297,9 @@ export function TaskApp({ controller, queue, remote }: {
   const [destination, setDestination] = useState<Destination>();
   const [selection, setSelection] = useState<string | null>(null);
   const [view, setView] = useState<'tasks' | 'done' | 'waiting'>('tasks');
+  const [groupByAction, setGroupByAction] = useState(true);
+  const [collapsedGroups, setCollapsedGroups] = useState<ActionGroupId[]>([]);
+  const [batchNotice, setBatchNotice] = useState('');
   const [checked, setChecked] = useState<{ context: string; ids: string[] }>({ context: '', ids: [] });
   const styles = saved.workspace?.state.work.settings.workStyles ?? [];
   const selectedStyles = saved.workspace?.state.work.styleFilter ?? null;
@@ -381,9 +385,66 @@ export function TaskApp({ controller, queue, remote }: {
     catch (error) { controller.report(error); }
   };
   const reasons = new Map(state.work.ranking?.reasons.map(item => [item.id, item.reason]) ?? []);
+  const actionClassifications = new Map(visible.map(task => [
+    task.id,
+    classifyTaskActionGroup(task, styles, styleAssessments.values.get(task.id)),
+  ]));
+  const actionGroups = view === 'tasks' ? groupTasksByAction(visible, styles, styleAssessments.values) : [];
   const checkedTasks = visible.filter(task => checkedIds.includes(task.id));
+  const checkedGmailTasks = checkedTasks.filter(isGmailTask);
+  const checkedGmailSenders = new Set(
+    checkedGmailTasks
+      .map(task => task.work?.email?.senderEmail?.trim().toLowerCase() || task.work?.email?.listId?.trim().toLowerCase() || '')
+      .filter(Boolean),
+  );
   const issueCount = checkedTasks.filter(task => codeJob(task, state) === 'implementation-assessment').length;
   const prCount = checkedTasks.filter(task => codeJob(task, state) === 'pr-review').length;
+  const toggleGroupCollapse = (groupId: ActionGroupId) => {
+    setCollapsedGroups(prev => prev.includes(groupId) ? prev.filter(id => id !== groupId) : [...prev, groupId]);
+  };
+  const toggleGroupSelection = (taskIds: string[]) => {
+    const allSelected = taskIds.every(id => checkedIds.includes(id));
+    const nextIds = allSelected
+      ? checkedIds.filter(id => !taskIds.includes(id))
+      : [...new Set([...checkedIds, ...taskIds])];
+    setChecked({ context: selectionContext, ids: nextIds });
+  };
+  const runBatchAction = (message: string, operation: () => Promise<unknown>, clearIds?: string[]) => {
+    setBatchNotice('');
+    invoke(async () => {
+      await operation();
+      if (clearIds?.length) {
+        setChecked(prev => ({ context: prev.context, ids: prev.ids.filter(id => !clearIds.includes(id)) }));
+      }
+      setBatchNotice(message);
+    });
+  };
+  const renderTaskItem = (task: Task) => {
+    const actionInfo = actionClassifications.get(task.id);
+    const rankReason = reasons.get(task.id);
+    const batchBusy = run.running || Boolean(run.activeActions);
+    return <li key={task.id} data-task-id={task.id} className={task.id === selection ? 'task-selected' : ''}>
+      {view === 'tasks' && <label className="task-select"><input type="checkbox" aria-label={`Select task: ${task.title}`}
+        checked={checkedIds.includes(task.id)} onChange={event => setChecked({ context: selectionContext,
+          ids: event.target.checked ? [...checkedIds, task.id] : checkedIds.filter(id => id !== task.id) })} /></label>}
+      <span className="task-rank" aria-label={view === 'tasks' ? `Rank ${positions.get(task.id)}` : undefined}>{view === 'tasks' ? positions.get(task.id) : task.status === 'done' ? <Check size={16} /> : '—'}</span>
+      <button className="task-row" aria-current={task.id === selection ? 'true' : undefined} onClick={() => setSelection(task.id)}>
+        <span className="task-title">{task.title}</span>
+        <span className="task-source">{source(task)}</span>
+        <span className="work-style-pills">
+          {view === 'tasks' && actionInfo && <span className={`action-group-badge action-group-${actionInfo.groupId}`} title={actionInfo.reason}>{actionInfo.badge} · {actionInfo.reason}</span>}
+          {taskStyles(task, styles, styleAssessments.values.get(task.id)).map(style =>
+            <span key={style.id} className="work-style-pill" title={style.description}>{style.name}</span>)}
+        </span>
+        <span className="task-reason">{view === 'waiting' ? task.work?.availabilityReason : view === 'done' ? `Done ${date(task.completedAt ?? null)}`
+          : rankReason ?? 'Not ranked yet · included on the next run'}</span>
+        {task.work?.availability === 'unknown' && <span className="task-uncertain">{task.work.availabilityReason || 'Source state could not be confirmed.'}</span>}
+      </button>
+      {view === 'tasks' && <button className="task-complete" disabled={batchBusy} aria-label={`Mark done: ${task.title}`} onClick={() => {
+        try { queue.complete(task.id); } catch (error) { controller.report(error); }
+      }}><Check size={17} /></button>}
+    </li>;
+  };
   const batchProgress = code.batch && <CodeBatchProgress batch={code.batch} sessions={queue.code} controller={controller}
     inspect={id => { setSettings(false); setFilters(false); setView('tasks'); setSelection(id); }} />;
   const runProgress = <RunProgress key={state.activeWorkProfile.id} run={run} details={runDetails}
@@ -489,50 +550,144 @@ export function TaskApp({ controller, queue, remote }: {
           {batchProgress}
           {styleAssessments.loading && styles.length > 0 && <p className="field-help" role="status">Reading saved work styles...</p>}
           {filters && view === 'tasks' && <p className="task-filter-order">Original ranks · Same order as Ranked Tasks</p>}
+          {view === 'tasks' && batchNotice && <p className="task-detail-notice" role="status">{batchNotice}</p>}
           {view === 'tasks' && visible.length > 0 && <section className="task-selection" aria-label="Selected tasks">
-            <div className="button-row"><span role="status">{checkedIds.length} selected</span>
-              <button className="text-button" disabled={checkedIds.length === visible.length}
-                onClick={() => setChecked({ context: selectionContext, ids: visible.map(task => task.id) })}>Select visible tasks</button>
-              {checkedIds.length > 0 && <button className="text-button" onClick={() => setChecked({ context: selectionContext, ids: [] })}>Clear selection</button>}
+            <div className="button-row task-selection-top">
+              <div className="button-row">
+                <span role="status">{checkedIds.length} selected</span>
+                <button className="text-button" disabled={checkedIds.length === visible.length}
+                  onClick={() => setChecked({ context: selectionContext, ids: visible.map(task => task.id) })}>Select visible tasks</button>
+                {checkedIds.length > 0 && <button className="text-button" onClick={() => setChecked({ context: selectionContext, ids: [] })}>Clear selection</button>}
+              </div>
+              <div className="task-view-mode" role="group" aria-label="Task grouping">
+                <button type="button" className="task-view-pill" aria-pressed={groupByAction}
+                  onClick={() => setGroupByAction(true)}>Group by action</button>
+                <button type="button" className="task-view-pill" aria-pressed={!groupByAction}
+                  onClick={() => setGroupByAction(false)}>Rank order</button>
+              </div>
             </div>
             {checkedIds.length > 0 && <>
               <div className="button-row">
+                <button className="primary" disabled={run.running || Boolean(run.activeActions)}
+                  onClick={() => runBatchAction(
+                    `Completed and dismissed ${checkedIds.length} ${checkedIds.length === 1 ? 'task' : 'tasks'}.`,
+                    () => queue.dismissBatch(checkedIds),
+                    checkedIds,
+                  )}><Check size={15} />Done & dismiss ({checkedIds.length})</button>
+                {checkedGmailTasks.length > 0 && <button className="secondary" disabled={run.running || Boolean(run.activeActions)}
+                  onClick={() => runBatchAction(
+                    `Archived ${checkedGmailTasks.length} ${checkedGmailTasks.length === 1 ? 'email' : 'emails'} in Gmail.`,
+                    () => queue.archiveEmailBatch(checkedGmailTasks.map(task => task.id)),
+                    checkedGmailTasks.map(task => task.id),
+                  )}>Archive in Gmail ({checkedGmailTasks.length})</button>}
+                {checkedGmailSenders.size > 0 && <button className="secondary" disabled={run.running || Boolean(run.activeActions)}
+                  onClick={() => runBatchAction(
+                    `Added ${checkedGmailSenders.size} gmailctl filter ${checkedGmailSenders.size === 1 ? 'rule' : 'rules'}, applied to Gmail, and archived ${checkedGmailTasks.length} ${checkedGmailTasks.length === 1 ? 'email' : 'emails'}.`,
+                    () => queue.createGmailctlFilterBatch(checkedGmailTasks.map(task => task.id), { archive: true, markRead: true, apply: true }),
+                    checkedGmailTasks.map(task => task.id),
+                  )}>Filter senders in gmailctl & archive ({checkedGmailSenders.size})</button>}
                 <button className="secondary" disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor(checkedIds))}>Assess selected ({checkedIds.length})</button>
                 {issueCount > 0 && <button className="secondary" disabled={run.running || code.busy}
                   onClick={() => invoke(() => queue.code.startBatch(checkedIds, 'implementation-assessment'))}>Assess implementation ({issueCount} {issueCount === 1 ? 'issue' : 'issues'})</button>}
                 {prCount > 0 && <button className="secondary" disabled={run.running || code.busy}
                   onClick={() => invoke(() => queue.code.startBatch(checkedIds, 'pr-review'))}>Review selected PRs ({prCount})</button>}
               </div>
-              <p className="field-help">Assess selected saves task judgments without changing order. Code actions run only their named source kind.</p>
-              <details><summary>Code eligibility: {issueCount} issues, {prCount} PRs, {checkedIds.length - issueCount - prCount} unavailable</summary>
+              <p className="field-help">Batch triage archives Gmail threads or acknowledges GitHub notifications and moves tasks to Done. Assess selected runs Copilot on checked items.</p>
+              {(issueCount > 0 || prCount > 0) && <details><summary>Code eligibility: {issueCount} issues, {prCount} PRs, {checkedIds.length - issueCount - prCount} unavailable</summary>
                 <ul>{checkedTasks.map(task => <li key={task.id}>{task.title}: {codeJob(task, state) === 'pr-review' ? 'PR review only'
                   : codeJob(task, state) === 'implementation-assessment' ? 'Implementation assessment only'
                   : 'No code action: not a known GitHub issue or PR. Unknown kinds need explicit Run now collection.'}</li>)}</ul>
-              </details>
+              </details>}
             </>}
           </section>}
-          {visible.length ? <ol className="ranked-list" aria-label={view === 'tasks' ? 'Prioritized tasks' : view === 'done' ? 'Completed tasks' : 'Tasks with no action now'}>
-            {visible.map(task => <li key={task.id} data-task-id={task.id} className={task.id === selection ? 'task-selected' : ''}>
-              {view === 'tasks' && <label className="task-select"><input type="checkbox" aria-label={`Select task: ${task.title}`}
-                checked={checkedIds.includes(task.id)} onChange={event => setChecked({ context: selectionContext,
-                  ids: event.target.checked ? [...checkedIds, task.id] : checkedIds.filter(id => id !== task.id) })} /></label>}
-              <span className="task-rank" aria-label={view === 'tasks' ? `Rank ${positions.get(task.id)}` : undefined}>{view === 'tasks' ? positions.get(task.id) : task.status === 'done' ? <Check size={16} /> : '—'}</span>
-              <button className="task-row" aria-current={task.id === selection ? 'true' : undefined} onClick={() => setSelection(task.id)}>
-                <span className="task-title">{task.title}</span>
-                <span className="task-source">{source(task)}</span>
-                {taskStyles(task, styles, styleAssessments.values.get(task.id)).length > 0 && <span className="work-style-pills">
-                  {taskStyles(task, styles, styleAssessments.values.get(task.id)).map(style =>
-                    <span key={style.id} className="work-style-pill" title={style.description}>{style.name}</span>)}
-                </span>}
-                <span className="task-reason">{view === 'waiting' ? task.work?.availabilityReason : view === 'done' ? `Done ${date(task.completedAt ?? null)}`
-                  : reasons.get(task.id) ?? 'Not ranked yet · included on the next run'}</span>
-                {task.work?.availability === 'unknown' && <span className="task-uncertain">{task.work.availabilityReason || 'Source state could not be confirmed.'}</span>}
-              </button>
-              {view === 'tasks' && <button className="task-complete" aria-label={`Mark done: ${task.title}`} onClick={() => {
-                try { queue.complete(task.id); } catch (error) { controller.report(error); }
-              }}><Check size={17} /></button>}
-            </li>)}
-          </ol> : filters ? <div className="task-empty">
+          {visible.length ? (view === 'tasks' && groupByAction && !styleAssessments.loading && !styleAssessments.error ? <div className="task-action-groups" aria-label="Tasks grouped by recommended action">
+            {actionGroups.map(bucket => {
+              const groupId = bucket.definition.id;
+              const collapsed = collapsedGroups.includes(groupId);
+              const groupTaskIds = bucket.tasks.map(item => item.task.id);
+              const groupGmailIds = bucket.tasks.filter(item => isGmailTask(item.task)).map(item => item.task.id);
+              const allGroupSelected = groupTaskIds.length > 0 && groupTaskIds.every(id => checkedIds.includes(id));
+              const filterableSenders = bucket.senderClusters.filter(cluster => cluster.senderEmail || cluster.listId);
+              const batchBusy = run.running || Boolean(run.activeActions);
+              return <section key={groupId} className={`task-action-group task-action-group-${groupId}`} aria-label={bucket.definition.title}>
+                <header className="task-group-header">
+                  <button type="button" className="task-group-toggle" aria-expanded={!collapsed} onClick={() => toggleGroupCollapse(groupId)}>
+                    <strong>{bucket.definition.title}</strong>
+                    <span className="count">{bucket.tasks.length}</span>
+                    <span className="task-group-description">{bucket.definition.description}</span>
+                  </button>
+                  <div className="button-row task-group-actions">
+                    <button type="button" className="text-button" onClick={() => toggleGroupSelection(groupTaskIds)}>
+                      {allGroupSelected ? 'Deselect group' : `Select all (${bucket.tasks.length})`}
+                    </button>
+                    {groupGmailIds.length > 0 && (groupId === 'safe-archive' || groupId === 'unsubscribe-filter') && (
+                      <button type="button" className="secondary" disabled={batchBusy}
+                        onClick={() => runBatchAction(
+                          `Archived ${groupGmailIds.length} ${groupGmailIds.length === 1 ? 'email' : 'emails'} from ${bucket.definition.title}.`,
+                          () => queue.archiveEmailBatch(groupGmailIds),
+                          groupGmailIds,
+                        )}>Archive all ({groupGmailIds.length})</button>
+                    )}
+                    {groupId === 'unsubscribe-filter' && filterableSenders.length > 0 && (
+                      <button type="button" className="secondary" disabled={batchBusy}
+                        onClick={() => runBatchAction(
+                          `Added ${filterableSenders.length} gmailctl filter ${filterableSenders.length === 1 ? 'rule' : 'rules'}, applied to Gmail, and archived ${groupGmailIds.length} ${groupGmailIds.length === 1 ? 'email' : 'emails'}.`,
+                          () => queue.createGmailctlFilterBatch(groupGmailIds, { archive: true, markRead: true, apply: true }),
+                          groupGmailIds,
+                        )}>Filter all senders ({filterableSenders.length})</button>
+                    )}
+                    {groupGmailIds.length === 0 && (
+                      <button type="button" className="secondary" disabled={batchBusy}
+                        onClick={() => runBatchAction(
+                          `Completed ${groupTaskIds.length} ${groupTaskIds.length === 1 ? 'task' : 'tasks'} in ${bucket.definition.title}.`,
+                          () => queue.dismissBatch(groupTaskIds),
+                          groupTaskIds,
+                        )}>Done all ({groupTaskIds.length})</button>
+                    )}
+                  </div>
+                </header>
+                {!collapsed && (groupId === 'unsubscribe-filter' || groupId === 'safe-archive') && bucket.senderClusters.length > 0 && (
+                  <div className="sender-cluster-list" aria-label={`${bucket.definition.title} senders`}>
+                    {bucket.senderClusters.map(cluster => (
+                      <div key={cluster.key} className="sender-cluster-chip">
+                        <button type="button" className="sender-cluster-select" title={`Select ${cluster.taskIds.length} from ${cluster.label}`}
+                          onClick={() => toggleGroupSelection(cluster.taskIds)}>
+                          <strong>{cluster.label}</strong>
+                          {cluster.taskIds.length > 1 && <span className="count">{cluster.taskIds.length}</span>}
+                        </button>
+                        {cluster.unsubscribeUrl && /^https?:\/\//i.test(cluster.unsubscribeUrl) && (
+                          <button type="button" className="text-button" title={cluster.unsubscribeUrl}
+                            onClick={() => invoke(() => controller.platform.launchWebUrl(cluster.unsubscribeUrl!))}>
+                            Unsubscribe <ExternalLink size={12} />
+                          </button>
+                        )}
+                        {(cluster.senderEmail || cluster.listId) && (
+                          <button type="button" className="text-button" disabled={batchBusy}
+                            title={`Add gmailctl filter for ${cluster.senderEmail || cluster.listId} and archive ${cluster.taskIds.length}`}
+                            onClick={() => runBatchAction(
+                              `Filtered ${cluster.label} in gmailctl and archived ${cluster.taskIds.length} ${cluster.taskIds.length === 1 ? 'email' : 'emails'}.`,
+                              () => queue.createGmailctlFilterBatch(cluster.taskIds, { archive: true, markRead: true, apply: true }),
+                              cluster.taskIds,
+                            )}>Filter sender</button>
+                        )}
+                        <button type="button" className="text-button" disabled={batchBusy}
+                          onClick={() => runBatchAction(
+                            `Archived ${cluster.taskIds.length} ${cluster.taskIds.length === 1 ? 'email' : 'emails'} from ${cluster.label}.`,
+                            () => queue.archiveEmailBatch(cluster.taskIds),
+                            cluster.taskIds,
+                          )}>Archive{cluster.taskIds.length > 1 ? ` (${cluster.taskIds.length})` : ''}</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {!collapsed && <ol className="ranked-list" aria-label={bucket.definition.title}>
+                  {bucket.tasks.map(item => renderTaskItem(item.task))}
+                </ol>}
+              </section>;
+            })}
+          </div> : <ol className="ranked-list" aria-label={view === 'tasks' ? 'Prioritized tasks' : view === 'done' ? 'Completed tasks' : 'Tasks with no action now'}>
+            {visible.map(task => renderTaskItem(task))}
+          </ol>) : filters ? <div className="task-empty">
             <h2>{styleAssessments.loading && selectedStyles !== null ? 'Reading work styles' : selectedSourceCount ? 'No matching tasks' : 'No sources selected'}</h2>
             <p>{selectedSourceCount ? 'No tasks match the current filters in this tab. Choose another source, work style or task tab.'
               : 'Select a source in the sidebar to show its tasks. Your tasks are still saved.'}</p>

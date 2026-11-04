@@ -1673,6 +1673,8 @@ test('explicit task selection is keyboard accessible, context-bound, local-only 
   await selected.getByText('Code eligibility:', { exact: false }).click();
   await expect(selected).toContainText('Agent result: No code action');
   await expect(selected).toContainText('Manual follow-up: No code action');
+  await expect(page.getByRole('button', { name: 'Group by action', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Rank order', exact: true }).click();
   await expect(page.locator('.task-rank')).toHaveText(['1', '2', '3', '4', '5']);
   await page.screenshot({ path: testInfo.outputPath('bulk-selection-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -1937,6 +1939,7 @@ test('code batch navigation keeps queued tasks until a failed result save stops 
 test('source filters match merged provenance once, preserve ranks and keep task actions working', async ({ page, native }) => {
   const original = sourceFilterFixture(native);
   await page.goto('/');
+  await page.getByRole('button', { name: 'Rank order', exact: true }).click();
   await page.getByRole('button', { name: /^Filters/ }).click();
   const tree = page.getByRole('region', { name: 'Filter sources' });
   await expect(page.locator('.task-title')).toHaveText(['Manual follow-up', 'Shared review', 'Assigned issue', 'Agent result']);

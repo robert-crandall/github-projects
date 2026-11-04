@@ -86,10 +86,38 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
       </section>
       <section aria-labelledby="work-styles-heading">
         <div className="task-section-heading"><h2 id="work-styles-heading">Work styles</h2>
-          <button type="button" className="secondary" disabled={(draft.workStyles?.length ?? 0) >= 20}
-            onClick={() => change({ ...draft, workStyles: [...draft.workStyles ?? [], {
-              id: crypto.randomUUID(), name: '', description: '',
-            }] })}><Plus size={15} />Add work style</button>
+          <div className="button-row" style={{ gap: '8px' }}>
+            <button type="button" className="secondary" disabled={(draft.workStyles?.length ?? 0) >= 20}
+              onClick={() => {
+                const existingNames = new Set((draft.workStyles ?? []).map(item => item.name.trim().toLowerCase()));
+                const presets = [
+                  {
+                    name: 'Safe to archive',
+                    description: 'Automated receipts, shipping updates, routine confirmations, or resolved alerts that need no reply.',
+                  },
+                  {
+                    name: 'Unsubscribe / Filter',
+                    description: 'Newsletters, marketing, promotional blasts, or recurring digests I do not need to read.',
+                  },
+                  {
+                    name: 'Needs action',
+                    description: 'Direct emails from a person, billing/account issues requiring action, or GitHub PRs and issues waiting on me.',
+                  },
+                ].filter(preset => !existingNames.has(preset.name.toLowerCase()));
+                if (!presets.length) return;
+                change({
+                  ...draft,
+                  workStyles: [
+                    ...draft.workStyles ?? [],
+                    ...presets.map(preset => ({ id: crypto.randomUUID(), ...preset })),
+                  ].slice(0, 20),
+                });
+              }}><Plus size={15} />Add triage presets</button>
+            <button type="button" className="secondary" disabled={(draft.workStyles?.length ?? 0) >= 20}
+              onClick={() => change({ ...draft, workStyles: [...draft.workStyles ?? [], {
+                id: crypto.randomUUID(), name: '', description: '',
+              }] })}><Plus size={15} />Add work style</button>
+          </div>
         </div>
         <p>Define the kinds of work you want to find in this profile. Copilot can assign more than one style; you can correct its choices.</p>
         {!draft.workStyles?.length && <p className="field-help">No styles yet. For example, you might define Quick wins or Deep focus.</p>}
