@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { CopilotProjectsService, parseCopilotProjectsList, selectCopilotProject } from '../src/copilot-projects.ts';
+import { CopilotProjectsService, deterministicRequestId, parseCopilotProjectsList, selectCopilotProject } from '../src/copilot-projects.ts';
 
 describe('CopilotProjectsService', () => {
   test('parses copilot-projects list-projects output and matches project by repo or PR review', () => {
@@ -56,5 +56,7 @@ describe('CopilotProjectsService', () => {
     expect(calls[1]!.args).toContain('--title');
     expect(calls[1]!.args).toContain('Review github/github#42');
     expect(calls[1]!.args).not.toContain('--no-parent');
+    expect(result.requestId).toBe(deterministicRequestId('op-dispatch-1'));
+    expect(deterministicRequestId('op-dispatch-1')).toBe(deterministicRequestId('op-dispatch-1'));
   });
 });

@@ -139,6 +139,7 @@ export const workStateSchema = z.strictObject({
   lastStartedAt: time.nullable(),
   lastCompletedAt: time.nullable(),
   collectionCursor: time.nullable().default(null),
+  directCollectionCursor: time.nullable().optional(),
   lastError: z.string().max(4000),
 });
 export const workCandidateSchema = z.strictObject({

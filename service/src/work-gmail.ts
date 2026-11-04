@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -204,6 +204,7 @@ export function buildGmailctlRuleSnippet(input: {
 export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: string): string {
   if (source.includes(ruleSnippet.trim())) return source;
   let openBracketIndex = -1;
+  let lastTokenIndex = -1;
   let depth = 0;
   let inSingle = false;
   let inDouble = false;
@@ -250,10 +251,12 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
+      if (!inSingle && openBracketIndex !== -1) lastTokenIndex = i;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      if (!inDouble && openBracketIndex !== -1) lastTokenIndex = i;
       continue;
     }
     if (inSingle || inDouble) continue;
@@ -262,6 +265,7 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
         const match = /^rules\s*:\s*\[/.exec(source.slice(i));
         if (match) {
           openBracketIndex = i + match[0].length - 1;
+          lastTokenIndex = openBracketIndex;
           i = openBracketIndex;
           depth = 1;
         }
@@ -272,12 +276,16 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
     else if (ch === ']') {
       depth -= 1;
       if (depth === 0) {
-        const before = source.slice(0, i).replace(/[ \t]*$/, '');
+        const withComma = lastTokenIndex > openBracketIndex && source[lastTokenIndex] !== ','
+          ? `${source.slice(0, lastTokenIndex + 1)},${source.slice(lastTokenIndex + 1, i)}`
+          : source.slice(0, i);
+        const before = withComma.replace(/[ \t]*$/, '');
         const after = source.slice(i);
         const prefix = before.endsWith('\n') ? before : `${before}\n`;
         return `${prefix}${ruleSnippet}\n  ${after}`;
       }
     }
+    if (!/\s/.test(ch)) lastTokenIndex = i;
   }
   throw new ServiceError('invalid_input');
 }
@@ -505,6 +513,7 @@ export class WorkGmail {
       if (existing.context !== context) throw new ServiceError('invalid_input');
       return existing.result as Promise<GmailArchiveResult>;
     }
+    if (this.operations.size >= 4096) throw new ServiceError('limit');
     const promise = this.performArchive(value, signal);
     this.operations.set(value.operationId, { context, result: promise });
     try {
@@ -554,6 +563,7 @@ export class WorkGmail {
       if (existing.context !== context) throw new ServiceError('invalid_input');
       return existing.result as Promise<GmailctlFilterResult>;
     }
+    if (this.operations.size >= 4096) throw new ServiceError('limit');
     const promise = this.performAddGmailctlFilter(value, signal);
     this.operations.set(value.operationId, { context, result: promise });
     try {
@@ -594,12 +604,15 @@ export class WorkGmail {
     if (value.apply) {
       const binary = await this.resolveGmailctl();
       const configDir = dirname(configPath);
-      const defaultPath = expandHomePath('~/repos/documents/gmailctl/config.jsonnet');
-      const useDefaultDir = configPath === defaultPath && !existsSync(join(configDir, 'credentials.json'));
-      const args = useDefaultDir
-        ? ['apply', '--yes']
-        : ['apply', '--config', configDir, '--yes'];
-      const applyRun = await this.runner(binary, args, signal);
+      const defaultDir = expandHomePath('~/.gmailctl');
+      const defaultConfig = join(defaultDir, 'config.jsonnet');
+      let applyDir = configDir;
+      if (!existsSync(join(configDir, 'credentials.json')) && existsSync(defaultConfig)) {
+        try {
+          if (realpathSync(defaultConfig) === realpathSync(configPath)) applyDir = defaultDir;
+        } catch { /* Fall back to configDir if symlink resolution fails. */ }
+      }
+      const applyRun = await this.runner(binary, ['apply', '--config', applyDir, '--yes'], signal);
       if (applyRun.code !== 0) throw new ServiceError('unavailable', true);
       applied = true;
     }

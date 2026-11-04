@@ -353,7 +353,7 @@ export function TaskApp({ controller, queue, remote }: {
   const runError = run.error || (run.running ? '' : state.work.lastError);
   const error = saved.persistence.error || saved.assessmentError || saved.codeError || saved.operationError || (settings ? runError : '');
   const runDetails = [...new Set([...run.warnings, ...runError.split('\n').filter(Boolean)])];
-  const profileBusy = run.running || run.unsubscribing.length > 0;
+  const profileBusy = run.running || run.unsubscribing.length > 0 || Boolean(run.activeActions);
   const ranked = rankedTasks(state);
   const done = state.tasks.filter(task => task.status === 'done');
   const waiting = state.tasks.filter(task => task.status === 'open' && task.work?.availability === 'waiting');
@@ -552,7 +552,7 @@ export function TaskApp({ controller, queue, remote }: {
           onDismissed={() => {
             const idx = visible.findIndex(item => item.id === selected.id);
             const next = visible[idx + 1] ?? visible[idx - 1];
-            setSelection(next?.id ?? null);
+            setSelection(current => current === selected.id ? (next?.id ?? null) : current);
           }}
           batchProgress={batchProgress}
           styleAssessment={styleAssessments.values.get(selected.id)} stylesLoading={styleAssessments.loading} stylesError={styleAssessments.error} />

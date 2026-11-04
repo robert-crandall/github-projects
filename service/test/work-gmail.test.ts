@@ -79,6 +79,23 @@ describe('WorkGmail and gmailctl integration', () => {
         deleteIt: false,
       }));
       expect(second).toBe(updated);
+
+      // Missing trailing comma before closing bracket (with trailing comment) gets a separating comma
+      const noTrailingComma = [
+        '{',
+        '  rules: [',
+        '    { filter: { from: "a@example.com" }, actions: { archive: true } } // trailing comment',
+        '  ]',
+        '}',
+      ].join('\n');
+      const withComma = insertGmailctlRuleIntoJsonnet(noTrailingComma, buildGmailctlRuleSnippet({
+        from: 'b@example.com',
+        archive: true,
+        markRead: false,
+        deleteIt: false,
+      }));
+      expect(withComma).toContain('{ filter: { from: "a@example.com" }, actions: { archive: true } }, // trailing comment');
+      expect(withComma).toContain("from: 'b@example.com'");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

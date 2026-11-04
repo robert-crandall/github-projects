@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,6 +37,13 @@ export {
 
 const PROJECT_LINE = /^\s*(\*?)\s*\[([a-zA-Z0-9_-]+)\s*\]\s+(.+?)\s+\((\d+)\s+sessions?\)\s+([0-9A-Fa-f-]{36})\s*$/;
 
+export function deterministicRequestId(operationId: string): string {
+  if (z.uuid().safeParse(operationId).success) return operationId.toLowerCase();
+  const hex = createHash('sha256').update(`copilot-projects:${operationId}`).digest('hex');
+  const variant = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 export function parseCopilotProjectsList(stdout: string): CopilotProjectItem[] {
   const projects: CopilotProjectItem[] = [];
   for (const line of stdout.split(/\r?\n/)) {
@@ -58,7 +65,6 @@ export class CopilotProjectsService {
   private readonly resolve: () => Promise<string>;
   private readonly now: () => Date;
   private readonly dispatches = new Map<string, { context: string; result: Promise<CopilotProjectsDispatchResult> }>();
-  private readonly requestIds = new Map<string, string>();
 
   constructor(options: {
     runner?: Runner;
@@ -117,18 +123,10 @@ export class CopilotProjectsService {
     const listed = await this.list(signal);
     const target = selectCopilotProject(listed.projects, value);
     if (!target) throw new ServiceError('unavailable');
-    let requestId = this.requestIds.get(value.operationId);
-    if (!requestId) {
-      if (this.requestIds.size >= 4096) {
-        const oldest = this.requestIds.keys().next().value;
-        if (oldest) this.requestIds.delete(oldest);
-      }
-      requestId = randomUUID();
-      this.requestIds.set(value.operationId, requestId);
-    }
+    const requestId = deterministicRequestId(value.operationId);
     const promptPath = join(tmpdir(), `copilot-projects-prompt-${requestId}.md`);
-    await writeFile(promptPath, value.prompt, { encoding: 'utf8', mode: 0o600 });
     try {
+      await writeFile(promptPath, value.prompt, { encoding: 'utf8', mode: 0o600 });
       const args = [
         'new-copilot-session',
         '--project', target.id,

@@ -680,7 +680,11 @@ export class WorkGitHub {
                   action: fallbackAction,
                   url,
                   evidence: [{
-                    id: identity(sourceRef, 'notification', target.notification?.threadId ?? source.id),
+                    id: identity(
+                      sourceRef,
+                      'notification',
+                      `${target.notification?.threadId ?? source.id}:${target.notification?.updatedAt ?? source.updated_at ?? source.created_at}`,
+                    ),
                     source: 'github',
                     streamId: stream.id,
                     at: target.notification?.updatedAt ?? source.updated_at ?? source.created_at,
