@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { WorkGmail, buildGmailctlRuleSnippet, insertGmailctlRuleIntoJsonnet, parseEmailAddress } from '../src/work-gmail.ts';
+import { WorkGmail, buildGmailctlRuleSnippet, extractGmailBody, insertGmailctlRuleIntoJsonnet, parseEmailAddress } from '../src/work-gmail.ts';
 import { gmailWorkstream } from '../src/work-schema.ts';
 
 describe('WorkGmail and gmailctl integration', () => {
@@ -15,6 +15,11 @@ describe('WorkGmail and gmailctl integration', () => {
       name: 'alerts@monarchmoney.com',
       email: 'alerts@monarchmoney.com',
     });
+
+    const plainEncoded = Buffer.from('Charge from <alerts@example.com> for $42.00', 'utf8').toString('base64url');
+    expect(extractGmailBody({ mimeType: 'text/plain', body: { data: plainEncoded } })).toBe('Charge from <alerts@example.com> for $42.00');
+    const htmlEncoded = Buffer.from('<p>Charge from &lt;alerts@example.com&gt;</p>', 'utf8').toString('base64url');
+    expect(extractGmailBody({ mimeType: 'text/html', body: { data: htmlEncoded } })).toBe('Charge from <alerts@example.com>');
   });
 
   test('inserts a gmailctl filter rule before the closing rules array in config.jsonnet', async () => {
@@ -71,14 +76,29 @@ describe('WorkGmail and gmailctl integration', () => {
       expect(updated).toContain('markRead: true');
 
       // Duplicate rule is not inserted twice
-      const second = insertGmailctlRuleIntoJsonnet(updated, buildGmailctlRuleSnippet({
+      const snippet = buildGmailctlRuleSnippet({
         from: 'newsletter@example.com',
         subject: 'Weekly Digest',
         archive: true,
         markRead: true,
         deleteIt: false,
-      }));
+      });
+      const second = insertGmailctlRuleIntoJsonnet(updated, snippet);
       expect(second).toBe(updated);
+
+      // Commented-out rule does NOT block re-inserting an active rule
+      const commentedOut = [
+        '{',
+        '  rules: [',
+        '    /*',
+        snippet,
+        '    */',
+        '  ],',
+        '}',
+      ].join('\n');
+      const reinserted = insertGmailctlRuleIntoJsonnet(commentedOut, snippet);
+      expect(reinserted).not.toBe(commentedOut);
+      expect(reinserted.split("from: 'newsletter@example.com'")).toHaveLength(3);
 
       // Missing trailing comma before closing bracket (with trailing comment) gets a separating comma
       const noTrailingComma = [

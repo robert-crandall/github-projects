@@ -63,6 +63,7 @@ interface GmailMessageResponse {
   snippet?: string;
   internalDate?: string;
   payload?: {
+    mimeType?: string;
     headers?: GmailMessageHeader[];
     body?: { data?: string };
     parts?: GmailMessagePart[];
@@ -158,7 +159,10 @@ export function extractGmailBody(payload?: GmailMessageResponse['payload'], fall
   if (plain?.trim()) return plain.trim().slice(0, 4_000);
   if (payload.body?.data) {
     const direct = decodeBase64Url(payload.body.data).trim();
-    if (direct) return stripHtml(direct).slice(0, 4_000);
+    if (direct) {
+      const isHtml = payload.mimeType?.toLowerCase() === 'text/html';
+      return (isHtml ? stripHtml(direct) : direct).slice(0, 4_000);
+    }
   }
   const html = findPart(payload.parts, 'text/html');
   if (html?.trim()) return stripHtml(html).slice(0, 4_000);
@@ -202,10 +206,12 @@ export function buildGmailctlRuleSnippet(input: {
 }
 
 export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: string): string {
-  if (source.includes(ruleSnippet.trim())) return source;
+  const expectedRuleBody = ruleSnippet.trim().replace(/,$/, '').trim();
   let openBracketIndex = -1;
   let lastTokenIndex = -1;
   let depth = 0;
+  let braceDepth = 0;
+  let currentRule = '';
   let inSingle = false;
   let inDouble = false;
   let inLineComment = false;
@@ -226,10 +232,12 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
       continue;
     }
     if (escaped) {
+      if (braceDepth > 0) currentRule += ch;
       escaped = false;
       continue;
     }
     if (ch === '\\' && (inSingle || inDouble)) {
+      if (braceDepth > 0) currentRule += ch;
       escaped = true;
       continue;
     }
@@ -250,16 +258,21 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
       }
     }
     if (ch === "'" && !inDouble) {
+      if (braceDepth > 0) currentRule += ch;
       inSingle = !inSingle;
       if (!inSingle && openBracketIndex !== -1) lastTokenIndex = i;
       continue;
     }
     if (ch === '"' && !inSingle) {
+      if (braceDepth > 0) currentRule += ch;
       inDouble = !inDouble;
       if (!inDouble && openBracketIndex !== -1) lastTokenIndex = i;
       continue;
     }
-    if (inSingle || inDouble) continue;
+    if (inSingle || inDouble) {
+      if (braceDepth > 0) currentRule += ch;
+      continue;
+    }
     if (openBracketIndex === -1) {
       if (ch === 'r' && (i === 0 || !/[A-Za-z0-9_$]/.test(source[i - 1]!))) {
         const match = /^rules\s*:\s*\[/.exec(source.slice(i));
@@ -271,6 +284,19 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
         }
       }
       continue;
+    }
+    if (depth === 1 && braceDepth === 0 && ch === '{') {
+      braceDepth = 1;
+      currentRule = '{';
+    } else if (braceDepth > 0) {
+      currentRule += ch;
+      if (ch === '{') braceDepth += 1;
+      else if (ch === '}') {
+        braceDepth -= 1;
+        if (braceDepth === 0 && currentRule.trim() === expectedRuleBody) {
+          return source;
+        }
+      }
     }
     if (ch === '[') depth += 1;
     else if (ch === ']') {

@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import {
-  defaultWorkState, isDirectStream, workRankOutputSchema, workSettingsSchema, workStateSchema,
+  defaultWorkState, hasMatchingAcknowledge, isDirectStream, workRankOutputSchema, workSettingsSchema, workStateSchema,
   type workConnectionsSchema, type WorkCollection, type WorkMetadata, type WorkRankInput, type WorkSettings,
 } from '../../service/src/work-schema.ts';
 import { ServiceCallError, ServiceClient } from '../platform/service.ts';
@@ -238,20 +238,25 @@ export class WorkQueue {
       const task = this.controller.state.tasks.find(item => item.id === id);
       if (!task) throw new Error('This task no longer exists.');
       const { notification, acknowledge: previousAck, email } = task.work ?? {};
+      const reusableAck = hasMatchingAcknowledge(notification, previousAck) ? previousAck : undefined;
       this.complete(id);
       await this.controller.flush();
       assertCurrent();
-      if (notification && previousAck?.status !== 'confirmed') {
+      if (notification && reusableAck?.status !== 'confirmed') {
         const source = canonicalSource(task.work!.url);
+        const previousOpId = previousAck?.operationId;
         const intent: NonNullable<WorkMetadata['acknowledge']> = {
-          operationId: previousAck?.operationId ?? crypto.randomUUID(),
-          notification: previousAck?.notification ?? notification, status: 'pending', error: '',
+          operationId: reusableAck?.operationId ?? crypto.randomUUID(),
+          notification: reusableAck?.notification ?? notification, status: 'pending', error: '',
         };
-        const updateAck = (next: NonNullable<WorkMetadata['acknowledge']>) => this.update(current => ({
-          ...current, tasks: current.tasks.map(item => item.work && canonicalSource(item.work.url) === source
-            && (!item.work.acknowledge || item.work.acknowledge.operationId === intent.operationId)
-            ? { ...item, work: { ...item.work, acknowledge: next } } : item),
-        }));
+        const updateAck = (next: NonNullable<WorkMetadata['acknowledge']>) => {
+          assertCurrent();
+          this.update(current => ({
+            ...current, tasks: current.tasks.map(item => item.work && canonicalSource(item.work.url) === source
+              && (!item.work.acknowledge || item.work.acknowledge.operationId === intent.operationId || item.work.acknowledge.operationId === previousOpId)
+              ? { ...item, work: { ...item.work, acknowledge: next } } : item),
+          }));
+        };
         try {
           updateAck(intent);
           await this.controller.flush();
@@ -260,10 +265,10 @@ export class WorkQueue {
             operationId: intent.operationId, threadId: intent.notification.threadId,
             reference: intent.notification.reference, notificationUpdatedAt: intent.notification.updatedAt, displayedEvidenceIds: [],
           });
-          assertCurrent();
           updateAck({ ...intent, status: 'confirmed', confirmedAt: result.confirmedAt });
           await this.controller.flush();
         } catch (error) {
+          assertCurrent();
           const detail = `Marked Done locally; GitHub notification acknowledge failed: ${message(error)}`.slice(0, 1000);
           updateAck({ ...intent, status: 'unconfirmed', error: detail });
           try { await this.controller.flush(); } catch (saveError) { this.controller.report(saveError); }
@@ -381,7 +386,9 @@ export class WorkQueue {
             messageId: task.work.email.messageId, archive: shouldArchive, markRead: shouldMarkRead,
           });
         } catch (error) {
-          this.publish({ warnings: [...this.status.warnings, `Filter created; Gmail archive failed: ${message(error)}`] });
+          const detail = `Filter created, but Gmail archive failed: ${message(error)}`.slice(0, 1000);
+          this.publish({ warnings: [...this.status.warnings, detail] });
+          throw new Error(detail);
         }
       }
       assertCurrent();

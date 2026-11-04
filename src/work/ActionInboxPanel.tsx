@@ -3,6 +3,7 @@ import { Archive, CheckCircle2, ExternalLink, Filter, FolderGit2, Send, UserPlus
 import type { CopilotProjectItem } from '../../service/src/copilot-projects.ts';
 import {
   copilotProjectsSettings,
+  hasMatchingAcknowledge,
   MAX_COPILOT_PROJECTS_PROMPT_BYTES,
   selectCopilotProject,
   type WorkSettings,
@@ -111,6 +112,9 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
   const isGmail = Boolean(task.work?.email || task.work?.evidence.some(item => item.source === 'gmail'));
   const hasGitHubRef = Boolean(task.work?.reference);
   const hasNotification = Boolean(task.work?.notification);
+  const matchingAck = hasMatchingAcknowledge(task.work?.notification, task.work?.acknowledge)
+    ? task.work?.acknowledge
+    : undefined;
   const promptBytes = new TextEncoder().encode(prompt).length;
   const promptTooLong = promptBytes > MAX_COPILOT_PROJECTS_PROMPT_BYTES;
 
@@ -148,10 +152,10 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
     </div>}
 
     <div className="button-row" style={{ flexWrap: 'wrap', gap: '8px', marginBottom: '10px' }}>
-      {(task.status === 'open' || (hasNotification && task.work?.acknowledge?.status !== 'confirmed')) && <button type="button" className="primary" disabled={busyAction !== null}
+      {(task.status === 'open' || (hasNotification && matchingAck?.status !== 'confirmed')) && <button type="button" className="primary" disabled={busyAction !== null}
         onClick={() => void runAction('Dismiss', () => queue.dismiss(task.id), task.status === 'open')}>
         <CheckCircle2 size={15} />{task.status === 'done'
-          ? (task.work?.acknowledge?.status === 'unconfirmed' ? 'Retry Acknowledge' : 'Acknowledge Notification')
+          ? (matchingAck?.status === 'unconfirmed' ? 'Retry Acknowledge' : 'Acknowledge Notification')
           : isGmail ? 'Done & Archive' : hasNotification ? 'Done & Acknowledge' : 'Done & Dismiss'}
       </button>}
 
@@ -237,6 +241,7 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
       </div>
       {projects.length > 0 && <label>Target project
         <select aria-label="Target Copilot project" value={projectId} onChange={event => setProjectId(event.target.value)}>
+          <option value="">{cpSettings.defaultProject.trim() ? `Default (${cpSettings.defaultProject.trim()})` : 'Automatic project selection'}</option>
           {projects.map(project => <option key={project.id} value={project.id}>{project.name} ({project.sessions} sessions)</option>)}
         </select>
       </label>}
@@ -272,7 +277,7 @@ export function ActionInboxPanel({ task, settings, queue, onDismissed, onOpenUrl
       </div>
     </div>
 
-    {task.work?.acknowledge?.status === 'unconfirmed' && task.work.acknowledge.error && <p className="task-error" role="alert">{task.work.acknowledge.error}</p>}
+    {matchingAck?.status === 'unconfirmed' && matchingAck.error && <p className="task-error" role="alert">{matchingAck.error}</p>}
     {statusMessage && <p className="task-detail-notice" role="status">{statusMessage}</p>}
     {errorMessage && <p className="task-error" role="alert">{errorMessage}</p>}
   </section>;

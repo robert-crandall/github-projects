@@ -374,6 +374,7 @@ export function selectCopilotProject(
     const byName = projects.find(project => project.name.toLowerCase() === wantedId.toLowerCase());
     if (byName) return { id: byName.id, name: byName.name };
     if (options.allowFallback !== false) return { id: wantedId, name: options.projectName?.trim() || wantedId };
+    return undefined;
   }
   const wantedName = options.projectName?.trim();
   if (wantedName) {
@@ -381,6 +382,7 @@ export function selectCopilotProject(
     if (byId) return { id: byId.id, name: byId.name };
     const exact = projects.find(project => project.name.toLowerCase() === wantedName.toLowerCase());
     if (exact) return { id: exact.id, name: exact.name };
+    return undefined;
   }
   if (options.action === 'review') {
     const reviewProject = projects.find(project =>
@@ -396,5 +398,18 @@ export function selectCopilotProject(
   const active = projects.find(project => project.active) ?? projects[0];
   return active ? { id: active.id, name: active.name } : undefined;
 }
+
+export function hasMatchingAcknowledge(
+  notification?: WorkMetadata['notification'],
+  acknowledge?: WorkMetadata['acknowledge'],
+): boolean {
+  return Boolean(
+    notification &&
+    acknowledge &&
+    acknowledge.notification.threadId === notification.threadId &&
+    acknowledge.notification.updatedAt === notification.updatedAt,
+  );
+}
+
 
 

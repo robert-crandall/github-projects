@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { emptyWorkspace } from '../domain/live.ts';
 import { reconcileWork, completeWorkTask } from './engine.ts';
-import { defaultWorkState } from '../../service/src/work-schema.ts';
+import { defaultWorkState, hasMatchingAcknowledge } from '../../service/src/work-schema.ts';
 import { buildCopilotDispatchPrompt, defaultTemplateKind, guessProjectId } from './ActionInboxPanel.tsx';
 
 describe('Action Inbox reconciliation and prompt builder', () => {
@@ -159,5 +159,39 @@ describe('Action Inbox reconciliation and prompt builder', () => {
       { id: 'proj-1', name: 'github', state: 'running', sessions: 2, active: false },
       { id: 'proj-2', name: 'PR Reviews', state: 'idle', sessions: 1, active: true },
     ], settings)).toBe('proj-1');
+
+    // Missing explicit defaultProject returns empty instead of falling back to an unrelated project
+    expect(guessProjectId(fixTask, [
+      { id: 'proj-1', name: 'github', state: 'running', sessions: 2, active: false },
+      { id: 'proj-2', name: 'PR Reviews', state: 'idle', sessions: 1, active: true },
+    ], {
+      ...settings,
+      copilotProjects: {
+        ...settings.copilotProjects!,
+        defaultProject: 'nonexistent-project',
+        autoCompleteOnDispatch: true,
+      },
+    })).toBe('');
+
+    // hasMatchingAcknowledge requires matching threadId and updatedAt
+    const notif = {
+      threadId: '99123',
+      reference: { repo: 'octo/repo', number: 99, kind: 'pr' as const },
+      updatedAt: '2026-04-06T12:00:00.000Z',
+    };
+    expect(hasMatchingAcknowledge(notif, {
+      operationId: 'op-1',
+      notification: notif,
+      status: 'confirmed',
+      error: '',
+      confirmedAt: '2026-04-06T12:01:00.000Z',
+    })).toBe(true);
+    expect(hasMatchingAcknowledge({ ...notif, updatedAt: '2026-04-06T12:05:00.000Z' }, {
+      operationId: 'op-1',
+      notification: notif,
+      status: 'confirmed',
+      error: '',
+      confirmedAt: '2026-04-06T12:01:00.000Z',
+    })).toBe(false);
   });
 });
