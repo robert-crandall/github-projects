@@ -6,7 +6,7 @@ import {
 import { ServiceCallError, ServiceClient } from '../platform/service.ts';
 import type { DesktopWorkspace } from '../runtime/desktop-workspace.ts';
 import type { AppState } from '../types.ts';
-import { canonicalSource, completeWorkTask, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
+import { canonicalSource, completeWorkTask, pruneUnconfiguredStreams, rankInput, reconcileWork, restoreWorkTask } from './engine.ts';
 import { orderingRankTask, semanticRankTask } from '../../service/src/work-rank-input.ts';
 import { createWorkProfile, renameWorkProfile, switchWorkProfile } from './profiles.ts';
 import { importWorkProfile, type ProfileFile } from './profile-files.ts';
@@ -91,15 +91,60 @@ export class WorkQueue {
   saveSettings(settings: WorkSettings, profileName = this.controller.state.activeWorkProfile.name): void {
     const saved = workSettingsSchema.parse(settings);
     this.update(current => {
+      const configuredIds = new Set(saved.streams.map(stream => stream.id));
+      const removedIds = new Set(
+        current.work.settings.streams.filter(stream => !configuredIds.has(stream.id)).map(stream => stream.id),
+      );
       const retained = current.work.styleFilter?.filter(id => saved.workStyles?.some(style => style.id === id));
-      return {
+      return pruneUnconfiguredStreams({
         ...renameWorkProfile(current, profileName), work: {
           ...current.work, settings: saved,
           styleFilter: retained?.length ? retained : null,
           ...(sourceSettings(current.work.settings) !== sourceSettings(saved) ? { collectionCursor: null, directCollectionCursor: null } : {}),
         },
-      };
+      }, removedIds);
     });
+  }
+  async pruneUnconfiguredSources(): Promise<void> {
+    const pruneAll = (current: AppState): AppState => {
+      const active = pruneUnconfiguredStreams(current);
+      let inactiveChanged = false;
+      const inactiveWorkProfiles = active.inactiveWorkProfiles.map(profile => {
+        const base: AppState = {
+          ...active,
+          tasks: profile.tasks,
+          selectedKey: null,
+          order: [],
+          newKeys: [],
+          undo: profile.undo,
+          work: profile.work ?? defaultWorkState(),
+        };
+        const pruned = pruneUnconfiguredStreams(base);
+        if (pruned === base) return profile;
+        inactiveChanged = true;
+        return {
+          ...profile,
+          tasks: pruned.tasks,
+          undo: pruned.undo,
+          work: pruned.work,
+        };
+      });
+      if (active === current && !inactiveChanged) return current;
+      return { ...active, inactiveWorkProfiles };
+    };
+    const generation = this.controller.assessmentGeneration;
+    const current = { ...this.controller.state, work: this.controller.state.work ?? defaultWorkState() };
+    if (pruneAll(current) === current) return;
+    await this.controller.flush();
+    this.assertWorkspace(generation);
+    const saved = await this.controller.platform.workspaceRead();
+    await this.controller.platform.createBackup(saved.revision);
+    this.assertWorkspace(generation);
+    const latest = { ...this.controller.state, work: this.controller.state.work ?? defaultWorkState() };
+    if (pruneAll(latest) !== latest) {
+      this.update(pruneAll);
+      await this.controller.flush();
+    }
   }
   saveSourceFilter(filter: NonNullable<AppState['work']['sourceFilter']>): void {
     const sourceFilter = workStateSchema.shape.sourceFilter.parse(filter);
@@ -458,12 +503,34 @@ export class WorkQueue {
   private assertWorkspace(generation: number): void {
     if (generation !== this.controller.assessmentGeneration) throw new Error('The workspace was replaced during this run. Its previous results cannot change the restored workspace.');
   }
-  private async persist(batch: WorkCollection, profileId: string, generation: number, reopenDone = true): Promise<void> {
+  private async persist(
+    batch: WorkCollection,
+    profileId: string,
+    generation: number,
+    reopenDone = true,
+    scannedStreamIds?: ReadonlySet<string>,
+  ): Promise<void> {
     this.assertWorkspace(generation);
     this.update(current => {
       this.assertProfile(current, profileId);
+      const currentIds = new Set(current.work.settings.streams.map(stream => stream.id));
+      const removedDuringRun = scannedStreamIds && scannedStreamIds.size > 0
+        ? new Set([...scannedStreamIds].filter(id => !currentIds.has(id)))
+        : new Set<string>();
+      const effectiveBatch = removedDuringRun.size > 0
+        ? {
+          ...batch,
+          candidates: batch.candidates
+            .map(candidate => ({
+              ...candidate,
+              evidence: candidate.evidence.filter(evidence => !removedDuringRun.has(evidence.streamId)),
+            }))
+            .filter(candidate => candidate.evidence.length > 0),
+        }
+        : batch;
       // This run's reads are serialized and generation-fenced; a clock correction cannot make a fresh reply older.
-      return reconcileWork(current, batch, new Date(), true, { reopenDone });
+      const reconciled = reconcileWork(current, effectiveBatch, new Date(), true, { reopenDone });
+      return removedDuringRun.size > 0 ? pruneUnconfiguredStreams(reconciled, removedDuringRun) : reconciled;
     });
     await this.controller.flush();
   }
@@ -548,6 +615,9 @@ export class WorkQueue {
       this.publish({ phase: 'assessing' });
       this.assertWorkspace(assessmentGeneration);
       this.assertProfile(this.controller.state, input.profileId);
+      const existingIds = new Set(this.controller.state.tasks.map(task => task.id));
+      pending = pending.filter(task => existingIds.has(task.id));
+      if (!pending.length) break;
       if (selected) {
         if (JSON.stringify(assessmentIdentity(this.controller.state.work.settings))
           !== JSON.stringify(assessmentIdentity(input))) {
@@ -750,6 +820,7 @@ export class WorkQueue {
       const { collectionCursor, directCollectionCursor } = this.controller.state.work;
       const sinceCursor = kind === 'collect' ? (directCollectionCursor ?? collectionCursor) : collectionCursor;
       scannedSettings = sourceSettings(settings);
+      const scannedStreamIds = new Set(settings.streams.map(stream => stream.id));
       const streams = settings.streams.filter(stream => stream.enabled && (kind !== 'collect' || isDirectStream(stream)));
       if (kind !== 'collect') {
         this.publish({ phase: 'intake' });
@@ -791,7 +862,7 @@ export class WorkQueue {
               }
               if (boundary < Date.parse(coveredThrough)) coveredThrough = result.coveredThrough;
             }
-            await this.persist(result, profileId, generation, reopenDone);
+            await this.persist(result, profileId, generation, reopenDone, scannedStreamIds);
             for (const observation of result.observations) observed.add(canonicalSource(observation.url));
             const coverage = (result.coverageInfo ?? []).map(info => `${stream.name}: ${info}`);
             warnings.push(...coverage);

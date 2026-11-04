@@ -107,6 +107,7 @@ export class DesktopWorkspace {
     validateWorkProfiles(next.state);
     this.publish({ workspace: next, operationError: '', feedback: '' });
     this.queue.enqueue(next);
+    if (!this.status.assessmentSaving) this.quarantineOrphanedAssessments(next.state);
   }
   dispatch = (command: Command, feedback = ''): boolean => {
     try {
@@ -166,7 +167,27 @@ export class DesktopWorkspace {
       pending.set(value.resultId, value);
     }
     this.publish({ assessmentPending: [...pending.values()], assessmentRevision: this.status.assessmentRevision + 1 });
+    this.quarantineOrphanedAssessments();
     await this.retryAssessments();
+  }
+  private hasTaskInState(state: AppState, profileId: string, taskId: string): boolean {
+    const tasks = state.activeWorkProfile.id === profileId
+      ? state.tasks
+      : state.inactiveWorkProfiles.find(profile => profile.id === profileId)?.tasks;
+    return tasks?.some(task => task.id === taskId || (task.assessmentTaskIds?.includes(taskId) ?? false)) ?? false;
+  }
+  private quarantineOrphanedAssessments(state = this.status.workspace?.state): void {
+    if (!state || !this.status.assessmentPending.length) return;
+    const orphaned = this.status.assessmentPending.filter(value => !this.hasTaskInState(state, value.profileId, value.id));
+    if (!orphaned.length) return;
+    this.quarantine(this.workspaceGeneration, orphaned);
+    const orphanedIds = new Set(orphaned.map(value => value.resultId));
+    const remaining = this.status.assessmentPending.filter(value => !orphanedIds.has(value.resultId));
+    this.publish({
+      assessmentPending: remaining,
+      ...(remaining.length === 0 ? { assessmentError: '' } : {}),
+      assessmentRevision: this.status.assessmentRevision + 1,
+    });
   }
   private quarantine(generation: number, values: SavedAssessment[]): void {
     const sourceRevision = this.workspaceOrigins.get(generation);
@@ -182,12 +203,15 @@ export class DesktopWorkspace {
   }
   async retryAssessments(): Promise<void> {
     if (this.status.assessmentSaving) throw new Error('An assessment save is already in progress.');
+    this.quarantineOrphanedAssessments();
     if (!this.status.assessmentPending.length) return;
     this.publish({ assessmentSaving: true, assessmentError: '' });
     try {
       if (this.recovering) throw new Error('Wait for workspace recovery before retrying assessment saves.');
       await this.flush();
       while (this.status.assessmentPending.length) {
+        this.quarantineOrphanedAssessments();
+        if (!this.status.assessmentPending.length) break;
         const profileId = this.status.assessmentPending[0]!.profileId;
         const batch = this.status.assessmentPending.filter(value => value.profileId === profileId).slice(0, 20);
         const result = await this.platform.assessmentAppend(profileId, batch);
@@ -202,8 +226,11 @@ export class DesktopWorkspace {
         });
       }
     } catch (error) {
-      this.publish({ assessmentError: `Assessment history is not saved. ${message(error)} Retry or export pending results; task edits can still save.` });
-      throw error;
+      this.quarantineOrphanedAssessments();
+      if (this.status.assessmentPending.length) {
+        this.publish({ assessmentError: `Assessment history is not saved. ${message(error)} Retry or export pending results; task edits can still save.` });
+        throw error;
+      }
     } finally { this.publish({ assessmentSaving: false }); }
   }
   saveScroll = (view: string, offset: number): void => {

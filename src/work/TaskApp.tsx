@@ -321,7 +321,7 @@ export function TaskApp({ controller, queue, remote }: {
   }, [selectionContext, selectableKey]);
   useEffect(() => { invoke(async () => {
     await controller.load();
-    if (controller.getSnapshot().workspace) { await queue.code.initialize(); await queue.tick(); }
+    if (controller.getSnapshot().workspace) { await queue.pruneUnconfiguredSources(); await queue.code.initialize(); await queue.tick(); }
   }); }, [controller, queue]);
   useEffect(() => {
     if (window.location.hash === '#reference') window.history.replaceState(null, '', window.location.pathname + window.location.search);

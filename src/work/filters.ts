@@ -26,6 +26,7 @@ export function taskSourceIds(task: Task): string[] {
 
 export function taskSources(settings: WorkSettings, tasks: Task[]): TaskSource[] {
   const sources = new Map<string, TaskSource>();
+  const configured = new Map(settings.streams.map(stream => [stream.id, stream]));
   for (const stream of settings.streams) {
     const provider = stream.kind === 'github-notifications' ? 'github' : stream.kind;
     const id = streamKey(provider, stream.id);
@@ -33,9 +34,11 @@ export function taskSources(settings: WorkSettings, tasks: Task[]): TaskSource[]
   }
   for (const task of tasks) {
     for (const evidence of task.work?.evidence ?? []) {
+      const stream = configured.get(evidence.streamId);
+      if (!stream) continue;
       const id = evidenceKey(evidence);
       if (sources.has(id) || evidence.source === 'manual' || evidence.source === 'copilot' || id === 'intake') continue;
-      sources.set(id, { id, provider: evidence.source, name: evidence.streamId, detail: 'Source no longer configured' });
+      sources.set(id, { id, provider: evidence.source, name: stream.name, ...(!stream.enabled ? { detail: 'Collection disabled' } : {}) });
     }
   }
   sources.set('manual', { id: 'manual', name: 'Manual tasks' });
