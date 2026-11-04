@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { defaultWorkState, type WorkEvidence } from '../../service/src/work-schema.ts';
 import { emptyWorkspace } from '../domain/live.ts';
 import { stateSchema, type Task } from '../types.ts';
-import { rankInput, rankedTasks } from './engine.ts';
+import { pruneUnconfiguredStreams, rankInput, rankedTasks } from './engine.ts';
 import { matchesSources, sourceCounts, taskSourceIds, taskSources } from './filters.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
 
@@ -32,21 +32,49 @@ describe('task source filters', () => {
     expect(matchesSources(merged, ['manual'])).toBe(false);
   });
 
-  test('configured, disabled, removed, intake and unattributed sources remain reachable', () => {
+  test('configured, disabled, intake and unattributed sources remain reachable while removed sources are omitted', () => {
     const settings = defaultWorkState().settings;
     settings.streams[0]!.enabled = false;
     const tasks = [task('1', [['github', 'github-reviews']]), task('2', [['slack', 'removed']]),
       task('3', [['mcp', 'push:mcp']]), task('4', [['copilot', 'push:copilot']]), task('5'), task('6', [])];
     const sources = taskSources(settings, tasks);
     expect(sources.find(item => item.name === 'PRs awaiting my review')?.detail).toBe('Collection disabled');
-    expect(sources.find(item => item.name === 'removed')).toMatchObject({ provider: 'slack', detail: 'Source no longer configured' });
+    expect(sources.find(item => item.name === 'removed')).toBeUndefined();
     expect(taskSourceIds(tasks[2]!)).toEqual(['intake']);
     expect(taskSourceIds(tasks[3]!)).toEqual(['intake']);
     expect(taskSourceIds(tasks[4]!)).toEqual(['manual']);
     expect(taskSourceIds(tasks[5]!)).toEqual(['unattributed']);
     const ids = sources.map(item => item.id);
-    expect(tasks.every(item => matchesSources(item, ids))).toBe(true);
+    expect(tasks.filter(item => item.id !== '2').every(item => matchesSources(item, ids))).toBe(true);
     expect(sourceCounts(tasks).get('intake')).toBe(2);
+  });
+
+  test('pruneUnconfiguredStreams removes tasks and filter selections belonging only to removed sources', () => {
+    const state = emptyWorkspace(at, 'UTC');
+    state.tasks = [
+      task('only-removed', [['github', 'removed-stream']]),
+      task('shared-stream', [['github', 'removed-stream'], ['github', 'github-reviews']]),
+      task('manual-task'),
+      task('intake-task', [['mcp', 'push:mcp']]),
+    ];
+    state.selectedKey = 'a:only-removed';
+    state.order = ['a:only-removed', 'a:shared-stream', 'a:manual-task'];
+    state.newKeys = ['a:only-removed'];
+    state.work.ranking = {
+      orderedIds: ['only-removed', 'shared-stream'],
+      reasons: [{ id: 'only-removed', reason: 'Removed' }, { id: 'shared-stream', reason: 'Retained' }],
+      rankedAt: at,
+    };
+    state.work.sourceFilter = {
+      selectedSources: [JSON.stringify(['github', 'removed-stream'])],
+      collapsedProviders: [],
+    };
+    const pruned = pruneUnconfiguredStreams(state);
+    expect(pruned.tasks.map(item => item.id)).toEqual(['shared-stream', 'manual-task', 'intake-task']);
+    expect(pruned.tasks[0]!.work?.evidence.map(item => item.streamId)).toEqual(['github-reviews']);
+    expect(pruned.work.ranking?.orderedIds).toEqual(['shared-stream']);
+    expect(pruned.work.sourceFilter?.selectedSources).toBeNull();
+    expect(pruned.selectedKey).toBe('a:shared-stream');
   });
 
   test('stable source identities survive renames and distinguish providers and built-ins', () => {

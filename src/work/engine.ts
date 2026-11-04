@@ -313,6 +313,87 @@ export function restoreWorkTask(state: AppState, id: string): AppState {
   return { ...state, tasks: state.tasks.map(task => task.id === id ? { ...task, status: 'open' } : task) };
 }
 
+function isBuiltInEvidence(evidence: WorkEvidence): boolean {
+  return evidence.source === 'manual'
+    || evidence.source === 'copilot'
+    || (evidence.source === 'mcp' && evidence.streamId === 'push:mcp');
+}
+
+export function pruneUnconfiguredStreams(
+  state: AppState,
+  explicitlyRemovedIds?: ReadonlySet<string>,
+): AppState {
+  const work = state.work ?? defaultWorkState();
+  const configuredIds = new Set(work.settings.streams.map(stream => stream.id));
+  if (explicitlyRemovedIds?.size === 0) return state;
+  const keepStreamId = (streamId: string) =>
+    explicitlyRemovedIds ? !explicitlyRemovedIds.has(streamId) : configuredIds.has(streamId);
+  const removedTaskIds = new Set<string>();
+  let changed = false;
+  const tasks: Task[] = [];
+  for (const task of state.tasks) {
+    if (!task.work || task.work.evidence.length === 0) {
+      tasks.push(task);
+      continue;
+    }
+    const nextEvidence = task.work.evidence.filter(evidence =>
+      isBuiltInEvidence(evidence) || keepStreamId(evidence.streamId));
+    if (nextEvidence.length === 0) {
+      removedTaskIds.add(task.id);
+      changed = true;
+      continue;
+    }
+    if (nextEvidence.length !== task.work.evidence.length) {
+      changed = true;
+      tasks.push({ ...task, work: { ...task.work, evidence: nextEvidence } });
+    } else {
+      tasks.push(task);
+    }
+  }
+  const keepSourceSelection = (id: string) => {
+    if (id === 'manual' || id === 'intake' || id === 'unattributed') return true;
+    try {
+      const parsed = JSON.parse(id);
+      if (Array.isArray(parsed) && typeof parsed[1] === 'string') return keepStreamId(parsed[1]);
+    } catch { /* ignore malformed source filter id */ }
+    return true;
+  };
+  const selectedSources = work.sourceFilter?.selectedSources ?? null;
+  const filteredSources = selectedSources ? selectedSources.filter(keepSourceSelection) : null;
+  const sourceFilterChanged = selectedSources !== null && filteredSources!.length !== selectedSources.length;
+  const nextSelectedSources = sourceFilterChanged
+    ? (selectedSources!.length > 0 && filteredSources!.length === 0 ? null : filteredSources)
+    : selectedSources;
+  if (!changed && !sourceFilterChanged) return state;
+
+  const isRemovedKey = (key: string) => key.startsWith('a:') && removedTaskIds.has(key.slice(2));
+  const ranking = work.ranking ? {
+    ...work.ranking,
+    orderedIds: work.ranking.orderedIds.filter(id => !removedTaskIds.has(id)),
+    reasons: work.ranking.reasons.filter(reason => !removedTaskIds.has(reason.id)),
+  } : null;
+  let selectedKey = state.selectedKey && isRemovedKey(state.selectedKey) ? null : state.selectedKey;
+  if (selectedKey === null && state.selectedKey !== null) {
+    const active = rankedTasks({ ...state, tasks, work: { ...work, ranking } });
+    selectedKey = active[0] ? `a:${active[0].id}` : null;
+  }
+  return {
+    ...state,
+    tasks,
+    selectedKey,
+    order: state.order.filter(key => !isRemovedKey(key)),
+    newKeys: state.newKeys.filter(key => !isRemovedKey(key)),
+    undo: state.undo.filter(entry => !removedTaskIds.has(entry.before.id) && !removedTaskIds.has(entry.after.id)),
+    work: {
+      ...work,
+      ranking,
+      ...(sourceFilterChanged && work.sourceFilter
+        ? { sourceFilter: { ...work.sourceFilter, selectedSources: nextSelectedSources } }
+        : {}),
+    },
+  };
+}
+
 export function rankedTasks(state: AppState): Task[] {
   const positions = new Map((state.work?.ranking?.orderedIds ?? []).map((id, index) => [id, index]));
   return state.tasks.filter(task => task.status === 'open' && task.work?.availability !== 'waiting')
