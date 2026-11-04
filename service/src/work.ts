@@ -53,6 +53,17 @@ export class WorkService {
     if (isGitHubStream(input.stream)) return this.github.collect(input, signal);
     if (input.stream.kind === 'gmail') return this.gmail.collect(input, signal);
     const collectedAt = this.now().toISOString();
+    if (input.skipModelExtraction) {
+      return workCollectOutputSchema.parse({
+        candidates: [],
+        observations: [],
+        collectedAt,
+        warnings: [],
+        coverageInfo: [
+          `${input.stream.name}: skipped agent extraction during direct source check.`,
+        ],
+      });
+    }
     const server = await this.connections.selected(input.stream);
     checkAbort(signal);
     const result = await this.copilot.collectMcp(input.stream, input.model, server, input.since, signal);

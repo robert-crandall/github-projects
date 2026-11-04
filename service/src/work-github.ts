@@ -300,7 +300,12 @@ export class WorkGitHub {
     if (malformed) warnings.push(`${ref.repo}#${ref.number}: some source events could not be validated.`);
     return events.sort((a, b) => (a.created_at ?? a.submitted_at ?? '').localeCompare(b.created_at ?? b.submitted_at ?? ''));
   }
-  private async notifications(since: string | null, collectedAt: string, signal: AbortSignal): Promise<{
+  private async notifications(
+    since: string | null,
+    collectedAt: string,
+    signal: AbortSignal,
+    unreadOnly = false,
+  ): Promise<{
     urls: Map<string, Target>; warnings: string[]; coverageInfo: string[]; coveredThrough?: string;
   }> {
     const scanStart = Date.parse(collectedAt);
@@ -314,7 +319,7 @@ export class WorkGitHub {
       const before = new Date(upperSecond * 1000).toISOString();
       // Only accept a complete first page. Offset pagination can skip unchanged rows
       // when other notifications are deleted or updated between requests.
-      const response = await this.api(`/notifications?all=true&per_page=50&page=1&since=${encodeURIComponent(boundary)}&before=${encodeURIComponent(before)}`, signal);
+      const response = await this.api(`/notifications?all=${unreadOnly ? 'false' : 'true'}&per_page=50&page=1&since=${encodeURIComponent(boundary)}&before=${encodeURIComponent(before)}`, signal);
       const rows = parse(z.array(z.unknown()).max(50), response.body);
       const urls = new Map<string, Target>();
       const warnings: string[] = [];
@@ -516,7 +521,7 @@ export class WorkGitHub {
     const collectedAt = this.now().toISOString();
     const accountResponse = (await this.api('/user', signal)).body;
     const viewer = parse(z.object({ login: loginSchema }), accountResponse).login;
-    const cache = stream.kind === 'github' && !input.observeOnly ? this.cache : null;
+    const cache = stream.kind === 'github' && !input.observeOnly && !input.skipModelExtraction ? this.cache : null;
     const accountSchema = z.object({ id: z.number().int().positive().safe(), login: loginSchema });
     const account = cache ? parse(accountSchema, accountResponse) : undefined;
     const cacheKey = cacheHash([1, 'github.com', account, stream, input.model]);
@@ -535,7 +540,7 @@ export class WorkGitHub {
     const coverageInfo: string[] = [];
     const notificationStream = stream.kind === 'github-notifications';
     const discovery = notificationStream && !input.observeOnly
-      ? await this.notifications(input.since, collectedAt, signal) : undefined;
+      ? await this.notifications(input.since, collectedAt, signal, Boolean(input.skipModelExtraction)) : undefined;
     const urls = discovery?.urls ?? new Map<string, Target>();
     warnings.push(...discovery?.warnings ?? []);
     coverageInfo.push(...discovery?.coverageInfo ?? []);

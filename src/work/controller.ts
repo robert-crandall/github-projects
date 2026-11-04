@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import {
-  defaultWorkState, workRankOutputSchema, workSettingsSchema, workStateSchema,
+  defaultWorkState, isDirectStream, workRankOutputSchema, workSettingsSchema, workStateSchema,
   type workConnectionsSchema, type WorkCollection, type WorkMetadata, type WorkRankInput, type WorkSettings,
 } from '../../service/src/work-schema.ts';
 import { ServiceCallError, ServiceClient } from '../platform/service.ts';
@@ -257,15 +257,30 @@ export class WorkQueue {
     }
   }
 
+  private readonly pendingDispatchIds = new Map<string, string>();
+
   async dispatchToCopilotProjects(
     id: string,
     options: { title?: string; prompt: string; projectId?: string; projectName?: string; markDone?: boolean },
   ): Promise<{ projectId: string; projectName: string; requestId: string }> {
     const task = this.controller.state.tasks.find(item => item.id === id);
     if (!task) throw new Error('This task no longer exists.');
+    const resolvedTitle = options.title?.trim() || task.title;
+    const intentKey = JSON.stringify([
+      id,
+      resolvedTitle,
+      options.prompt,
+      options.projectId ?? '',
+      options.projectName ?? '',
+    ]);
+    let operationId = this.pendingDispatchIds.get(intentKey);
+    if (!operationId) {
+      operationId = crypto.randomUUID();
+      this.pendingDispatchIds.set(intentKey, operationId);
+    }
     const result = await this.service.call('copilotProjects.dispatch', {
-      operationId: crypto.randomUUID(),
-      title: options.title?.trim() || task.title,
+      operationId,
+      title: resolvedTitle,
       prompt: options.prompt,
       ...(task.work?.reference?.repo ? { repo: task.work.reference.repo } : {}),
       ...(task.work?.action ? { action: task.work.action } : {}),
@@ -276,6 +291,7 @@ export class WorkQueue {
     if (shouldMarkDone) {
       await this.dismiss(id);
     }
+    this.pendingDispatchIds.delete(intentKey);
     return result;
   }
 
@@ -324,36 +340,37 @@ export class WorkQueue {
       deleteIt?: boolean;
       note?: string;
       apply?: boolean;
-      configPath?: string;
     },
   ): Promise<{ configPath: string; ruleSnippet: string; applied: boolean }> {
     const task = this.controller.state.tasks.find(item => item.id === id);
-    const configuredPath = options.configPath?.trim()
-      || this.controller.state.work.settings.copilotProjects?.gmailctlConfigPath?.trim();
+    const shouldArchive = options.archive ?? true;
+    const shouldMarkRead = options.markRead ?? true;
     const result = await this.service.call('gmailctl.addFilter', {
       operationId: crypto.randomUUID(),
       ...(options.from ? { from: options.from } : {}),
       ...(options.list ? { list: options.list } : {}),
       ...(options.subject ? { subject: options.subject } : {}),
-      archive: options.archive ?? true,
-      markRead: options.markRead ?? true,
+      archive: shouldArchive,
+      markRead: shouldMarkRead,
       deleteIt: options.deleteIt ?? false,
       apply: options.apply ?? false,
-      ...(configuredPath ? { configPath: configuredPath } : {}),
     });
-    if (task?.work?.email) {
+    if (task?.work?.email && (shouldArchive || shouldMarkRead)) {
       try {
         await this.service.call('gmail.archive', {
           operationId: crypto.randomUUID(),
           threadId: task.work.email.threadId,
           messageId: task.work.email.messageId,
-          markRead: true,
+          archive: shouldArchive,
+          markRead: shouldMarkRead,
         });
-      } catch {
-        // Filter was created; archiving the existing thread is best-effort.
+      } catch (error) {
+        this.publish({
+          warnings: [...this.status.warnings, `Filter created; Gmail archive failed: ${message(error)}`],
+        });
       }
     }
-    if (task) {
+    if (task && (shouldArchive || shouldMarkRead)) {
       this.complete(id);
       await this.controller.flush();
     }
@@ -403,7 +420,7 @@ export class WorkQueue {
     this.targetCancelled = false;
     this.publish({ running: true, cancelRequested: false, phase: 'preparing', error: '', warnings: [], progress: {
       startedAt: Date.now(), finishedAt: null, kind,
-      sources: settings.streams.filter(stream => (kind === 'pipeline' || kind === 'collect') && stream.enabled)
+      sources: settings.streams.filter(stream => stream.enabled && (kind === 'pipeline' || (kind === 'collect' && isDirectStream(stream))))
         .map(({ id, name }) => ({ id, name, state: 'waiting', diagnostics: [] })),
     } });
     const running = this.execute(now, settings, kind, selectedIds);
@@ -707,13 +724,15 @@ export class WorkQueue {
       }
       const { collectionCursor } = this.controller.state.work;
       scannedSettings = sourceSettings(settings);
-      const streams = settings.streams.filter(stream => stream.enabled);
-      this.publish({ phase: 'intake' });
-      try { await this.intake(profileId, generation, reopenDone); }
-      catch (error) {
-        if (this.controller.getSnapshot().persistence.error) throw error;
-        errors.push(`Task intake: ${message(error)}`);
-        this.publish({ error: errors.join('\n') });
+      const streams = settings.streams.filter(stream => stream.enabled && (kind !== 'collect' || isDirectStream(stream)));
+      if (kind !== 'collect') {
+        this.publish({ phase: 'intake' });
+        try { await this.intake(profileId, generation, true); }
+        catch (error) {
+          if (this.controller.getSnapshot().persistence.error) throw error;
+          errors.push(`Task intake: ${message(error)}`);
+          this.publish({ error: errors.join('\n') });
+        }
       }
       const observed = new Set<string>();
       for (const stream of streams) {
@@ -794,7 +813,10 @@ export class WorkQueue {
         return {
           ...current, work: {
             ...current.work, lastError: errors.join('\n').slice(0, 4000),
-            ...(completionWritten ? { lastCompletedAt: new Date().toISOString(), collectionCursor: coveredThrough } : {}),
+            ...(completionWritten ? {
+              lastCompletedAt: new Date().toISOString(),
+              ...(kind === 'pipeline' ? { collectionCursor: coveredThrough } : {}),
+            } : {}),
           },
         };
       });

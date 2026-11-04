@@ -58,6 +58,7 @@ export class CopilotProjectsService {
   private readonly resolve: () => Promise<string>;
   private readonly now: () => Date;
   private readonly dispatches = new Map<string, { context: string; result: Promise<CopilotProjectsDispatchResult> }>();
+  private readonly requestIds = new Map<string, string>();
 
   constructor(options: {
     runner?: Runner;
@@ -116,7 +117,15 @@ export class CopilotProjectsService {
     const listed = await this.list(signal);
     const target = selectCopilotProject(listed.projects, value);
     if (!target) throw new ServiceError('unavailable');
-    const requestId = randomUUID();
+    let requestId = this.requestIds.get(value.operationId);
+    if (!requestId) {
+      if (this.requestIds.size >= 4096) {
+        const oldest = this.requestIds.keys().next().value;
+        if (oldest) this.requestIds.delete(oldest);
+      }
+      requestId = randomUUID();
+      this.requestIds.set(value.operationId, requestId);
+    }
     const promptPath = join(tmpdir(), `copilot-projects-prompt-${requestId}.md`);
     await writeFile(promptPath, value.prompt, { encoding: 'utf8', mode: 0o600 });
     try {

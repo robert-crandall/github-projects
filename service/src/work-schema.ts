@@ -73,10 +73,10 @@ export const workMetadataSchema = z.strictObject({
   email: workEmailMetadataSchema.optional(),
 });
 export const defaultActionPrompts = {
-  review: 'Review {{url}} ({{title}}). Check the diff, tests, and edge cases, then summarize your findings.',
-  implement: 'Work on {{url}} ({{title}}). Investigate the issue, implement the fix in a new worktree, run tests, and prepare a PR.',
-  fix: 'Investigate and fix {{url}} ({{title}}). Reproduce or trace the failure, implement a minimal fix, and verify with tests.',
-  'follow-up': 'Investigate {{url}} ({{title}}) and help me take the next action.',
+  review: 'Review {{url}}. Check the diff, tests, and edge cases, then summarize your findings.',
+  implement: 'Work on {{url}}. Investigate the issue, implement the fix in a new worktree, run tests, and prepare a PR.',
+  fix: 'Investigate and fix {{url}}. Reproduce or trace the failure, implement a minimal fix, and verify with tests.',
+  'follow-up': 'Investigate {{url}} and help me take the next action.',
 } as const;
 export const copilotProjectsPromptsSchema = z.strictObject({
   review: z.string().trim().min(1).max(4000).default(defaultActionPrompts.review),
@@ -87,12 +87,17 @@ export const copilotProjectsPromptsSchema = z.strictObject({
 export const copilotProjectsSettingsSchema = z.strictObject({
   defaultProject: z.string().trim().max(200).default(''),
   autoCompleteOnDispatch: z.boolean().default(true),
-  gmailctlConfigPath: z.string().trim().max(1000).default('~/repos/documents/gmailctl/config.jsonnet'),
   prompts: copilotProjectsPromptsSchema.default(() => ({ ...defaultActionPrompts })),
 });
 export type CopilotProjectsSettings = z.infer<typeof copilotProjectsSettingsSchema>;
 export function copilotProjectsSettings(settings?: { copilotProjects?: CopilotProjectsSettings }): CopilotProjectsSettings {
-  return copilotProjectsSettingsSchema.parse(settings?.copilotProjects ?? {});
+  const current = settings?.copilotProjects;
+  if (!current) return { defaultProject: '', autoCompleteOnDispatch: true, prompts: { ...defaultActionPrompts } };
+  return {
+    defaultProject: current.defaultProject ?? '',
+    autoCompleteOnDispatch: current.autoCompleteOnDispatch ?? true,
+    prompts: { ...defaultActionPrompts, ...current.prompts },
+  };
 }
 export const workstreamSchema = z.strictObject({
   id, name: z.string().trim().min(1).max(100), enabled: z.boolean(),
@@ -307,7 +312,10 @@ export const gmailArchiveInputSchema = z.strictObject({
   operationId: idSchema,
   messageId: z.string().trim().min(1).max(200),
   threadId: z.string().trim().min(1).max(200).optional(),
+  archive: z.boolean().optional(),
   markRead: z.boolean().default(true),
+}).refine(value => (value.archive ?? true) || value.markRead, {
+  message: 'At least one of archive or markRead must be enabled.',
 });
 
 export const gmailArchiveResultSchema = z.strictObject({
@@ -327,7 +335,6 @@ export const gmailctlFilterInputSchema = z.strictObject({
   markRead: z.boolean().default(true),
   deleteIt: z.boolean().default(false),
   apply: z.boolean().default(false),
-  configPath: z.string().trim().max(500).optional(),
 });
 
 export const gmailctlFilterResultSchema = z.strictObject({
@@ -381,12 +388,7 @@ export function selectCopilotProject(
   if (repoShort) {
     const byRepo = projects.find(project => project.name.toLowerCase() === repoShort);
     if (byRepo) return { id: byRepo.id, name: byRepo.name };
-    const prefixRepo = projects.find(project =>
-      project.name.toLowerCase().startsWith(repoShort) || repoShort.startsWith(project.name.toLowerCase()),
-    );
-    if (prefixRepo) return { id: prefixRepo.id, name: prefixRepo.name };
   }
-  if (options.allowFallback === false) return undefined;
   const active = projects.find(project => project.active) ?? projects[0];
   return active ? { id: active.id, name: active.name } : undefined;
 }

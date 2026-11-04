@@ -265,7 +265,9 @@ export function reconcileWork(
       ...(email ? { email } : {}),
       ...(notifications.has(url) ? { notification: notifications.get(url) } : {}),
     }, observation, contexts.get(url), authoritative));
-    const known = new Set([...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
+    const known = new Set(previous?.status === 'done'
+      ? base.handledEvidenceIds
+      : [...base.evidence.map(evidence => evidence.id), ...base.handledEvidenceIds]);
     const reopen = allowReopen && previous?.status === 'done' && previous.completedAt !== undefined
       && work.availability === 'actionable'
       && candidate.evidence.some(evidence => !known.has(evidence.id)

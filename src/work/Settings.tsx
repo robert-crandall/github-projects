@@ -196,20 +196,12 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
       </section>
       <section aria-labelledby="copilot-projects-heading"><h2 id="copilot-projects-heading">Copilot Projects dispatch</h2>
         <p>Send any task directly into a new <code>Copilot Projects</code> session with custom instructions.</p>
-        <div className="task-field-pair">
-          <label className="task-model">Default Copilot project (name or ID, optional)<input
-            value={copilotProjectsSettings(draft).defaultProject} maxLength={120}
-            placeholder="Auto-match from repository or PR Reviews"
-            onChange={event => change({
-              ...draft, copilotProjects: { ...copilotProjectsSettings(draft), defaultProject: event.target.value },
-            })} /></label>
-          <label className="task-model">gmailctl config path<input
-            value={copilotProjectsSettings(draft).gmailctlConfigPath} maxLength={300}
-            placeholder="~/repos/documents/gmailctl/config.jsonnet"
-            onChange={event => change({
-              ...draft, copilotProjects: { ...copilotProjectsSettings(draft), gmailctlConfigPath: event.target.value },
-            })} /></label>
-        </div>
+        <label className="task-model">Default Copilot project (name or ID, optional)<input
+          value={copilotProjectsSettings(draft).defaultProject} maxLength={120}
+          placeholder="Auto-match from repository or PR Reviews"
+          onChange={event => change({
+            ...draft, copilotProjects: { ...copilotProjectsSettings(draft), defaultProject: event.target.value },
+          })} /></label>
         <label className="checkbox-label"><input type="checkbox"
           checked={copilotProjectsSettings(draft).autoCompleteOnDispatch}
           onChange={event => change({

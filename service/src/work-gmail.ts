@@ -1,5 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -165,7 +166,13 @@ export function extractGmailBody(payload?: GmailMessageResponse['payload'], fall
 }
 
 function jsonnetLiteral(value: string): string {
-  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
+  return `'${value
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n')
+    .replace(/\t/g, '\\t')
+    .replace(/[\x00-\x1f]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)}'`;
 }
 
 export function buildGmailctlRuleSnippet(input: {
@@ -189,23 +196,21 @@ export function buildGmailctlRuleSnippet(input: {
     if (input.archive !== false) actions.push('archive: true');
     if (input.markRead !== false) actions.push('markRead: true');
   }
-  if (!actions.length) actions.push('archive: true');
+  if (!actions.length) throw new ServiceError('invalid_input');
 
   return `    {\n      filter: { ${filters.join(', ')} },\n      actions: { ${actions.join(', ')} },\n    },`;
 }
 
 export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: string): string {
   if (source.includes(ruleSnippet.trim())) return source;
-  const rulesStart = /\brules\s*:\s*\[/.exec(source);
-  if (!rulesStart) throw new ServiceError('invalid_input');
-  const openBracketIndex = rulesStart.index + rulesStart[0].length - 1;
+  let openBracketIndex = -1;
   let depth = 0;
   let inSingle = false;
   let inDouble = false;
   let inLineComment = false;
   let inBlockComment = false;
   let escaped = false;
-  for (let i = openBracketIndex; i < source.length; i++) {
+  for (let i = 0; i < source.length; i++) {
     const ch = source[i]!;
     const next = source[i + 1] ?? '';
     if (inLineComment) {
@@ -252,6 +257,17 @@ export function insertGmailctlRuleIntoJsonnet(source: string, ruleSnippet: strin
       continue;
     }
     if (inSingle || inDouble) continue;
+    if (openBracketIndex === -1) {
+      if (ch === 'r' && (i === 0 || !/[A-Za-z0-9_$]/.test(source[i - 1]!))) {
+        const match = /^rules\s*:\s*\[/.exec(source.slice(i));
+        if (match) {
+          openBracketIndex = i + match[0].length - 1;
+          i = openBracketIndex;
+          depth = 1;
+        }
+      }
+      continue;
+    }
     if (ch === '[') depth += 1;
     else if (ch === ']') {
       depth -= 1;
@@ -297,20 +313,26 @@ export class WorkGmail {
   private readonly credentialsLoader: () => Promise<GmailCredentials | null>;
   private readonly runner: Runner;
   private readonly resolveGmailctl: () => Promise<string>;
+  private readonly gmailctlConfigPath: string;
   private readonly now: () => Date;
   private readonly operations = new Map<string, { context: string; result: Promise<unknown> }>();
+  private filterWriteQueue: Promise<void> = Promise.resolve();
 
   constructor(options: {
     fetchFn?: typeof fetch;
     credentialsLoader?: () => Promise<GmailCredentials | null>;
     runner?: Runner;
     resolveGmailctl?: () => Promise<string>;
+    gmailctlConfigPath?: string;
     now?: () => Date;
   } = {}) {
     this.fetchFn = options.fetchFn ?? fetch;
     this.credentialsLoader = options.credentialsLoader ?? loadGmailCredentials;
     this.runner = options.runner ?? run;
     this.resolveGmailctl = options.resolveGmailctl ?? (() => executable('gmailctl'));
+    this.gmailctlConfigPath = options.gmailctlConfigPath
+      ?? process.env.GMAILCTL_CONFIG_PATH
+      ?? '~/repos/documents/gmailctl/config.jsonnet';
     this.now = options.now ?? (() => new Date());
   }
 
@@ -365,21 +387,36 @@ export class WorkGmail {
     }
     const { token } = await this.accessToken(signal);
     const query = stream.query.trim() || 'in:inbox is:unread';
-    const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
-    listUrl.searchParams.set('q', query);
-    listUrl.searchParams.set('maxResults', '25');
+    const messageRefs: Array<{ id: string; threadId: string }> = [];
+    const coverageInfo: string[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 2; page += 1) {
+      const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
+      listUrl.searchParams.set('q', query);
+      listUrl.searchParams.set('maxResults', '25');
+      if (pageToken) listUrl.searchParams.set('pageToken', pageToken);
 
-    const listResp = await this.fetchFn(listUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal,
-    });
-    if (!listResp.ok) throw new ServiceError('unavailable', true);
-    const listJson = (await listResp.json()) as { messages?: Array<{ id: string; threadId: string }> };
-    const messageRefs = listJson.messages ?? [];
+      const listResp = await this.fetchFn(listUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal,
+      });
+      if (!listResp.ok) throw new ServiceError('unavailable', true);
+      const listJson = (await listResp.json()) as {
+        messages?: Array<{ id: string; threadId: string }>;
+        nextPageToken?: string;
+      };
+      messageRefs.push(...(listJson.messages ?? []));
+      pageToken = listJson.nextPageToken?.trim() || undefined;
+      if (!pageToken) break;
+    }
+    if (pageToken) {
+      coverageInfo.push('Gmail collection is capped at 50 messages per run; archive or filter older messages to surface the rest.');
+    }
 
     const seenThreads = new Set<string>();
     const candidates: WorkCandidate[] = [];
     const observations: WorkCollection['observations'] = [];
+    const accountSegment = credentials.accountEmail ? encodeURIComponent(credentials.accountEmail) : '0';
 
     for (const ref of messageRefs) {
       if (seenThreads.has(ref.threadId)) continue;
@@ -391,7 +428,10 @@ export class WorkGmail {
         headers: { Authorization: `Bearer ${token}` },
         signal,
       });
-      if (!msgResp.ok) continue;
+      if (!msgResp.ok) {
+        if (msgResp.status === 404) continue;
+        throw new ServiceError('unavailable', true);
+      }
       const msg = (await msgResp.json()) as GmailMessageResponse;
       const headers = msg.payload?.headers ?? [];
       const header = (name: string): string =>
@@ -409,7 +449,7 @@ export class WorkGmail {
         ? new Date(internalMs).toISOString()
         : collectedAt;
       const threadId = msg.threadId || ref.threadId || msg.id;
-      const url = `https://mail.google.com/mail/u/0/#inbox/${encodeURIComponent(threadId)}`;
+      const url = `https://mail.google.com/mail/u/${accountSegment}/#inbox/${encodeURIComponent(threadId)}`;
       const summaryText = bodyPreview
         ? `From ${senderName}${senderEmail && senderEmail !== senderName ? ` <${senderEmail}>` : ''}:\n${bodyPreview}`
         : `Unread email from ${senderName}`;
@@ -452,6 +492,7 @@ export class WorkGmail {
       candidates,
       observations,
       warnings: [],
+      ...(coverageInfo.length ? { coverageInfo } : {}),
       collectedAt,
     });
   }
@@ -476,10 +517,13 @@ export class WorkGmail {
 
   private async performArchive(value: GmailArchiveInput, signal: AbortSignal): Promise<GmailArchiveResult> {
     const { token } = await this.accessToken(signal);
-    const threadId = value.threadId?.trim() || value.messageId;
-    const removeLabelIds = value.markRead ? ['INBOX', 'UNREAD'] : ['INBOX'];
-    const endpoint = value.threadId?.trim()
-      ? `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}/modify`
+    const explicitThreadId = value.threadId?.trim();
+    const removeLabelIds = [
+      ...(value.archive !== false ? ['INBOX'] : []),
+      ...(value.markRead ? ['UNREAD'] : []),
+    ];
+    const endpoint = explicitThreadId
+      ? `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(explicitThreadId)}/modify`
       : `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(value.messageId)}/modify`;
     const response = await this.fetchFn(endpoint, {
       method: 'POST',
@@ -491,6 +535,8 @@ export class WorkGmail {
       signal,
     });
     if (!response.ok) throw new ServiceError('unavailable', true);
+    const payload = (await response.json().catch(() => ({}))) as { id?: string; threadId?: string };
+    const threadId = explicitThreadId || payload.threadId?.trim() || payload.id?.trim() || value.messageId;
     return gmailArchiveResultSchema.parse({
       operationId: value.operationId,
       messageId: value.messageId,
@@ -523,24 +569,36 @@ export class WorkGmail {
     signal: AbortSignal,
   ): Promise<GmailctlFilterResult> {
     checkAbort(signal);
-    const configPath = expandHomePath(
-      value.configPath?.trim() || '~/repos/documents/gmailctl/config.jsonnet',
-    );
+    const configPath = expandHomePath(this.gmailctlConfigPath.trim() || '~/repos/documents/gmailctl/config.jsonnet');
     const ruleSnippet = buildGmailctlRuleSnippet(value);
-    const original = await readFile(configPath, 'utf8').catch(() => {
-      throw new ServiceError('invalid_input');
+    const writeStep = this.filterWriteQueue.then(async () => {
+      checkAbort(signal);
+      const original = await readFile(configPath, 'utf8').catch(() => {
+        throw new ServiceError('invalid_input');
+      });
+      const updated = insertGmailctlRuleIntoJsonnet(original, ruleSnippet);
+      if (updated !== original) {
+        const tmpPath = join(dirname(configPath), `.config.jsonnet.${randomUUID()}.tmp`);
+        try {
+          await writeFile(tmpPath, updated, { encoding: 'utf8', mode: 0o600 });
+          await rename(tmpPath, configPath);
+        } catch (error) {
+          await rm(tmpPath, { force: true }).catch(() => {});
+          throw error;
+        }
+      }
     });
-    const updated = insertGmailctlRuleIntoJsonnet(original, ruleSnippet);
-    if (updated !== original) {
-      await writeFile(configPath, updated, 'utf8');
-    }
+    this.filterWriteQueue = writeStep.catch(() => {});
+    await writeStep;
     let applied = false;
     if (value.apply) {
       const binary = await this.resolveGmailctl();
       const configDir = dirname(configPath);
-      const args = existsSync(join(configDir, 'credentials.json'))
-        ? ['apply', '--config', configDir, '--yes']
-        : ['apply', '--yes'];
+      const defaultPath = expandHomePath('~/repos/documents/gmailctl/config.jsonnet');
+      const useDefaultDir = configPath === defaultPath && !existsSync(join(configDir, 'credentials.json'));
+      const args = useDefaultDir
+        ? ['apply', '--yes']
+        : ['apply', '--config', configDir, '--yes'];
       const applyRun = await this.runner(binary, args, signal);
       if (applyRun.code !== 0) throw new ServiceError('unavailable', true);
       applied = true;

@@ -554,6 +554,13 @@ export class GitHubService {
     if (response.status !== 200 && response.status !== 201) {
       requireStatus(response);
     }
+    const assigned = parse(
+      z.object({ assignees: z.array(z.object({ login: loginSchema })).default([]) }),
+      response.body,
+    );
+    if (!assigned.assignees.some(user => same(user.login, assignee))) {
+      throw new ServiceError('access');
+    }
     return assignResultSchema.parse({
       operationId: value.operationId,
       reference: value.reference,

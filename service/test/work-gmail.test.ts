@@ -38,6 +38,7 @@ describe('WorkGmail and gmailctl integration', () => {
 
       const applied: Array<{ command: string; args: readonly string[] }> = [];
       const gmail = new WorkGmail({
+        gmailctlConfigPath: configPath,
         resolveGmailctl: async () => '/opt/homebrew/bin/gmailctl',
         runner: async (command, args) => {
           applied.push({ command, args });
@@ -54,14 +55,13 @@ describe('WorkGmail and gmailctl integration', () => {
         markRead: true,
         deleteIt: false,
         apply: true,
-        configPath,
       }, controller.signal);
 
       expect(result.status).toBe('confirmed');
       expect(result.applied).toBe(true);
       expect(applied).toEqual([{
         command: '/opt/homebrew/bin/gmailctl',
-        args: ['apply', '--yes'],
+        args: ['apply', '--config', dir, '--yes'],
       }]);
 
       const updated = readFileSync(configPath, 'utf8');
