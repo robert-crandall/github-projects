@@ -105,7 +105,7 @@ export class WorkQueue {
       }, removedIds);
     });
   }
-  pruneUnconfiguredSources(): void {
+  async pruneUnconfiguredSources(): Promise<void> {
     const pruneAll = (current: AppState): AppState => {
       const active = pruneUnconfiguredStreams(current);
       let inactiveChanged = false;
@@ -132,8 +132,19 @@ export class WorkQueue {
       if (active === current && !inactiveChanged) return current;
       return { ...active, inactiveWorkProfiles };
     };
+    const generation = this.controller.assessmentGeneration;
     const current = { ...this.controller.state, work: this.controller.state.work ?? defaultWorkState() };
-    if (pruneAll(current) !== current) this.update(pruneAll);
+    if (pruneAll(current) === current) return;
+    await this.controller.flush();
+    this.assertWorkspace(generation);
+    const saved = await this.controller.platform.workspaceRead();
+    await this.controller.platform.createBackup(saved.revision);
+    this.assertWorkspace(generation);
+    const latest = { ...this.controller.state, work: this.controller.state.work ?? defaultWorkState() };
+    if (pruneAll(latest) !== latest) {
+      this.update(pruneAll);
+      await this.controller.flush();
+    }
   }
   saveSourceFilter(filter: NonNullable<AppState['work']['sourceFilter']>): void {
     const sourceFilter = workStateSchema.shape.sourceFilter.parse(filter);

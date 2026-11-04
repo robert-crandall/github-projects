@@ -2647,3 +2647,45 @@ test('removing a stream quarantines pending or in-flight assessments for pruned 
   expect(mock.queue.getSnapshot().error).toBe('');
 });
 
+test('startup pruning backs up before cleaning active and parked profiles and skips saves when clean', async () => {
+  const [keepStream, dropStream] = defaultWorkState().settings.streams;
+  const activeTask = reconcileWork(initial(), {
+    ...collection(),
+    candidates: [
+      { ...candidate('github:keep', 'github'), url: 'https://github.com/owner/repo/pull/1', evidence: [{ ...candidate('github:keep', 'github').evidence[0]!, streamId: keepStream!.id }] },
+      { ...candidate('github:drop', 'github'), url: 'https://github.com/owner/repo/pull/2', evidence: [{ ...candidate('github:drop', 'github').evidence[0]!, streamId: dropStream!.id }] },
+    ],
+  }, before);
+  activeTask.work.settings.streams = [keepStream!];
+  activeTask.work.sourceFilter = {
+    selectedSources: [JSON.stringify(['github', keepStream!.id]), JSON.stringify(['github', dropStream!.id])],
+    collapsedProviders: [],
+  };
+  const parkedBase = reconcileWork({ ...initial(), sequence: activeTask.sequence }, {
+    ...collection(),
+    candidates: [
+      { ...candidate('github:parked-keep', 'github'), url: 'https://github.com/owner/repo/pull/3', evidence: [{ ...candidate('github:parked-keep', 'github').evidence[0]!, streamId: dropStream!.id }] },
+      { ...candidate('github:parked-drop', 'github'), url: 'https://github.com/owner/repo/pull/4', evidence: [{ ...candidate('github:parked-drop', 'github').evidence[0]!, streamId: keepStream!.id }] },
+    ],
+  }, before);
+  parkedBase.work.settings.streams = [dropStream!];
+  activeTask.inactiveWorkProfiles = [{
+    id: 'parked', name: 'Parked',
+    work: parkedBase.work, tasks: parkedBase.tasks, undo: [],
+  }];
+  const mock = await fixture(JSON.parse(JSON.stringify(activeTask)));
+  const backupsBefore = mock.log.filter(item => item === 'workspace_create_backup').length;
+  await mock.queue.pruneUnconfiguredSources();
+  await mock.workspace.flush();
+  expect(mock.log.filter(item => item === 'workspace_create_backup').length).toBe(backupsBefore + 1);
+  expect(mock.saved().tasks.map(task => task.work?.url)).toEqual(['https://github.com/owner/repo/issues/1']);
+  expect(mock.saved().work.sourceFilter?.selectedSources).toEqual([JSON.stringify(['github', keepStream!.id])]);
+  expect(mock.saved().inactiveWorkProfiles[0]!.tasks.map(task => task.work?.url)).toEqual(['https://github.com/owner/repo/issues/3']);
+  let saves = 0;
+  mock.onSave(async () => { saves += 1; });
+  await mock.queue.pruneUnconfiguredSources();
+  await mock.workspace.flush();
+  expect(saves).toBe(0);
+  expect(mock.log.filter(item => item === 'workspace_create_backup').length).toBe(backupsBefore + 1);
+});
+

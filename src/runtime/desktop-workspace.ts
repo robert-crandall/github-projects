@@ -174,7 +174,7 @@ export class DesktopWorkspace {
     const tasks = state.activeWorkProfile.id === profileId
       ? state.tasks
       : state.inactiveWorkProfiles.find(profile => profile.id === profileId)?.tasks;
-    return tasks?.some(task => task.id === taskId) ?? false;
+    return tasks?.some(task => task.id === taskId || (task.assessmentTaskIds?.includes(taskId) ?? false)) ?? false;
   }
   private quarantineOrphanedAssessments(state = this.status.workspace?.state): void {
     if (!state || !this.status.assessmentPending.length) return;
@@ -226,8 +226,11 @@ export class DesktopWorkspace {
         });
       }
     } catch (error) {
-      this.publish({ assessmentError: `Assessment history is not saved. ${message(error)} Retry or export pending results; task edits can still save.` });
-      throw error;
+      this.quarantineOrphanedAssessments();
+      if (this.status.assessmentPending.length) {
+        this.publish({ assessmentError: `Assessment history is not saved. ${message(error)} Retry or export pending results; task edits can still save.` });
+        throw error;
+      }
     } finally { this.publish({ assessmentSaving: false }); }
   }
   saveScroll = (view: string, offset: number): void => {
