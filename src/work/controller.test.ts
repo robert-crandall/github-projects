@@ -2823,10 +2823,9 @@ describe('batch triage actions', () => {
         throw new Error('Gmail archive failed');
       }
       if (request.op === 'github.acknowledge') return {
-        operationId: request.input.operationId,
-        threadId: request.input.threadId,
-        target: request.input.target,
-        status: 'confirmed',
+        ...request.input,
+        action: 'acknowledge' as const,
+        status: 'confirmed' as const,
         confirmedAt: before,
       };
     });

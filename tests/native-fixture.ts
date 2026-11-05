@@ -215,6 +215,9 @@ export class NativeMock {
     }
     if (command !== 'service_request') throw new Error(`Unexpected native command ${command}`);
     const request = requestSchema.parse(args.request);
+    if (request.op === 'copilotProjects.list') {
+      return { v: 1, id: request.id, ok: true, result: { projects: [] } };
+    }
     this.requests.push(request);
     let result: unknown;
     switch (request.op) {
@@ -319,10 +322,10 @@ export class NativeMock {
         if (this.failWrite) throw new ExpectedFailure('Gmail write unavailable.');
         result = {
           operationId: request.input.operationId,
-          threadId: request.input.threadId,
-          archived: request.input.archive ?? true,
-          markedRead: request.input.markRead ?? true,
-          completedAt: this.now,
+          messageId: request.input.messageId,
+          threadId: request.input.threadId ?? request.input.messageId,
+          status: 'confirmed',
+          confirmedAt: this.now,
         };
         break;
       case 'gmailctl.addFilter':
@@ -333,7 +336,8 @@ export class NativeMock {
           configPath: '/tmp/config.jsonnet',
           ruleSnippet: '{ filter: {}, actions: { archive: true, markRead: true } }',
           applied: Boolean(request.input.apply),
-          completedAt: this.now,
+          status: 'confirmed',
+          confirmedAt: this.now,
         };
         break;
       default:

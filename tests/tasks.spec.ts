@@ -2192,8 +2192,8 @@ test('legacy assessments label absent ratings without inventing current judgment
 test('grouped action view supports sender cluster selection, source filtering, and batch archive and gmailctl actions', async ({ page, native }) => {
   const state = emptyWorkspace(native.now, 'UTC');
   state.work.settings.streams = [
-    { id: 'gmail-primary', name: 'Primary Gmail', source: 'gmail', query: 'in:inbox', maxItems: 25, enabled: true },
-    { id: 'gmail-secondary', name: 'Secondary Gmail', source: 'gmail', query: 'label:receipts', maxItems: 25, enabled: true },
+    { id: 'gmail-primary', name: 'Primary Gmail', kind: 'gmail', query: 'in:inbox', action: 'follow-up', server: '', tools: [], enabled: true },
+    { id: 'gmail-secondary', name: 'Secondary Gmail', kind: 'gmail', query: 'label:receipts', action: 'follow-up', server: '', tools: [], enabled: true },
   ];
   state.tasks = [
     {
@@ -2204,7 +2204,7 @@ test('grouped action view supports sender cluster selection, source filtering, a
       createdAt: native.now,
       work: {
         identity: 'gmail:m-promo-1',
-        action: 'read',
+        action: 'follow-up',
         url: 'https://mail.google.com/mail/u/0/#inbox/t-promo-1',
         availability: 'actionable',
         availabilityReason: '',
@@ -2236,7 +2236,7 @@ test('grouped action view supports sender cluster selection, source filtering, a
       createdAt: native.now,
       work: {
         identity: 'gmail:m-promo-2',
-        action: 'read',
+        action: 'follow-up',
         url: 'https://mail.google.com/mail/u/0/#inbox/t-promo-2',
         availability: 'actionable',
         availabilityReason: '',
@@ -2268,7 +2268,7 @@ test('grouped action view supports sender cluster selection, source filtering, a
       createdAt: native.now,
       work: {
         identity: 'gmail:m-receipt-1',
-        action: 'read',
+        action: 'follow-up',
         url: 'https://mail.google.com/mail/u/0/#inbox/t-receipt-1',
         availability: 'actionable',
         availabilityReason: '',
@@ -2299,7 +2299,7 @@ test('grouped action view supports sender cluster selection, source filtering, a
       createdAt: native.now,
       work: {
         identity: 'gmail:m-receipt-2',
-        action: 'read',
+        action: 'follow-up',
         url: 'https://mail.google.com/mail/u/0/#inbox/t-receipt-2',
         availability: 'actionable',
         availabilityReason: '',
@@ -2348,12 +2348,12 @@ test('grouped action view supports sender cluster selection, source filtering, a
   await expect(unsubRegion).toBeVisible();
 
   // Select sender cluster in Unsubscribe or filter sender and verify selection count
-  await unsubRegion.getByRole('button', { name: 'Select 2 tasks from Deals Bot', exact: true }).click();
+  await unsubRegion.locator('button[title="Select 2 from Deals Bot"]').click();
   const selected = page.getByRole('region', { name: 'Selected tasks', exact: true });
   await expect(selected).toContainText('2 selected');
 
   // Filter sender via the sender cluster chip button (deduped gmailctl.addFilter + 2 gmail.archive calls)
-  await unsubRegion.getByRole('button', { name: 'Create gmailctl filter for Deals Bot', exact: true }).click();
+  await unsubRegion.getByRole('button', { name: 'Filter sender', exact: true }).click();
   await persisted(page);
   expect(native.requests.filter(req => req.op === 'gmailctl.addFilter')).toHaveLength(1);
   expect(native.requests.find(req => req.op === 'gmailctl.addFilter')?.input).toMatchObject({

@@ -4,8 +4,14 @@ import type { SavedAssessment } from '../../service/src/work-assessment.ts';
 import type { WorkStyle } from '../../service/src/work-styles.ts';
 import type { Task } from '../types.ts';
 
-function gmailTask(id: string, overrides: Partial<NonNullable<NonNullable<Task['work']>['email']>> & { title?: string }): Task {
-  const { title = overrides.subject ?? 'Email subject', ...email } = overrides;
+function gmailTask(
+  id: string,
+  overrides: Partial<NonNullable<NonNullable<Task['work']>['email']>> & {
+    title?: string;
+    action?: NonNullable<Task['work']>['action'];
+  },
+): Task {
+  const { title = overrides.subject ?? 'Email subject', action = 'follow-up', ...email } = overrides;
   return {
     id,
     title,
@@ -13,8 +19,8 @@ function gmailTask(id: string, overrides: Partial<NonNullable<NonNullable<Task['
     status: 'open',
     createdAt: '2026-04-17T00:00:00.000Z',
     work: {
-      identity: `reply:https://mail.google.com/mail/u/0/#inbox/${id}`,
-      action: 'reply',
+      identity: `${action}:https://mail.google.com/mail/u/0/#inbox/${id}`,
+      action,
       url: `https://mail.google.com/mail/u/0/#inbox/${id}`,
       availability: 'actionable',
       availabilityReason: '',
@@ -105,11 +111,22 @@ describe('classifyTaskActionGroup', () => {
       subject: 'Your order receipt #402',
       snippet: 'Please reply with a copy once signed.',
     });
+    const explicitActionReplyReceipt = gmailTask('reply-receipt-3', {
+      action: 'reply',
+      from: 'Billing <receipts@company.com>',
+      senderEmail: 'receipts@company.com',
+      subject: 'Your order receipt #500',
+      snippet: 'Payment received.',
+    });
     expect(classifyTaskActionGroup(subjectReplyReceipt)).toMatchObject({
       groupId: 'needs-action',
       badge: 'Needs action',
     });
     expect(classifyTaskActionGroup(snippetReplyReceipt)).toMatchObject({
+      groupId: 'needs-action',
+      badge: 'Needs action',
+    });
+    expect(classifyTaskActionGroup(explicitActionReplyReceipt)).toMatchObject({
       groupId: 'needs-action',
       badge: 'Needs action',
     });
