@@ -86,6 +86,19 @@ describe('classifyTaskActionGroup', () => {
       snippet: 'Your password expires soon.',
     });
 
+    const fedexInvoice = gmailTask('fedex-inv-1', {
+      from: 'FedEx <billing@fedex.com>',
+      senderEmail: 'billing@fedex.com',
+      subject: 'Invoice 123 - payment due Friday',
+      snippet: 'Please remit payment by Friday.',
+    });
+    const fedexException = gmailTask('fedex-exc-1', {
+      from: 'FedEx <trackingUpdates@fedex.com>',
+      senderEmail: 'trackingUpdates@fedex.com',
+      subject: 'FedEx delivery exception: address correction needed',
+      snippet: 'We could not deliver your package without an updated address.',
+    });
+
     expect(classifyTaskActionGroup(downAlert)).toMatchObject({
       groupId: 'needs-action',
       badge: 'Needs action',
@@ -95,6 +108,14 @@ describe('classifyTaskActionGroup', () => {
       badge: 'Needs action',
     });
     expect(classifyTaskActionGroup(resetNotice)).toMatchObject({
+      groupId: 'needs-action',
+      badge: 'Needs action',
+    });
+    expect(classifyTaskActionGroup(fedexInvoice)).toMatchObject({
+      groupId: 'needs-action',
+      badge: 'Needs action',
+    });
+    expect(classifyTaskActionGroup(fedexException)).toMatchObject({
       groupId: 'needs-action',
       badge: 'Needs action',
     });

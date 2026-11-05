@@ -90,13 +90,13 @@ const BADGE_BY_GROUP: Record<ActionGroupId, string> = {
 };
 
 const URGENT_EMAIL_PATTERN =
-  /\b(down\s*\||action required\b|urgent\b|payment failed\b|past due\b|declined\b|fraud alert\b|unexpected charge\b|unusual activity\b|security alert:\s*unusual\b|immediate attention\b)/i;
+  /\b(down\s*\||action required\b|urgent\b|payment failed\b|payment due\b|amount due\b|balance due\b|past due\b|declined\b|fraud alert\b|unexpected charge\b|unusual activity\b|security alert:\s*unusual\b|immediate attention\b|delivery exception\b|delivery attempt\b|unable to deliver\b|address correction\b|customs delay\b|signature required\b)/i;
 
 const DIRECT_REQUEST_EMAIL_PATTERN =
   /\b(please\s+reply\b|(?<!not\s)(?<!no[- ])reply\s+(?:with|to\s+this|to\s+confirm|by|if|asap)\b|can\s+you\b|could\s+you\b|would\s+you\b|please\s+(?:send|confirm|provide|share|review|complete|sign|approve)\b|send\s+me\b|let\s+me\s+know\b|need\s+your\b|awaiting\s+your\b|respond\s+by\b)/i;
 
 const SHIPPING_EMAIL_PATTERN =
-  /\b(pre-arrival|driver is arriving|out for delivery|scheduled for delivery|package\b.*\bdelivered|your package|shipment|tracking number|has shipped|order shipped|ups update|ups my choice|fedex|usps|dhl)\b/i;
+  /\b(pre-arrival|driver is arriving|out for delivery|scheduled for delivery|package\b.*\bdelivered|your package\b|shipment\b.*\b(?:update|notification|on the way|delivered|shipped)|tracking number\b|has shipped\b|order shipped\b|ups update\b|ups my choice\b|(?:fedex|usps|dhl|ups)\s+(?:shipment|delivery\s+update|package\s+delivered|tracking)\b)/i;
 
 const RECEIPT_EMAIL_PATTERN =
   /\b(order receipt|your\b.*\breceipt|payment received|payment confirmation|order confirmation|auto-?pay|statement is ready|booking confirmation|reservation confirmed|e-?receipt|purchase receipt)\b/i;
@@ -241,7 +241,7 @@ export function classifyTaskActionGroup(
       );
     }
 
-    if (SHIPPING_EMAIL_PATTERN.test(subject) || SHIPPING_EMAIL_PATTERN.test(from)) {
+    if (SHIPPING_EMAIL_PATTERN.test(subject) || SHIPPING_EMAIL_PATTERN.test(snippet)) {
       return withBadge(
         'safe-archive',
         sender.label ? `Shipping update · ${sender.label}` : 'Shipping update',
