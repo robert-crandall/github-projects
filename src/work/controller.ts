@@ -13,6 +13,7 @@ import { importWorkProfile, type ProfileFile } from './profile-files.ts';
 import { ASSESSMENT_VERSION, identityDigest, workAssessOutputSchema, type SavedAssessment } from '../../service/src/work-assessment.ts';
 import { agentIdentity, taskAgent } from '../../service/src/work-agents.ts';
 import { assessmentIdentity, workStyleIdsSchema } from '../../service/src/work-styles.ts';
+import { hasEvaluatedWorkStyles } from './styles.ts';
 import { CodeSessions } from './code-sessions.ts';
 import { githubReference } from '../../service/src/references.ts';
 import type { CopilotProjectItem } from '../../service/src/copilot-projects.ts';
@@ -561,18 +562,23 @@ export class WorkQueue {
 
   private async unassessed(input: WorkRankInput, profileId: string, generation: number) {
     const tasks: WorkRankInput['tasks'] = [];
+    let force = false;
     this.publish({ phase: 'checking-assessments' });
     for (const task of input.tasks) {
       this.assertAssessmentNotCancelled();
       this.assertWorkspace(generation);
       this.assertProfile(this.controller.state, profileId);
       const page = await this.controller.platform.assessmentRead(profileId, task.id);
-      if (!page.assessments.length) {
-        if (page.before !== null) throw new Error('Assessment history returned an empty continuation. No assessment request was sent; retry history.');
+      if (!page.assessments.length && page.before !== null) {
+        throw new Error('Assessment history returned an empty continuation. No assessment request was sent; retry history.');
+      }
+      const override = this.controller.state.tasks.find(item => item.id === task.id)?.workStyleOverride;
+      if (!hasEvaluatedWorkStyles(page.assessments[0], input.workStyles, override)) {
+        if (page.assessments.length) force = true;
         tasks.push(task);
       }
     }
-    return tasks;
+    return { tasks, force };
   }
 
   private async intake(profileId: string, generation: number, reopenDone = true): Promise<void> {
@@ -724,7 +730,12 @@ export class WorkQueue {
       }
       assessmentIds.push(value.resultId);
       selected.push({ taskId: task.id, result: value });
-      if (!matchesAgent(value)) warnings.push(`"${task.title}": reusing a saved judgment from earlier assessor settings or format. Use Assess selected to update it.`);
+      const override = this.controller.state.tasks.find(item => item.id === task.id)?.workStyleOverride;
+      const currentStylesMatch = matchesAgent(value)
+        || (value.assessmentVersion === 'work-assessment-v4'
+          && hasEvaluatedWorkStyles(value, input.workStyles, override)
+          && await identityDigest(assessmentIdentity({ ...input, workStyles: value.workStyles })) === value.agent.configurationFingerprint);
+      if (!currentStylesMatch) warnings.push(`"${task.title}": reusing a saved judgment from earlier assessor settings or format. Use Assess selected to update it.`);
       const { context: _, ...compact } = task;
       compactTasks.push({
         ...compact, notes: '', evidence: [],
@@ -796,7 +807,7 @@ export class WorkQueue {
         const input = { ...rankInput(this.controller.state), profileId };
         if (kind === 'assess') {
           if (selectedIds) input.tasks = input.tasks.filter(task => selectedIds.has(task.id));
-          else input.tasks = await this.unassessed(input, profileId, generation);
+          else input.tasks = (await this.unassessed(input, profileId, generation)).tasks;
           const assessed = await this.assess(input, generation, true, !!selectedIds);
           if (selectedIds && assessed.size < selectedIds.size) {
             warnings.push(`${selectedIds.size - assessed.size} selected tasks were not assessed because they changed or are no longer eligible.`);
@@ -889,8 +900,8 @@ export class WorkQueue {
         warnings.push(...await this.refreshState(profileId, generation, observed, reopenDone));
         if (kind === 'pipeline') {
           const input = { ...rankInput(this.controller.state), profileId };
-          const tasks = await this.unassessed(input, profileId, generation);
-          const assessments = await this.assess({ ...input, tasks }, generation);
+          const { tasks, force } = await this.unassessed(input, profileId, generation);
+          const assessments = await this.assess({ ...input, tasks }, generation, force);
           warnings.push(...await this.prioritize(input, generation, assessments));
         }
       }

@@ -21,7 +21,7 @@ import { downloadBackup } from '../storage.ts';
 import { workProfiles } from './profiles.ts';
 import { matchesSources, sourceCounts, taskSources } from './filters.ts';
 import { SourceTree } from './SourceTree.tsx';
-import { matchesStyles, taskStyles, useStyleAssessments } from './styles.ts';
+import { hasEvaluatedWorkStyles, matchesStyles, taskStyles, useStyleAssessments } from './styles.ts';
 import type { SavedAssessment } from '../../service/src/work-assessment.ts';
 import { TaskAssessmentHistory, type ReasoningView } from './AssessmentHistory.tsx';
 import { CodeSessionPanel } from './CodeSessionPanel.tsx';
@@ -367,6 +367,12 @@ export function TaskApp({ controller, queue, remote }: {
   const filteredWaiting = filterTasks(waiting);
   const unfiltered = view === 'done' ? done : view === 'waiting' ? waiting : ranked;
   const visible = view === 'done' ? filteredDone : view === 'waiting' ? filteredWaiting : filteredRanked;
+  const selectedStyleDefs = selectedStyles === null ? [] : styles.filter(style => selectedStyles.includes(style.id));
+  const unassessedStyleCount = view !== 'tasks' || !selectedStyleDefs.length || styleAssessments.loading || styleAssessments.error ? 0
+    : ranked.filter(task => matchesSources(task, selectedSources)
+      && task.workStyleOverride === undefined
+      && !hasEvaluatedWorkStyles(styleAssessments.values.get(task.id), selectedStyleDefs)).length;
+  const lastRunSummary = runError.split('\n').map(line => line.trim()).find(Boolean) ?? '';
   const selected = state.tasks.find(task => task.id === selection && matches(task));
   const positions = new Map(ranked.map((task, index) => [task.id, index + 1]));
   const saveFilter = (next: typeof sourceFilter) => {
@@ -534,9 +540,12 @@ export function TaskApp({ controller, queue, remote }: {
             </li>)}
           </ol> : filters ? <div className="task-empty">
             <h2>{styleAssessments.loading && selectedStyles !== null ? 'Reading work styles' : selectedSourceCount ? 'No matching tasks' : 'No sources selected'}</h2>
-            <p>{selectedSourceCount ? 'No tasks match the current filters in this tab. Choose another source, work style or task tab.'
-              : 'Select a source in the sidebar to show its tasks. Your tasks are still saved.'}</p>
-            <div className="button-row"><button className="secondary" onClick={selectAllSources}>Show all sources</button>
+            <p>{!selectedSourceCount ? 'Select a source in the sidebar to show its tasks. Your tasks are still saved.'
+              : unassessedStyleCount > 0 ? `No tasks match the current filters in this tab yet. ${unassessedStyleCount} ${unassessedStyleCount === 1 ? 'task still needs' : 'tasks still need'} assessment for the selected work styles.${lastRunSummary ? ` Last run: ${lastRunSummary}` : ''}`
+                : 'No tasks match the current filters in this tab. Choose another source, work style or task tab.'}</p>
+            <div className="button-row">{view === 'tasks' && unassessedStyleCount > 0 && <button className="secondary"
+              disabled={run.running || code.busy} onClick={() => invoke(() => queue.runAssessor())}>Run assessor</button>}
+              <button className="secondary" onClick={selectAllSources}>Show all sources</button>
               {selectedStyles !== null && <button className="secondary" onClick={() => saveStyleFilter(null)}>Show all styles</button>}</div>
           </div> : <div className="task-empty"><h2>{view === 'done' ? 'Nothing completed yet' : view === 'waiting' ? 'No tasks waiting on other people or systems' : 'No tasks to act on'}</h2>
             <p>{view === 'done' ? 'Completed work stays here. Repeated searches will not put it back on your list.'

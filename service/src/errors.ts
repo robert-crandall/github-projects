@@ -27,7 +27,11 @@ const messages: Record<ServiceErrorDTO['code'], string> = {
 };
 export class ServiceError extends Error {
   readonly dto: ServiceErrorDTO;
-  constructor(code: ServiceErrorDTO['code'], retryable = false, context: 'general' | 'read' = 'general') {
+  readonly retryHint?: string;
+  constructor(
+    code: ServiceErrorDTO['code'], retryable = false, context: 'general' | 'read' = 'general',
+    retryHint?: string,
+  ) {
     const message = context === 'read' && code === 'source_changed'
       ? 'The source or repository revision changed during the read-only operation. No current review was returned; retry explicitly.'
       : context === 'read' && (code === 'deadline' || code === 'cancelled')
@@ -35,6 +39,7 @@ export class ServiceError extends Error {
       : messages[code];
     super(message);
     this.dto = { code, message, retryable };
+    this.retryHint = retryHint;
   }
 }
 export function sanitized(error: unknown): ServiceErrorDTO {

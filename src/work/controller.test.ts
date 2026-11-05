@@ -1346,6 +1346,58 @@ describe('explicit task agents', () => {
     expect(mock.queue.getSnapshot().error).toBe('');
   });
 
+  test('adding or editing work styles reassesses existing tasks without manual overrides while style removal skips reassessment', async () => {
+    const state = initial();
+    state.tasks = [
+      { id: 'evaluate-me', title: 'Evaluate me', notes: '', status: 'open', createdAt: before },
+      { id: 'overridden', title: 'Manual style', notes: '', status: 'open', createdAt: before, workStyleOverride: ['archive'] },
+    ];
+    const mock = await fixture(state);
+    await mock.queue.runAssessor();
+    expect(mock.requests.map(request => request.op)).toEqual(['work.assess']);
+    expect(mock.history.entries).toHaveLength(2);
+
+    const archive = { id: 'archive', name: 'Safe to archive', description: 'Receipts and resolved notifications' };
+    const action = { id: 'action', name: 'Needs action', description: 'Direct requests waiting on a reply' };
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, workStyles: [archive, action] });
+    await mock.queue.runAssessor();
+    expect(mock.requests).toHaveLength(2);
+    expect(mock.requests[1]).toMatchObject({
+      op: 'work.assess',
+      input: { tasks: [{ id: 'evaluate-me' }], workStyles: [archive, action], force: true },
+    });
+    expect(mock.history.values('evaluate-me')).toHaveLength(2);
+    expect(mock.history.values('overridden')).toHaveLength(1);
+
+    await mock.queue.runAssessor();
+    expect(mock.requests).toHaveLength(2);
+
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, workStyles: [archive] });
+    await mock.queue.runAssessor();
+    expect(mock.requests).toHaveLength(2);
+
+    const editedArchive = { ...archive, description: 'Shipping updates and routine confirmations' };
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, workStyles: [editedArchive] });
+    await mock.queue.run();
+    expect(mock.requests.slice(2).map(request => request.op)).toEqual(['work.intake', 'work.assess', 'work.rank']);
+    expect(mock.requests[3]).toMatchObject({
+      op: 'work.assess',
+      input: { tasks: [{ id: 'evaluate-me' }], workStyles: [editedArchive], force: true },
+    });
+
+    mock.queue.saveSettings({ ...mock.workspace.state.work.settings, workStyles: [archive] });
+    await mock.queue.run();
+    expect(mock.requests.slice(5).map(request => request.op)).toEqual(['work.intake', 'work.assess', 'work.rank']);
+    expect(mock.requests[6]).toMatchObject({
+      op: 'work.assess',
+      input: { tasks: [{ id: 'evaluate-me' }], workStyles: [archive], force: true },
+    });
+    expect(mock.history.values('evaluate-me').at(-1)?.workStyles).toEqual([archive]);
+
+    await mock.queue.run();
+    expect(mock.requests.slice(8).map(request => request.op)).toEqual(['work.intake', 'work.rank']);
+  });
+
   test('Run now reuses a week-old judgment skipped by Run assessor without reassessing changed feature work', async () => {
     const mock = await fixture();
     mock.queue.capture('Expired assessment');

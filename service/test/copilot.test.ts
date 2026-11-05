@@ -96,6 +96,8 @@ describe('real SDK adapter restrictions', () => {
     const options = clientOptions('/synthetic/copilot', '/synthetic/private', 'not-real');
     expect(options.workingDirectory).toBe('/synthetic/private/work');
     expect(options.baseDirectory).toBe('/synthetic/private/config');
+    expect(options.enableRemoteSessions).toBe(false);
+    expect((options.connection as { args?: string[] }).args).not.toContain('--no-remote');
     expect(options.env!.COPILOT_PLUGIN_DIR_ONLY).toBe('true');
   });
   test('connection check authenticates without creating a session or fetching notifications', async () => {

@@ -105,7 +105,7 @@ export function Settings({ settings, profileName, queue, close, recover, batchPr
             onClick={() => change({ ...draft, workStyles: draft.workStyles!.filter(item => item.id !== style.id) })}>
             <Trash2 size={15} />Remove style</button>
         </fieldset>)}
-        <p className="field-help">Definitions save automatically when complete. Use Assess selected for existing tasks. New tasks get styles with their first assessment.
+        <p className="field-help">Definitions save automatically when complete. Run now, Run assessor or Assess selected evaluates existing tasks for new or edited styles. New tasks get styles with their first assessment.
           Corrections stay yours until you choose Use Copilot assignments. Removing a style hides its pills without deleting assessment history.</p>
       </section>
       <section aria-labelledby="agents-heading"><h2 id="agents-heading">Task agents</h2>
