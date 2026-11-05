@@ -307,7 +307,7 @@ button.work-style-pill[aria-pressed="true"] { border-color: var(--accent); backg
 
 .task-selection-top { justify-content: space-between; width: 100%; }
 .task-view-mode { display: inline-flex; gap: 6px; align-items: center; }
-.task-view-pill, .action-group-badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg); color: var(--secondary); padding: 2px 9px; font-size: 11px; line-height: 1.4; }
+.task-view-pill, .action-group-badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg); color: var(--secondary); padding: 2px 9px; font-size: 11px; line-height: 1.4; max-width: 100%; min-width: 0; overflow-wrap: anywhere; text-align: left; }
 button.task-view-pill { cursor: pointer; background: var(--surface); }
 button.task-view-pill[aria-pressed='true'] { border-color: var(--accent); color: var(--text); font-weight: 600; }
 .task-action-groups { display: flex; flex-direction: column; gap: 18px; padding-top: 8px; }

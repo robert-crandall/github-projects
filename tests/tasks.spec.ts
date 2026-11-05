@@ -1447,6 +1447,7 @@ test('ranked list and details stay readable on desktop and narrow screens', asyn
   await page.goto('/');
   await add(page, 'Write phase-one rollout notes');
   await run(page);
+  await page.getByRole('button', { name: 'Rank order', exact: true }).click();
   await expect(page.locator('img')).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath('ranked-desktop.png') });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -2186,4 +2187,189 @@ test('legacy assessments label absent ratings without inventing current judgment
   await panel.getByText('Assessment provenance', { exact: true }).click();
   await expect(panel).toContainText('Legacy task assessor');
   expect(native.requests).toEqual([]);
+});
+
+test('grouped action view supports sender cluster selection, source filtering, and batch archive and gmailctl actions', async ({ page, native }) => {
+  const state = emptyWorkspace(native.now, 'UTC');
+  state.work.settings.streams = [
+    { id: 'gmail-primary', name: 'Primary Gmail', source: 'gmail', query: 'in:inbox', maxItems: 25, enabled: true },
+    { id: 'gmail-secondary', name: 'Secondary Gmail', source: 'gmail', query: 'label:receipts', maxItems: 25, enabled: true },
+  ];
+  state.tasks = [
+    {
+      id: 'gmail-promo-1',
+      title: 'Weekly deals part 1',
+      notes: '',
+      status: 'open',
+      createdAt: native.now,
+      work: {
+        identity: 'gmail:m-promo-1',
+        action: 'read',
+        url: 'https://mail.google.com/mail/u/0/#inbox/t-promo-1',
+        availability: 'actionable',
+        availabilityReason: '',
+        handledEvidenceIds: [],
+        evidence: [{
+          id: 'gmail:message:m-promo-1',
+          source: 'gmail',
+          streamId: 'gmail-primary',
+          at: native.now,
+          url: 'https://mail.google.com/mail/u/0/#inbox/t-promo-1',
+          summary: 'Weekly newsletter 1',
+        }],
+        email: {
+          messageId: 'm-promo-1',
+          threadId: 't-promo-1',
+          from: 'Deals Bot <deals@promo.example.com>',
+          senderEmail: 'deals@promo.example.com',
+          subject: 'Weekly deals part 1',
+          snippet: 'Unsubscribe anytime',
+          unsubscribeUrl: 'https://promo.example.com/unsub',
+        },
+      },
+    },
+    {
+      id: 'gmail-promo-2',
+      title: 'Weekly deals part 2',
+      notes: '',
+      status: 'open',
+      createdAt: native.now,
+      work: {
+        identity: 'gmail:m-promo-2',
+        action: 'read',
+        url: 'https://mail.google.com/mail/u/0/#inbox/t-promo-2',
+        availability: 'actionable',
+        availabilityReason: '',
+        handledEvidenceIds: [],
+        evidence: [{
+          id: 'gmail:message:m-promo-2',
+          source: 'gmail',
+          streamId: 'gmail-primary',
+          at: native.now,
+          url: 'https://mail.google.com/mail/u/0/#inbox/t-promo-2',
+          summary: 'Weekly newsletter 2',
+        }],
+        email: {
+          messageId: 'm-promo-2',
+          threadId: 't-promo-2',
+          from: 'Deals Bot <deals@promo.example.com>',
+          senderEmail: 'deals@promo.example.com',
+          subject: 'Weekly deals part 2',
+          snippet: 'Unsubscribe anytime',
+          unsubscribeUrl: 'https://promo.example.com/unsub',
+        },
+      },
+    },
+    {
+      id: 'gmail-receipt-1',
+      title: 'Your order receipt #101',
+      notes: '',
+      status: 'open',
+      createdAt: native.now,
+      work: {
+        identity: 'gmail:m-receipt-1',
+        action: 'read',
+        url: 'https://mail.google.com/mail/u/0/#inbox/t-receipt-1',
+        availability: 'actionable',
+        availabilityReason: '',
+        handledEvidenceIds: [],
+        evidence: [{
+          id: 'gmail:message:m-receipt-1',
+          source: 'gmail',
+          streamId: 'gmail-primary',
+          at: native.now,
+          url: 'https://mail.google.com/mail/u/0/#inbox/t-receipt-1',
+          summary: 'Payment received for order #101',
+        }],
+        email: {
+          messageId: 'm-receipt-1',
+          threadId: 't-receipt-1',
+          from: 'Store Receipts <receipts@store.example.com>',
+          senderEmail: 'receipts@store.example.com',
+          subject: 'Your order receipt #101',
+          snippet: 'Payment received for order #101',
+        },
+      },
+    },
+    {
+      id: 'gmail-receipt-hidden',
+      title: 'Your order receipt #202',
+      notes: '',
+      status: 'open',
+      createdAt: native.now,
+      work: {
+        identity: 'gmail:m-receipt-2',
+        action: 'read',
+        url: 'https://mail.google.com/mail/u/0/#inbox/t-receipt-2',
+        availability: 'actionable',
+        availabilityReason: '',
+        handledEvidenceIds: [],
+        evidence: [{
+          id: 'gmail:message:m-receipt-2',
+          source: 'gmail',
+          streamId: 'gmail-secondary',
+          at: native.now,
+          url: 'https://mail.google.com/mail/u/0/#inbox/t-receipt-2',
+          summary: 'Payment received for order #202',
+        }],
+        email: {
+          messageId: 'm-receipt-2',
+          threadId: 't-receipt-2',
+          from: 'Store Receipts <receipts@store.example.com>',
+          senderEmail: 'receipts@store.example.com',
+          subject: 'Your order receipt #202',
+          snippet: 'Payment received for order #202',
+        },
+      },
+    },
+  ];
+  state.work.ranking = {
+    orderedIds: ['gmail-promo-1', 'gmail-promo-2', 'gmail-receipt-1', 'gmail-receipt-hidden'],
+    reasons: [],
+    rankedAt: native.now,
+  };
+  native.saved = {
+    revision: crypto.randomUUID(),
+    savedAt: native.now,
+    snapshot: snapshotSchema.parse({ formatVersion: 1, reminders: [], workspace: { version: 1, state, scroll: {} } }),
+  };
+
+  await page.goto('/');
+  await expect(page.getByRole('button', { name: 'Group by action', exact: true })).toHaveAttribute('aria-pressed', 'true');
+
+  // Filter out Secondary Gmail so only gmail-receipt-1 is visible in Safe to archive
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  await page.getByRole('checkbox', { name: 'Secondary Gmail', exact: true }).uncheck();
+  await persisted(page);
+
+  const archiveRegion = page.getByRole('region', { name: 'Safe to archive', exact: true });
+  const unsubRegion = page.getByRole('region', { name: 'Unsubscribe or filter sender', exact: true });
+  await expect(archiveRegion).toBeVisible();
+  await expect(unsubRegion).toBeVisible();
+
+  // Select sender cluster in Unsubscribe or filter sender and verify selection count
+  await unsubRegion.getByRole('button', { name: 'Select 2 tasks from Deals Bot', exact: true }).click();
+  const selected = page.getByRole('region', { name: 'Selected tasks', exact: true });
+  await expect(selected).toContainText('2 selected');
+
+  // Filter sender via the sender cluster chip button (deduped gmailctl.addFilter + 2 gmail.archive calls)
+  await unsubRegion.getByRole('button', { name: 'Create gmailctl filter for Deals Bot', exact: true }).click();
+  await persisted(page);
+  expect(native.requests.filter(req => req.op === 'gmailctl.addFilter')).toHaveLength(1);
+  expect(native.requests.find(req => req.op === 'gmailctl.addFilter')?.input).toMatchObject({
+    from: 'deals@promo.example.com',
+    archive: true,
+    markRead: true,
+  });
+  expect(
+    native.requests.filter(req => req.op === 'gmail.archive').map(req => req.input.threadId),
+  ).toEqual(['t-promo-1', 't-promo-2']);
+
+  // Archive visible Safe to archive group (only gmail-receipt-1, not the filtered-out gmail-receipt-hidden)
+  await archiveRegion.getByRole('button', { name: 'Archive all (1)', exact: true }).click();
+  await persisted(page);
+  expect(
+    native.requests.filter(req => req.op === 'gmail.archive').map(req => req.input.threadId),
+  ).toEqual(['t-promo-1', 't-promo-2', 't-receipt-1']);
+  expect(native.state.tasks.find(task => task.id === 'gmail-receipt-hidden')?.status).toBe('open');
 });

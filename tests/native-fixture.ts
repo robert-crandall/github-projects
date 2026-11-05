@@ -314,6 +314,28 @@ export class NativeMock {
           status: 'confirmed', confirmedAt: this.now };
         break;
       }
+      case 'gmail.archive':
+        if (this.holdWrite) await this.holdWrite.promise;
+        if (this.failWrite) throw new ExpectedFailure('Gmail write unavailable.');
+        result = {
+          operationId: request.input.operationId,
+          threadId: request.input.threadId,
+          archived: request.input.archive ?? true,
+          markedRead: request.input.markRead ?? true,
+          completedAt: this.now,
+        };
+        break;
+      case 'gmailctl.addFilter':
+        if (this.holdWrite) await this.holdWrite.promise;
+        if (this.failWrite) throw new ExpectedFailure('gmailctl write unavailable.');
+        result = {
+          operationId: request.input.operationId,
+          configPath: '/tmp/config.jsonnet',
+          ruleSnippet: '{ filter: {}, actions: { archive: true, markRead: true } }',
+          applied: Boolean(request.input.apply),
+          completedAt: this.now,
+        };
+        break;
       default:
         throw new Error(`Unexpected service/model request ${request.op}`);
     }

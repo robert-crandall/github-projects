@@ -92,6 +92,27 @@ describe('classifyTaskActionGroup', () => {
       groupId: 'needs-action',
       badge: 'Needs action',
     });
+
+    const subjectReplyReceipt = gmailTask('reply-receipt-1', {
+      from: 'Alex <alex@company.com>',
+      senderEmail: 'alex@company.com',
+      subject: 'Can you send me your order receipt?',
+      snippet: 'Please reply with a copy for expense reporting.',
+    });
+    const snippetReplyReceipt = gmailTask('reply-receipt-2', {
+      from: 'Finance <finance@company.com>',
+      senderEmail: 'finance@company.com',
+      subject: 'Your order receipt #402',
+      snippet: 'Please reply with a copy once signed.',
+    });
+    expect(classifyTaskActionGroup(subjectReplyReceipt)).toMatchObject({
+      groupId: 'needs-action',
+      badge: 'Needs action',
+    });
+    expect(classifyTaskActionGroup(snippetReplyReceipt)).toMatchObject({
+      groupId: 'needs-action',
+      badge: 'Needs action',
+    });
   });
 
   test('routes newsletters and promotional emails with unsubscribeUrl or listId to unsubscribe-filter', () => {

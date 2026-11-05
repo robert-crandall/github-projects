@@ -92,6 +92,9 @@ const BADGE_BY_GROUP: Record<ActionGroupId, string> = {
 const URGENT_EMAIL_PATTERN =
   /\b(down\s*\||action required\b|urgent\b|payment failed\b|past due\b|declined\b|fraud alert\b|unexpected charge\b|unusual activity\b|security alert:\s*unusual\b|immediate attention\b)/i;
 
+const DIRECT_REQUEST_EMAIL_PATTERN =
+  /\b(please\s+reply\b|(?<!not\s)(?<!no[- ])reply\s+(?:with|to\s+this|to\s+confirm|by|if|asap)\b|can\s+you\b|could\s+you\b|would\s+you\b|please\s+(?:send|confirm|provide|share|review|complete|sign|approve)\b|send\s+me\b|let\s+me\s+know\b|need\s+your\b|awaiting\s+your\b|respond\s+by\b)/i;
+
 const SHIPPING_EMAIL_PATTERN =
   /\b(pre-arrival|driver is arriving|out for delivery|scheduled for delivery|package\b.*\bdelivered|your package|shipment|tracking number|has shipped|order shipped|ups update|ups my choice|fedex|usps|dhl)\b/i;
 
@@ -222,6 +225,18 @@ export function classifyTaskActionGroup(
       return withBadge(
         'needs-action',
         sender.label ? `Attention required · ${sender.label}` : 'Attention required',
+        senderExtra,
+      );
+    }
+
+    if (
+      action === 'reply' ||
+      DIRECT_REQUEST_EMAIL_PATTERN.test(subject) ||
+      DIRECT_REQUEST_EMAIL_PATTERN.test(snippet)
+    ) {
+      return withBadge(
+        'needs-action',
+        sender.label ? `Reply requested · ${sender.label}` : 'Reply requested',
         senderExtra,
       );
     }
