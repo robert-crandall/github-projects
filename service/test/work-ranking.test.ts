@@ -36,7 +36,7 @@ function input(): WorkRankInput {
   };
 }
 type ModelInput = AssessmentInput | OrderInput;
-type Call = { phase: 'assess' | 'order'; input: ModelInput; config: SessionConfig };
+type Call = { phase: 'assess' | 'order'; input: ModelInput; config: SessionConfig; prompt: string };
 function assessment(id: string, time: string) {
   return {
     ...unknownRatings,
@@ -77,7 +77,7 @@ async function fixture(run: (h: {
             sendAndWait: async message => {
               if (message.prompt.startsWith('{')) data = JSON.parse(message.prompt).input;
               const phase = (config.systemMessage as { content: string }).content.startsWith('Assess') ? 'assess' : 'order';
-              const call: Call = { phase, input: data, config };
+              const call: Call = { phase, input: data, config, prompt: message.prompt };
               calls.push(call);
               const result = phase === 'assess'
                 ? { assessments: data.tasks.map(task => assessment(task.id, data.evaluatedAt)) }
@@ -606,6 +606,25 @@ describe('durable independent assessments and comparative ordering', () => {
       await rankWithAssessments(h.sdk, data, signal());
       await rankWithAssessments(h.restart(), data, signal());
       expect(h.calls).toHaveLength(2);
+    });
+  });
+  test('cross-task evidence reference retry names the offending task and allowed references so the second attempt recovers', async () => {
+    await fixture(async h => {
+      const data = input();
+      data.tasks[0]!.availability = 'actionable';
+      let attempt = 0;
+      h.respond((call, result) => {
+        if (call.phase !== 'assess') return result;
+        attempt++;
+        const values = call.input.tasks.map(task => assessment(task.id, call.input.evaluatedAt));
+        if (attempt === 1) values[0]!.supportingEvidence[0]!.reference = 'event-b';
+        return { assessments: values };
+      });
+      const result = await h.sdk.assessWork(data, signal());
+      expect(h.calls).toHaveLength(2);
+      expect(h.calls[1]!.prompt).toContain('Task T1 cited invalid supportingEvidence reference "event-b"');
+      expect(h.calls[1]!.prompt).toContain('allowed references for T1 are only ["$title","$createdAt","$availability","event-a","$notes","$source"]');
+      expect(result.assessments.map(item => item.id)).toEqual(['a', 'b']);
     });
   });
 });

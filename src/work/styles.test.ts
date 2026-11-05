@@ -8,7 +8,7 @@ import { emptyWorkspace, restoreDesktop } from '../domain/live.ts';
 import { AssessmentHistory } from './AssessmentHistory.tsx';
 import { consolidateWorkTasks, rankInput, rankedTasks, reconcileWork } from './engine.ts';
 import { createWorkProfile, switchWorkProfile } from './profiles.ts';
-import { matchesStyles, taskStyles } from './styles.ts';
+import { hasEvaluatedWorkStyles, matchesStyles, taskStyles } from './styles.ts';
 
 const at = '2026-09-27T12:00:00.000Z';
 const styles = [
@@ -80,6 +80,14 @@ test('definitions change assessor identity and reject ambiguous or invalid model
   for (const ids of [['invented'], ['quick', 'quick']]) {
     expect(savedAssessmentSchema.safeParse({ ...assessment, assessment: { ...assessment.assessment, workStyleIds: ids } }).success).toBe(false);
   }
+  expect(hasEvaluatedWorkStyles(undefined, styles)).toBe(false);
+  expect(hasEvaluatedWorkStyles(undefined, [])).toBe(false);
+  expect(hasEvaluatedWorkStyles(assessment, [])).toBe(true);
+  expect(hasEvaluatedWorkStyles(assessment, styles)).toBe(true);
+  expect(hasEvaluatedWorkStyles(assessment, [styles[0]!])).toBe(true);
+  expect(hasEvaluatedWorkStyles(assessment, [...styles, { id: 'new', name: 'New', description: 'Added later' }])).toBe(false);
+  expect(hasEvaluatedWorkStyles(assessment, [{ ...styles[0]!, description: 'Edited description' }])).toBe(false);
+  expect(hasEvaluatedWorkStyles(assessment, [{ ...styles[0]!, description: 'Edited description' }], ['quick'])).toBe(true);
 });
 
 test('v3 history stays readable without invented styles; v4 retains original style names', async () => {

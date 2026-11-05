@@ -47,10 +47,20 @@ export function validateAssessment(value: Assessment, task: SemanticRankTask, ev
     '$title', '$createdAt', '$availability', ...task.evidence.map(event => event.id),
     ...(task.notes ? ['$notes'] : []), ...(task.context ? ['$source'] : []),
   ]);
+  const badReference = value.supportingEvidence.find(item => !references.has(item.reference))?.reference;
+  if (badReference) {
+    throw new ServiceError('copilot_output', false, 'general',
+      `Task ${task.id} cited invalid supportingEvidence reference ${JSON.stringify(badReference)}; allowed references for ${task.id} are only ${JSON.stringify([...references])}.`);
+  }
   if (value.workStyleIds.some(id => !styles.some(style => style.id === id))
-    || new Set(value.workStyleIds).size !== value.workStyleIds.length
-    || value.supportingEvidence.some(item => !references.has(item.reference))
-    || task.availability === 'unknown' && !value.uncertainty.trim()) throw new ServiceError('copilot_output');
+    || new Set(value.workStyleIds).size !== value.workStyleIds.length) {
+    throw new ServiceError('copilot_output', false, 'general',
+      `Task ${task.id} returned invalid or duplicate workStyleIds; allowed style IDs are ${JSON.stringify(styles.map(style => style.id))}.`);
+  }
+  if (task.availability === 'unknown' && !value.uncertainty.trim()) {
+    throw new ServiceError('copilot_output', false, 'general',
+      `Task ${task.id} has availability "unknown" and requires non-empty uncertainty.`);
+  }
 }
 
 /** No raw task bodies or credentials: only bounded derived assessments and one order per scope. */

@@ -10,6 +10,16 @@ export function taskStyles(task: Task, styles: WorkStyle[], assessment?: SavedAs
   return styles.filter(style => ids.includes(style.id));
 }
 
+export function hasEvaluatedWorkStyles(
+  assessment: SavedAssessment | undefined, styles: WorkStyle[] = [], override?: string[],
+): boolean {
+  if (!assessment) return false;
+  if (!styles.length || override !== undefined) return true;
+  const evaluated = assessment.assessmentVersion === 'work-assessment-v4' ? assessment.workStyles : [];
+  return styles.every(style => evaluated.some(saved =>
+    saved.id === style.id && saved.name === style.name && saved.description === style.description));
+}
+
 export function matchesStyles(task: Task, styles: WorkStyle[], selected: string[] | null, assessment?: SavedAssessment): boolean {
   return selected === null || taskStyles(task, styles, assessment).some(style => selected.includes(style.id));
 }
